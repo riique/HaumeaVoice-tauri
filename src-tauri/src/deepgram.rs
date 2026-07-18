@@ -442,14 +442,30 @@ pub async fn transcribe(
     api_key: &str,
     mode: DeepgramMode,
 ) -> Result<String, String> {
+    transcribe_with_keyterms(audio_bytes, content_type, api_key, mode, &[]).await
+}
+
+/// Like [`transcribe`] with extra vocabulary keyterms (batch REST primarily).
+pub async fn transcribe_with_keyterms(
+    audio_bytes: Vec<u8>,
+    content_type: &str,
+    api_key: &str,
+    mode: DeepgramMode,
+    extra_keyterms: &[String],
+) -> Result<String, String> {
     if api_key.trim().is_empty() {
         return Err("deepgram api key is missing or empty".to_string());
     }
 
     match mode {
         DeepgramMode::Batch => {
-            log::info!("deepgram: mode=batch, bytes={}", audio_bytes.len());
-            call_deepgram_api(audio_bytes, content_type, api_key).await
+            log::info!(
+                "deepgram: mode=batch, bytes={}, extra_keyterms={}",
+                audio_bytes.len(),
+                extra_keyterms.len()
+            );
+            call_deepgram_api_with_keyterms(audio_bytes, content_type, api_key, extra_keyterms)
+                .await
         }
         DeepgramMode::StreamingFinal => {
             log::info!(
@@ -457,6 +473,7 @@ pub async fn transcribe(
                 audio_bytes.len(),
                 content_type
             );
+            // Streaming URL keeps product keyterm; extras applied on batch fallback.
             call_deepgram_streaming_final(audio_bytes, content_type, api_key).await
         }
     }
@@ -466,20 +483,40 @@ pub async fn transcribe(
 
 /// Assembles the fully-qualified Deepgram batch request URL with the
 /// latência-previsível profile (pt-BR fixed, no smart_format / measurements).
-fn build_batch_request_url() -> String {
-    let keyterm = format!("keyterm={}", KEYTERM);
-    // language=pt-BR (not detect_language): primary product language is known.
-    // punctuate+numerals instead of smart_format (sanitizer does final normalize).
-    // measurements is English-only — omit for pt-BR.
-    let params: [&str; 6] = [
-        "model=nova-3",
-        "language=pt-BR",
-        "punctuate=true",
-        "numerals=true",
-        "paragraphs=false",
-        keyterm.as_str(),
+///
+/// `extra_keyterms` are optional user vocabulary canonicals (in addition to
+/// the built-in product keyterm "Haumea").
+fn build_batch_request_url(extra_keyterms: &[String]) -> String {
+    let mut params = vec![
+        "model=nova-3".to_string(),
+        "language=pt-BR".to_string(),
+        "punctuate=true".to_string(),
+        "numerals=true".to_string(),
+        "paragraphs=false".to_string(),
+        format!("keyterm={}", KEYTERM),
     ];
+    // Cap extras to keep the URL reasonable; Deepgram accepts repeated keyterm=.
+    for t in extra_keyterms.iter().take(20) {
+        let cleaned: String = t
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+            .collect();
+        if !cleaned.is_empty() && !cleaned.eq_ignore_ascii_case(KEYTERM) {
+            params.push(format!("keyterm={}", urlencoding_minimal(&cleaned)));
+        }
+    }
     format!("{}?{}", DEEPGRAM_BASE_URL, params.join("&"))
+}
+
+/// Minimal query escape (space → %20); avoids pulling a full urlencoding crate.
+fn urlencoding_minimal(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            ' ' => "%20".to_string(),
+            c if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') => c.to_string(),
+            c => format!("%{:02X}", c as u8),
+        })
+        .collect()
 }
 
 /// Sends the in-memory audio buffer to the Deepgram `nova-3` HTTP endpoint.
@@ -492,11 +529,21 @@ pub async fn call_deepgram_api(
     content_type: &str,
     api_key: &str,
 ) -> Result<String, String> {
+    call_deepgram_api_with_keyterms(audio_bytes, content_type, api_key, &[]).await
+}
+
+/// Like [`call_deepgram_api`] but injects extra vocabulary keyterms.
+pub async fn call_deepgram_api_with_keyterms(
+    audio_bytes: Vec<u8>,
+    content_type: &str,
+    api_key: &str,
+    extra_keyterms: &[String],
+) -> Result<String, String> {
     if api_key.trim().is_empty() {
         return Err("deepgram api key is missing or empty".to_string());
     }
 
-    let url = build_batch_request_url();
+    let url = build_batch_request_url(extra_keyterms);
     let client = http_client()?;
 
     let response = client
@@ -641,14 +688,17 @@ fn is_retryable_stream_error(err: &str) -> bool {
 
 /// Single streaming attempt with a hard session deadline.
 async fn streaming_session_once(pcm: &[u8], api_key: &str) -> Result<String, String> {
-    tokio::time::timeout(STREAMING_SESSION_TIMEOUT, streaming_session_inner(pcm, api_key))
-        .await
-        .map_err(|_| {
-            format!(
-                "deepgram streaming session timed out after {}s",
-                STREAMING_SESSION_TIMEOUT.as_secs()
-            )
-        })?
+    tokio::time::timeout(
+        STREAMING_SESSION_TIMEOUT,
+        streaming_session_inner(pcm, api_key),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "deepgram streaming session timed out after {}s",
+            STREAMING_SESSION_TIMEOUT.as_secs()
+        )
+    })?
 }
 
 async fn streaming_session_inner(pcm: &[u8], api_key: &str) -> Result<String, String> {
@@ -756,8 +806,9 @@ async fn streaming_session_inner(pcm: &[u8], api_key: &str) -> Result<String, St
     let _ = write.close().await;
 
     let (segments, _saw_metadata, server_error) = match drain {
-        Ok(join_res) => join_res
-            .map_err(|e| format!("deepgram streaming: collector task failed: {}", e))?,
+        Ok(join_res) => {
+            join_res.map_err(|e| format!("deepgram streaming: collector task failed: {}", e))?
+        }
         Err(_) => {
             return Err(format!(
                 "deepgram streaming: timed out waiting for final results ({}ms)",
@@ -792,10 +843,7 @@ enum StreamingEvent {
 
 /// Parses one WebSocket text frame. Appends non-empty final transcripts to
 /// `segments`. Application-level errors become `Err`.
-fn handle_streaming_text(
-    text: &str,
-    segments: &mut Vec<String>,
-) -> Result<StreamingEvent, String> {
+fn handle_streaming_text(text: &str, segments: &mut Vec<String>) -> Result<StreamingEvent, String> {
     let msg: StreamingMessage = serde_json::from_str(text).map_err(|e| {
         format!(
             "failed to parse streaming message: {} (payload starts with {:?})",

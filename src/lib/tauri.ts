@@ -19,6 +19,13 @@ export type SanitizerModel =
 /** Deepgram transport: REST batch vs WebSocket streaming (final only). */
 export type DeepgramMode = "batch" | "streaming_final";
 
+/** Product transcription modes (Phase 04+). */
+export type TranscriptionMode =
+  | "ultra-fast"
+  | "fast-accurate"
+  | "precise"
+  | "ultra-precise";
+
 export interface EngineConfigPayload {
   engine: TranscriptionEngine;
   sanitizer: SanitizerModel;
@@ -35,6 +42,38 @@ export interface EngineConfigSnapshot {
   reasoning_enabled: boolean;
   reasoning_effort: string;
   deepgram_mode: DeepgramMode;
+}
+
+export type ContentType =
+  | "auto"
+  | "programming"
+  | "general-speech"
+  | "study";
+
+export interface ModeConfigPayload {
+  modes_enabled: boolean;
+  mode: TranscriptionMode;
+  gemini_fallback_to_whisper: boolean;
+  content_type: ContentType;
+}
+
+export interface ModeConfigSnapshot {
+  modes_enabled: boolean;
+  mode: TranscriptionMode;
+  gemini_fallback_to_whisper: boolean;
+  content_type: ContentType;
+  mode_label: string;
+  mode_description: string;
+}
+
+export async function getModeConfig(): Promise<ModeConfigSnapshot> {
+  return invoke<ModeConfigSnapshot>("get_mode_config");
+}
+
+export async function updateModeConfig(
+  payload: ModeConfigPayload,
+): Promise<ModeConfigSnapshot> {
+  return invoke<ModeConfigSnapshot>("update_mode_config", { payload });
 }
 
 export interface ApiKeysPayload {
@@ -165,6 +204,29 @@ export interface HistoryEntry {
   is_error?: boolean | null;
   error_message?: string | null;
   debug_info?: SanitizerDebug | null;
+  mode?: string | null;
+  model?: string | null;
+  stages?: string | null;
+  used_fallback?: boolean | null;
+  fallback_reason?: string | null;
+  content_type?: string | null;
+  whisper_text?: string | null;
+  sanitizer_text?: string | null;
+  gemini_text?: string | null;
+  warnings?: string[] | null;
+  audio_prepare_ms?: number | null;
+  base64_ms?: number | null;
+  whisper_ms?: number | null;
+  sanitizer_ms?: number | null;
+  files_upload_ms?: number | null;
+  files_poll_ms?: number | null;
+  files_poll_count?: number | null;
+  gemini_generate_ms?: number | null;
+  gemini_delete_ms?: number | null;
+  strict_literals_ms?: number | null;
+  clipboard_ms?: number | null;
+  total_pipeline_ms?: number | null;
+  gemini_transport?: string | null;
 }
 
 /** Returns the full persisted transcription history, newest first. */
@@ -172,21 +234,45 @@ export async function getHistory(): Promise<HistoryEntry[]> {
   return invoke<HistoryEntry[]>("get_history");
 }
 
-/**
- * Returns the user's custom vocabulary (canonical spellings) used by the
- * semantic validator to fix phonetically/orthographically similar words.
- */
+/** Structured vocabulary category (Phase 06). */
+export type VocabularyCategory =
+  | "ai_model"
+  | "provider"
+  | "application"
+  | "person"
+  | "file"
+  | "command"
+  | "function"
+  | "identifier"
+  | "study_term"
+  | "other";
+
+export interface VocabularyTerm {
+  canonical: string;
+  aliases: string[];
+  category: VocabularyCategory;
+  strict: boolean;
+  enabled: boolean;
+}
+
+/** Legacy: enabled canonical spellings only. */
 export async function getCustomWords(): Promise<string[]> {
   return invoke<string[]>("get_custom_words");
 }
 
-/**
- * Replaces the custom vocabulary. The backend trims, drops blanks and removes
- * case-insensitive duplicates, then resolves with the normalised list so the
- * UI can re-sync with the canonical result.
- */
+/** Legacy: replace vocabulary with simple words. */
 export async function setCustomWords(words: string[]): Promise<string[]> {
   return invoke<string[]>("set_custom_words", { words });
+}
+
+export async function getVocabulary(): Promise<VocabularyTerm[]> {
+  return invoke<VocabularyTerm[]>("get_vocabulary");
+}
+
+export async function setVocabulary(
+  terms: VocabularyTerm[],
+): Promise<VocabularyTerm[]> {
+  return invoke<VocabularyTerm[]>("set_vocabulary", { terms });
 }
 
 /** Returns the persisted developer-mode flag. */

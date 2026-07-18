@@ -7,9 +7,13 @@ pub mod groq;
 pub mod history;
 pub mod mic_control;
 pub mod models;
+pub mod pipeline_contract;
+pub mod sanitizer_json;
 pub mod secrets;
 pub mod settings;
 pub mod shortcuts;
+pub mod transcription;
+pub mod vocabulary;
 
 use models::SharedState;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU64, Ordering};
@@ -994,7 +998,12 @@ pub fn run() {
                         *state.deepgram_mode.write() = settings::load_deepgram_mode();
                         *state.sanitizer_enabled.write() = settings::load_sanitizer_enabled();
                         *state.reasoning_effort.write() = settings::load_reasoning_effort();
-                        *state.custom_words.write() = settings::load_custom_words();
+                        *state.vocabulary.write() = settings::load_vocabulary();
+                        *state.modes_enabled.write() = settings::load_modes_enabled();
+                        *state.transcription_mode.write() = settings::load_transcription_mode();
+                        *state.gemini_fallback_to_whisper.write() =
+                            settings::load_gemini_fallback_to_whisper();
+                        *state.content_type.write() = settings::load_content_type();
                     }
                     Err(e) => {
                         log::warn!("history: could not resolve app data dir: {}", e);
@@ -1046,6 +1055,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::update_engine_config,
             commands::get_engine_config,
+            commands::get_mode_config,
+            commands::update_mode_config,
             commands::save_api_keys,
             commands::get_api_keys,
             commands::transcribe_file,
@@ -1055,10 +1066,14 @@ pub fn run() {
             commands::get_recording_elapsed,
             commands::get_history,
             commands::clear_history,
+            commands::delete_history_entry,
+            commands::update_history_text,
             commands::save_system_prompt,
             commands::get_system_prompt,
             commands::get_custom_words,
             commands::set_custom_words,
+            commands::get_vocabulary,
+            commands::set_vocabulary,
             commands::get_compact_mode,
             commands::set_compact_mode,
             commands::set_gadget_hit_rect,

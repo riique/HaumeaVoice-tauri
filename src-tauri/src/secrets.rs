@@ -8,8 +8,9 @@
 //!
 //! Note: the file is stored under the user's protected AppData directory but
 //! the keys themselves are written in plain text (no OS-keychain encryption).
-//! This mirrors how `history.json` is handled and is appropriate for a local
-//! single-user desktop app.
+//! Windows Credential Manager would be preferable long-term; it was not swapped
+//! in during the transcription migration to avoid breaking existing installs
+//! mid-rollout. Documented as residual risk in the final migration report.
 
 use crate::models::ApiKeys;
 use parking_lot::Mutex;

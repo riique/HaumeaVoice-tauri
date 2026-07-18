@@ -53,12 +53,33 @@ struct Settings {
     sanitizer_enabled: bool,
     #[serde(default = "default_reasoning_effort_settings")]
     reasoning_effort: String,
+    /// Legacy flat word list (pre Phase 06). Migrated into `vocabulary` on load.
     #[serde(default)]
     custom_words: Vec<String>,
+    /// Structured vocabulary terms.
+    #[serde(default)]
+    vocabulary: Vec<crate::vocabulary::VocabularyTerm>,
     /// When `true`, the Histórico exposes a per-entry "Ver Request" panel with
     /// the exact sanitizer request, parameters and reasoning that were used.
     #[serde(default)]
     dev_mode: bool,
+    /// When `true`, use product modes (UltraFast / FastAccurate) instead of
+    /// the legacy engine+dual path. Defaults to `false` so existing installs
+    /// keep their previous behaviour until the user opts in.
+    #[serde(default)]
+    modes_enabled: bool,
+    /// Selected product mode. Absent on old installs → derived at load time.
+    #[serde(default)]
+    transcription_mode: Option<crate::pipeline_contract::TranscriptionMode>,
+    /// FastAccurate: fall back to Whisper when Gemini fails. Default true.
+    #[serde(default = "default_gemini_fallback")]
+    gemini_fallback_to_whisper: bool,
+    #[serde(default)]
+    content_type: crate::pipeline_contract::ContentType,
+}
+
+fn default_gemini_fallback() -> bool {
+    true
 }
 
 fn default_reasoning_effort_settings() -> String {
@@ -106,10 +127,17 @@ Exemplos: "chat gpt"/"chatgipiti" → ChatGPT; "clod opus"/"cláudio opus" → C
 - REMOVA o "e aí" no fim da frase quando não fizer sentido lógico com o contexto (artefato/vício).
 
 ═══ 8. GATILHO DE FALLBACK (SEGURANÇA) ═══
-- Responda EXATAMENTE com a tag [FALLBACK_RETRY] se e somente se ambas as entradas forem ruído caótico, estática ou lixo acústico sem nexo gramatical. Texto cotidiano ou técnico legível NUNCA sofre fallback.
+- Responda EXATAMENTE com a tag [FALLBACK_RETRY] (texto puro, sem JSON) se e somente se ambas as entradas forem ruído caótico, estática ou lixo acústico sem nexo gramatical. Texto cotidiano ou técnico legível NUNCA sofre fallback.
 
-═══ SAÍDA ═══
-Não inclua introduções, aspas, notas ou comentários. Devolva APENAS o texto final purificado ou o sentinela de fallback."#;
+═══ SAÍDA OBRIGATÓRIA (JSON ESTRITO) ═══
+Responda SOMENTE com um objeto JSON válido, sem markdown, sem fences, sem texto antes ou depois:
+{"text":"<texto final purificado>","changed":true|false,"warnings":[]}
+Regras do JSON:
+- "text": string com o texto final APENAS (nunca glossário, cabeçalhos, explicações ou JSON aninhado).
+- "changed": true se alterou algo material em relação às entradas; false caso contrário.
+- "warnings": array de strings curtas (pode ser vazio).
+PROIBIDO: prosa solta, listas de glossário, títulos ##, blocos ```, comentários fora do JSON.
+Se usar [FALLBACK_RETRY], envie só essa tag como texto puro (sem JSON)."#;
 
 /// Called once during setup with the resolved `settings.json` path.
 pub fn init(file: PathBuf) {
@@ -183,7 +211,7 @@ pub fn save_input_device(device: Option<String>) {
 /// stored by an older build. Bump this whenever the default prompt changes in
 /// a way that should be force-pushed to existing installs — the prompt is not
 /// user-editable in the UI, so an automatic reset is safe.
-const SYSTEM_PROMPT_VERSION_MARKER: &str = "Sempre substitua \"HowMeia\" por \"Haumea\"";
+const SYSTEM_PROMPT_VERSION_MARKER: &str = "SAÍDA OBRIGATÓRIA (JSON ESTRITO)";
 
 /// Returns the persisted system-prompt selection (falls back to DEFAULT_SYSTEM_PROMPT).
 ///
@@ -204,16 +232,50 @@ pub fn load_system_prompt() -> String {
     }
 }
 
-/// Returns the persisted custom vocabulary (canonical spellings). Empty by default.
-pub fn load_custom_words() -> Vec<String> {
-    read().custom_words
+/// Loads structured vocabulary, migrating legacy `custom_words` if needed.
+pub fn load_vocabulary() -> Vec<crate::vocabulary::VocabularyTerm> {
+    let s = read();
+    let base = if !s.vocabulary.is_empty() {
+        s.vocabulary
+    } else if s.custom_words.is_empty() {
+        Vec::new()
+    } else {
+        // One-shot migration: convert flat list and persist structured form.
+        let migrated = crate::vocabulary::migrate_from_strings(&s.custom_words);
+        log::info!(
+            "settings: migrated {} legacy custom_words → structured vocabulary",
+            migrated.len()
+        );
+        migrated
+    };
+    let merged = crate::vocabulary::ensure_default_product_terms(base);
+    // Persist merge so Haumea Voice defaults stick across restarts.
+    let mut s2 = read();
+    if s2.vocabulary != merged {
+        s2.vocabulary = merged.clone();
+        s2.custom_words = crate::vocabulary::canonical_list(&merged);
+        write(&s2);
+    }
+    merged
 }
 
-/// Persists the custom vocabulary, preserving any other settings.
-pub fn save_custom_words(words: Vec<String>) {
+/// Persists structured vocabulary and mirrors enabled canonicals into legacy field.
+pub fn save_vocabulary(terms: Vec<crate::vocabulary::VocabularyTerm>) {
     let mut s = read();
-    s.custom_words = words;
+    s.custom_words = crate::vocabulary::canonical_list(&terms);
+    s.vocabulary = terms;
     write(&s);
+}
+
+/// Legacy helper: canonical strings only (enabled terms).
+pub fn load_custom_words() -> Vec<String> {
+    crate::vocabulary::canonical_list(&load_vocabulary())
+}
+
+/// Legacy helper: replace vocabulary with simple words (other fields defaulted).
+pub fn save_custom_words(words: Vec<String>) {
+    let terms = crate::vocabulary::migrate_from_strings(&words);
+    save_vocabulary(terms);
 }
 
 /// Persists the system-prompt selection, preserving any other settings.
@@ -385,4 +447,63 @@ pub fn save_dev_mode(value: bool) {
     let mut s = read();
     s.dev_mode = value;
     write(&s);
+}
+
+/// Whether product modes are active (vs legacy engine path).
+pub fn load_modes_enabled() -> bool {
+    read().modes_enabled
+}
+
+pub fn save_modes_enabled(value: bool) {
+    let mut s = read();
+    s.modes_enabled = value;
+    write(&s);
+}
+
+/// Loads the product transcription mode. If unset, derives from legacy engine/dual
+/// without overwriting the user's engine preferences.
+pub fn load_transcription_mode() -> crate::pipeline_contract::TranscriptionMode {
+    let s = read();
+    if let Some(m) = s.transcription_mode {
+        return m;
+    }
+    crate::pipeline_contract::TranscriptionMode::from_legacy(
+        s.engine.unwrap_or_default(),
+        s.dual_engine,
+    )
+}
+
+pub fn save_transcription_mode(mode: crate::pipeline_contract::TranscriptionMode) {
+    let mut s = read();
+    s.transcription_mode = Some(mode);
+    write(&s);
+}
+
+pub fn load_gemini_fallback_to_whisper() -> bool {
+    read().gemini_fallback_to_whisper
+}
+
+pub fn save_gemini_fallback_to_whisper(value: bool) {
+    let mut s = read();
+    s.gemini_fallback_to_whisper = value;
+    write(&s);
+}
+
+/// Atomic save of mode preferences.
+pub fn save_mode_config_batch(
+    modes_enabled: bool,
+    mode: crate::pipeline_contract::TranscriptionMode,
+    gemini_fallback_to_whisper: bool,
+    content_type: crate::pipeline_contract::ContentType,
+) {
+    let mut s = read();
+    s.modes_enabled = modes_enabled;
+    s.transcription_mode = Some(mode);
+    s.gemini_fallback_to_whisper = gemini_fallback_to_whisper;
+    s.content_type = content_type;
+    write(&s);
+}
+
+pub fn load_content_type() -> crate::pipeline_contract::ContentType {
+    read().content_type
 }

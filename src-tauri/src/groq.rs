@@ -134,11 +134,15 @@ struct ChatMessage {
     content: String,
 }
 
+/// Soft cap on sanitizer completion tokens (keeps latency bounded).
+const SANITIZER_MAX_TOKENS: u32 = 2048;
+
 /// Request body for the Chat Completions call.
 #[derive(Debug, Serialize)]
 struct ChatCompletionsRequest {
     model: String,
     temperature: f32,
+    max_tokens: u32,
     messages: Vec<ChatMessage>,
     /// Native Groq reasoning control. Only set for models that support it
     /// (the GPT-OSS family); skipped otherwise so the API does not reject it.
@@ -194,8 +198,15 @@ fn truncate_chars(s: &str, max: usize) -> String {
 /// produced (even on failure) so the Histórico can surface the request and the
 /// error when developer mode is on.
 pub struct SanitizerOutcome {
+    /// Final plain text only (never raw JSON).
     pub result: Result<String, GroqNetworkError>,
     pub debug: crate::models::SanitizerDebug,
+    /// True when structured JSON said the text was modified.
+    pub changed: bool,
+    /// Warnings from the model or from our parser/fallback path.
+    pub warnings: Vec<String>,
+    /// True when we discarded model output and will use acoustic raw.
+    pub used_raw_fallback: bool,
 }
 
 /// Calls the Groq Chat Completions endpoint with `temperature = 0.0`
@@ -212,7 +223,8 @@ pub async fn call_sanitizer_api(
     deepgram_text: &str,
     model: &str,
     system_prompt: &str,
-    custom_words: &[String],
+    // Pre-formatted glossary lines (may be empty). Prefer structured vocabulary.
+    glossary_block: &str,
     api_key: &str,
     reasoning_enabled: bool,
     reasoning_effort: &str,
@@ -224,15 +236,16 @@ pub async fn call_sanitizer_api(
     // native `reasoning_effort` request parameter rather than a prompt note.
     let mut final_system_prompt = system_prompt.to_string();
 
-    if !custom_words.is_empty() {
-        let list = custom_words
-            .iter()
-            .map(|w| format!("- {}", w))
-            .collect::<Vec<_>>()
-            .join("\n");
+    if !glossary_block.trim().is_empty() {
         final_system_prompt.push_str(&format!(
-            "\n\n--- GLOSSÁRIO PESSOAL DO USUÁRIO (PRIORIDADE ALTA) ---\nAs palavras a seguir foram cadastradas manualmente pelo usuário e estão SEMPRE grafadas corretamente. Quando um termo transcrito for claramente uma corrupção fonética/ortográfica de uma destas palavras e o contexto encaixar, substitua pela grafia exata abaixo. Seja conservador: na dúvida, mantenha o original e NÃO force estas palavras onde não pertencem.\n{}",
-            list
+            "\n\n--- GLOSSÁRIO PESSOAL DO USUÁRIO (PRIORIDADE ALTA) ---\n\
+As entradas abaixo foram cadastradas pelo usuário. Cada linha traz o canônico, \
+categoria, aliases opcionais e [LITERAL] quando o termo é rígido.\n\
+Quando um trecho transcrito for claramente uma corrupção de um canônico/alias e o \
+contexto encaixar, use a grafia canônica. Termos [LITERAL] têm prioridade máxima: \
+nunca altere a grafia canônica e prefira-a a qualquer variante. Seja conservador: \
+na dúvida, mantenha o original e NÃO force termos onde não pertencem.\n{}",
+            glossary_block.trim()
         ));
     }
 
@@ -249,6 +262,7 @@ pub async fn call_sanitizer_api(
     let body = ChatCompletionsRequest {
         model: model.to_string(),
         temperature: 0.0,
+        max_tokens: SANITIZER_MAX_TOKENS,
         messages: vec![
             ChatMessage {
                 role: "system",
@@ -259,6 +273,7 @@ pub async fn call_sanitizer_api(
                 content: user_message_content.clone(),
             },
         ],
+        // Reasoning stays off unless the user explicitly enables it (default: off).
         reasoning_effort: apply_reasoning.then(|| reasoning_effort.to_string()),
         include_reasoning: apply_reasoning.then_some(true),
     };
@@ -279,22 +294,24 @@ pub async fn call_sanitizer_api(
         ..Default::default()
     };
 
+    let fail = |debug: crate::models::SanitizerDebug, err: GroqNetworkError| SanitizerOutcome {
+        result: Err(err),
+        debug,
+        changed: false,
+        warnings: Vec::new(),
+        used_raw_fallback: false,
+    };
+
     if api_key.trim().is_empty() {
         debug.error = Some("api key is missing or empty".to_string());
-        return SanitizerOutcome {
-            result: Err(GroqNetworkError::MissingApiKey),
-            debug,
-        };
+        return fail(debug, GroqNetworkError::MissingApiKey);
     }
 
     let client = match http_client() {
         Ok(c) => c,
         Err(e) => {
             debug.error = Some(e.to_string());
-            return SanitizerOutcome {
-                result: Err(e.into()),
-                debug,
-            };
+            return fail(debug, e.into());
         }
     };
 
@@ -308,10 +325,7 @@ pub async fn call_sanitizer_api(
         Ok(r) => r,
         Err(e) => {
             debug.error = Some(e.to_string());
-            return SanitizerOutcome {
-                result: Err(e.into()),
-                debug,
-            };
+            return fail(debug, e.into());
         }
     };
 
@@ -323,10 +337,7 @@ pub async fn call_sanitizer_api(
             Ok(p) => p,
             Err(e) => {
                 debug.error = Some(e.to_string());
-                return SanitizerOutcome {
-                    result: Err(e.into()),
-                    debug,
-                };
+                return fail(debug, e.into());
             }
         };
         let message = parsed.choices.into_iter().next().map(|c| c.message);
@@ -336,29 +347,56 @@ pub async fn call_sanitizer_api(
         match message.and_then(|m| m.content) {
             Some(content) => {
                 let trimmed = content.trim().to_string();
+                // Keep raw model payload for debug only — never surface as final text.
                 debug.response_content = Some(trimmed.clone());
-                SanitizerOutcome {
-                    result: Ok(trimmed),
-                    debug,
+
+                if trimmed == FALLBACK_RETRY_SENTINEL {
+                    return SanitizerOutcome {
+                        result: Ok(FALLBACK_RETRY_SENTINEL.to_string()),
+                        debug,
+                        changed: false,
+                        warnings: vec!["fallback_retry_sentinel".into()],
+                        used_raw_fallback: true,
+                    };
+                }
+
+                match crate::sanitizer_json::parse_sanitizer_content(&trimmed) {
+                    Ok(structured) => SanitizerOutcome {
+                        result: Ok(structured.text),
+                        debug,
+                        changed: structured.changed,
+                        warnings: structured.warnings,
+                        used_raw_fallback: false,
+                    },
+                    Err(parse_err) => {
+                        // Parsing failed: never surface JSON/prose as final text.
+                        // Empty Ok + used_raw_fallback lets the pipeline deliver acoustic raw.
+                        debug.error = Some(format!("sanitizer_json: {}", parse_err));
+                        log::warn!("sanitizer: structured parse failed: {}", parse_err);
+                        SanitizerOutcome {
+                            result: Ok(String::new()),
+                            debug,
+                            changed: false,
+                            warnings: vec![format!("sanitizer_parse_failed: {}", parse_err)],
+                            used_raw_fallback: true,
+                        }
+                    }
                 }
             }
             None => {
                 debug.error = Some("response did not contain a 'text' field".to_string());
-                SanitizerOutcome {
-                    result: Err(GroqNetworkError::MissingText),
-                    debug,
-                }
+                fail(debug, GroqNetworkError::MissingText)
             }
         }
     } else {
         let error_body = response.text().await.unwrap_or_default();
         debug.error = Some(error_body.clone());
-        SanitizerOutcome {
-            result: Err(GroqNetworkError::ApiError {
+        fail(
+            debug,
+            GroqNetworkError::ApiError {
                 status,
                 body: error_body,
-            }),
-            debug,
-        }
+            },
+        )
     }
 }

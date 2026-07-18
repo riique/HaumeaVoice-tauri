@@ -4,7 +4,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
-import { Select } from "../components/ui/Input";
 import { transcribeFile } from "../lib/tauri";
 
 type Status = "idle" | "transcribing" | "done" | "error";
@@ -128,29 +127,16 @@ export function TranscricaoView() {
         </div>
       </Card>
 
-      {/* Seletores em grid */}
-      <div className="grid grid-cols-2 gap-5">
-        <div className="space-y-2">
-          <label className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
-            <Cloud className="h-3.5 w-3.5" /> Modelo (Nuvem)
-          </label>
-          <Select defaultValue="ativo" disabled>
-            <option value="ativo">Usa o motor ativo (Ajustes › Motores)</option>
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <label className="text-xs font-medium uppercase tracking-wider text-zinc-500">
-            Idioma
-          </label>
-          <Select defaultValue="auto">
-            <option value="auto">Detectar Automaticamente</option>
-            <option value="pt-BR">Português (Brasil)</option>
-            <option value="en-US">Inglês (EUA)</option>
-            <option value="es-ES">Espanhol</option>
-          </Select>
-        </div>
-      </div>
+      <Card className="p-4 border-zinc-800/60">
+        <p className="text-xs text-zinc-500 leading-relaxed flex items-start gap-2">
+          <Cloud className="h-3.5 w-3.5 text-coral-400 shrink-0 mt-0.5" />
+          <span>
+            Usa a <strong className="text-zinc-400">pipeline ativa</strong> em
+            Configurações › Pipelines (não um seletor separado aqui). O idioma
+            segue o áudio e as regras do motor — sem seletor cosmético.
+          </span>
+        </p>
+      </Card>
 
       {/* Botão de ação */}
       <div className="flex items-center justify-end gap-3 pt-2">

@@ -162,6 +162,66 @@ pub fn clear() {
     let _ = fs::write(file, "[]");
 }
 
+/// Deletes one history entry by id. Also best-effort removes its audio file.
+pub fn delete_entry(id: &str) -> bool {
+    let _guard = lock().lock();
+    let Some(file) = path() else {
+        return false;
+    };
+    let mut entries: Vec<HistoryEntry> = match fs::read_to_string(file) {
+        Ok(contents) if !contents.trim().is_empty() => {
+            serde_json::from_str(&contents).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    let before = entries.len();
+    if let Some(pos) = entries.iter().position(|e| e.id == id) {
+        if let Some(p) = entries[pos].audio_path.take() {
+            let _ = fs::remove_file(p);
+        }
+        entries.remove(pos);
+    }
+    if entries.len() == before {
+        return false;
+    }
+    match serde_json::to_string_pretty(&entries) {
+        Ok(json) => fs::write(file, json).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Updates only the final text (and word count) of an entry — preserves evaluation.
+pub fn update_text(id: &str, text: &str) -> bool {
+    let _guard = lock().lock();
+    let Some(file) = path() else {
+        return false;
+    };
+    let mut entries: Vec<HistoryEntry> = match fs::read_to_string(file) {
+        Ok(contents) if !contents.trim().is_empty() => {
+            serde_json::from_str(&contents).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    let mut found = false;
+    for entry in entries.iter_mut() {
+        if entry.id == id {
+            entry.text = text.to_string();
+            entry.words = text.split_whitespace().count();
+            entry.is_error = Some(false);
+            entry.error_message = None;
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return false;
+    }
+    match serde_json::to_string_pretty(&entries) {
+        Ok(json) => fs::write(file, json).is_ok(),
+        Err(_) => false,
+    }
+}
+
 /// Updates an existing history entry with new details.
 pub fn update_entry(updated: HistoryEntry) -> bool {
     let _guard = lock().lock();

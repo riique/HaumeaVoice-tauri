@@ -1,7 +1,8 @@
 use crate::models::{
     ApiKeysPayload, DeepgramMode, EngineConfigPayload, SharedState, TranscriptionEngine,
 };
-use serde::Serialize;
+use crate::pipeline_contract::TranscriptionMode;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 /// Error type returned by every IPC command. Serializes to a plain
@@ -116,6 +117,96 @@ pub fn get_engine_config(state: State<'_, SharedState>) -> EngineConfigSnapshot 
         reasoning_effort: state.reasoning_effort.read().clone(),
         deepgram_mode: *state.deepgram_mode.read(),
     }
+}
+
+/// Product-mode configuration (Phase 04+). Independent from legacy engine cards
+/// so existing installs keep the dual/Deepgram path until modes are enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeConfigPayload {
+    pub modes_enabled: bool,
+    pub mode: TranscriptionMode,
+    #[serde(default = "default_true_fallback")]
+    pub gemini_fallback_to_whisper: bool,
+    #[serde(default)]
+    pub content_type: crate::pipeline_contract::ContentType,
+}
+
+fn default_true_fallback() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModeConfigSnapshot {
+    pub modes_enabled: bool,
+    pub mode: TranscriptionMode,
+    pub gemini_fallback_to_whisper: bool,
+    pub content_type: crate::pipeline_contract::ContentType,
+    /// Human labels for UI (copywriting).
+    pub mode_label: String,
+    pub mode_description: String,
+}
+
+fn mode_copy(mode: TranscriptionMode) -> (&'static str, &'static str) {
+    match mode {
+        TranscriptionMode::UltraFast => ("Ultrarrápido", "Menor latência com Whisper"),
+        TranscriptionMode::FastAccurate => ("Rápido e preciso", "Transcrição direta com Gemini"),
+        TranscriptionMode::Precise => ("Preciso", "Whisper e Gemini em paralelo"),
+        TranscriptionMode::UltraPrecise => {
+            ("Ultrapreciso", "Whisper, validador e Gemini em sequência")
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_mode_config(state: State<'_, SharedState>) -> ModeConfigSnapshot {
+    let mode = *state.transcription_mode.read();
+    let (label, desc) = mode_copy(mode);
+    ModeConfigSnapshot {
+        modes_enabled: *state.modes_enabled.read(),
+        mode,
+        gemini_fallback_to_whisper: *state.gemini_fallback_to_whisper.read(),
+        content_type: *state.content_type.read(),
+        mode_label: label.to_string(),
+        mode_description: desc.to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn update_mode_config(
+    state: State<'_, SharedState>,
+    payload: ModeConfigPayload,
+) -> Result<ModeConfigSnapshot, CommandError> {
+    log::info!(
+        "update_mode_config: enabled={} mode={:?} gemini_fallback={}",
+        payload.modes_enabled,
+        payload.mode,
+        payload.gemini_fallback_to_whisper
+    );
+
+    let shared = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        *shared.modes_enabled.write() = payload.modes_enabled;
+        *shared.transcription_mode.write() = payload.mode;
+        *shared.gemini_fallback_to_whisper.write() = payload.gemini_fallback_to_whisper;
+        *shared.content_type.write() = payload.content_type;
+        crate::settings::save_mode_config_batch(
+            payload.modes_enabled,
+            payload.mode,
+            payload.gemini_fallback_to_whisper,
+            payload.content_type,
+        );
+        let (label, desc) = mode_copy(payload.mode);
+        Ok(ModeConfigSnapshot {
+            modes_enabled: payload.modes_enabled,
+            mode: payload.mode,
+            gemini_fallback_to_whisper: payload.gemini_fallback_to_whisper,
+            content_type: payload.content_type,
+            mode_label: label.to_string(),
+            mode_description: desc.to_string(),
+        })
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))?
 }
 
 /// Validates the format of a non-empty API key for the given provider.
@@ -357,6 +448,36 @@ pub async fn clear_history() {
     .unwrap_or_default();
 }
 
+/// Deletes a single history entry (and its audio file if present).
+#[tauri::command]
+pub async fn delete_history_entry(id: String) -> Result<(), CommandError> {
+    let ok = tokio::task::spawn_blocking(move || crate::history::delete_entry(&id))
+        .await
+        .map_err(|e| CommandError::Internal(e.to_string()))?;
+    if ok {
+        Ok(())
+    } else {
+        Err(CommandError::Internal(
+            "entrada de histórico não encontrada".into(),
+        ))
+    }
+}
+
+/// Updates the final text of a history entry (manual edit). Keeps evaluation.
+#[tauri::command]
+pub async fn update_history_text(id: String, text: String) -> Result<(), CommandError> {
+    let ok = tokio::task::spawn_blocking(move || crate::history::update_text(&id, &text))
+        .await
+        .map_err(|e| CommandError::Internal(e.to_string()))?;
+    if ok {
+        Ok(())
+    } else {
+        Err(CommandError::Internal(
+            "entrada de histórico não encontrada".into(),
+        ))
+    }
+}
+
 /// `save_system_prompt`
 ///
 /// Stores the user-edited sanitizer system prompt in the in-memory
@@ -417,43 +538,57 @@ pub fn get_system_prompt(state: State<'_, SharedState>) -> String {
     state.system_prompt.read().clone()
 }
 
-/// `get_custom_words`
-///
-/// Returns the user's custom vocabulary (canonical spellings) so the
-/// Vocabulário settings tab can render the saved list on load.
+/// `get_custom_words` — legacy: enabled canonical spellings only.
 #[tauri::command]
 pub fn get_custom_words(state: State<'_, SharedState>) -> Vec<String> {
-    state.custom_words.read().clone()
+    crate::vocabulary::canonical_list(&state.vocabulary.read())
 }
 
-/// `set_custom_words`
-///
-/// Replaces the user's custom vocabulary. The incoming list is normalised —
-/// each entry is trimmed, blanks are dropped, and case-insensitive duplicates
-/// are removed (keeping the first spelling seen) — before being stored in the
-/// in-memory state and persisted to `settings.json`. The cleaned list is
-/// returned so the frontend can re-sync its UI with the canonical result.
+/// `set_custom_words` — legacy: replaces vocabulary with simple words.
 #[tauri::command]
 pub async fn set_custom_words(
     state: State<'_, SharedState>,
     words: Vec<String>,
 ) -> Result<Vec<String>, CommandError> {
-    let cleaned: Vec<String> = {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        words
-            .into_iter()
-            .map(|w| w.trim().to_string())
-            .filter(|w| !w.is_empty())
-            .filter(|w| seen.insert(w.to_lowercase()))
-            .collect()
-    };
-    log::info!("set_custom_words: {} words", cleaned.len());
+    let terms = crate::vocabulary::migrate_from_strings(&words);
+    let terms =
+        crate::vocabulary::normalize_and_validate(terms).map_err(CommandError::InvalidPayload)?;
+    let result = crate::vocabulary::canonical_list(&terms);
+    log::info!("set_custom_words: {} terms (legacy)", result.len());
+
+    let shared = state.inner().clone();
+    let terms_store = terms.clone();
+    tokio::task::spawn_blocking(move || {
+        *shared.vocabulary.write() = terms_store.clone();
+        crate::settings::save_vocabulary(terms_store);
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))?;
+
+    Ok(result)
+}
+
+/// Full structured vocabulary.
+#[tauri::command]
+pub fn get_vocabulary(state: State<'_, SharedState>) -> Vec<crate::vocabulary::VocabularyTerm> {
+    state.vocabulary.read().clone()
+}
+
+/// Replace structured vocabulary after validation.
+#[tauri::command]
+pub async fn set_vocabulary(
+    state: State<'_, SharedState>,
+    terms: Vec<crate::vocabulary::VocabularyTerm>,
+) -> Result<Vec<crate::vocabulary::VocabularyTerm>, CommandError> {
+    let cleaned =
+        crate::vocabulary::normalize_and_validate(terms).map_err(CommandError::InvalidPayload)?;
+    log::info!("set_vocabulary: {} terms", cleaned.len());
 
     let shared = state.inner().clone();
     let result = cleaned.clone();
     tokio::task::spawn_blocking(move || {
-        *shared.custom_words.write() = cleaned.clone();
-        crate::settings::save_custom_words(cleaned);
+        *shared.vocabulary.write() = cleaned.clone();
+        crate::settings::save_vocabulary(cleaned);
     })
     .await
     .map_err(|e| CommandError::Internal(e.to_string()))?;

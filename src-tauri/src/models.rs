@@ -219,15 +219,23 @@ pub struct AppState {
     /// to save the extra network call. Persisted to `settings.json`.
     pub sanitizer_enabled: RwLock<bool>,
     pub reasoning_effort: RwLock<String>,
-    /// User-defined vocabulary of canonical spellings. During sanitization the
-    /// validator LLM replaces any transcribed token that is clearly a
-    /// phonetic/orthographic corruption of one of these words with the exact
-    /// spelling stored here. Persisted to `settings.json` (see `settings`).
-    pub custom_words: RwLock<Vec<String>>,
+    /// Structured vocabulary (canonical, aliases, category, strict, enabled).
+    /// Persisted to `settings.json`; legacy `custom_words` is migrated on load.
+    pub vocabulary: RwLock<Vec<crate::vocabulary::VocabularyTerm>>,
     /// Latest visible-pill rectangle reported by the gadget overlay. `None`
     /// until the gadget reports for the first time. Consumed by the cursor
     /// watcher to make the overlay click-through outside the pill.
     pub gadget_hit_rect: RwLock<Option<GadgetHitRect>>,
+    /// When `true`, mic/file runs use the product mode pipeline
+    /// ([`crate::pipeline_contract::TranscriptionMode`]) for supported modes.
+    /// When `false`, the legacy engine/dual/sanitizer path is used unchanged.
+    pub modes_enabled: RwLock<bool>,
+    /// Selected product mode (UltraFast / FastAccurate / …).
+    pub transcription_mode: RwLock<crate::pipeline_contract::TranscriptionMode>,
+    /// FastAccurate: if Gemini fails or is unavailable, fall back to Whisper.
+    pub gemini_fallback_to_whisper: RwLock<bool>,
+    /// Content-type hint for sanitizer / UltraPrecise prompts (`Auto` = heuristic).
+    pub content_type: RwLock<crate::pipeline_contract::ContentType>,
 }
 
 impl AppState {
@@ -252,8 +260,12 @@ impl AppState {
             deepgram_live: Mutex::new(None),
             sanitizer_enabled: RwLock::new(true),
             reasoning_effort: RwLock::new("medium".to_string()),
-            custom_words: RwLock::new(Vec::new()),
+            vocabulary: RwLock::new(Vec::new()),
             gadget_hit_rect: RwLock::new(None),
+            modes_enabled: RwLock::new(false),
+            transcription_mode: RwLock::new(crate::pipeline_contract::TranscriptionMode::UltraFast),
+            gemini_fallback_to_whisper: RwLock::new(true),
+            content_type: RwLock::new(crate::pipeline_contract::ContentType::Auto),
         }
     }
 
@@ -498,4 +510,62 @@ pub struct HistoryEntry {
     /// sanitizer never ran) and for legacy entries created before this field.
     #[serde(default)]
     pub debug_info: Option<SanitizerDebug>,
+    /// Product mode id when the new pipeline ran (`ultra-fast`, `fast-accurate`, …).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Primary model id used for the run (e.g. whisper-large-v3-turbo).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Comma-separated stage names executed (e.g. `whisper`, `gemini_transcribe,whisper_fallback`).
+    #[serde(default)]
+    pub stages: Option<String>,
+    /// True when a fallback path produced the final text.
+    #[serde(default)]
+    pub used_fallback: Option<bool>,
+    /// Machine-readable fallback reason when [`used_fallback`] is true.
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
+    /// Content-type hint used for the run (`auto`, `programming`, …).
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Intermediate Whisper text when available.
+    #[serde(default)]
+    pub whisper_text: Option<String>,
+    /// Intermediate sanitizer text when available.
+    #[serde(default)]
+    pub sanitizer_text: Option<String>,
+    /// Intermediate Gemini text when available.
+    #[serde(default)]
+    pub gemini_text: Option<String>,
+    /// Pipeline warnings (parse fallback, strict literals, etc.).
+    #[serde(default)]
+    pub warnings: Option<Vec<String>>,
+    /// Structured stage timings (product modes). Absent on legacy entries.
+    #[serde(default)]
+    pub audio_prepare_ms: Option<u64>,
+    #[serde(default)]
+    pub base64_ms: Option<u64>,
+    #[serde(default)]
+    pub whisper_ms: Option<u64>,
+    #[serde(default)]
+    pub sanitizer_ms: Option<u64>,
+    #[serde(default)]
+    pub files_upload_ms: Option<u64>,
+    #[serde(default)]
+    pub files_poll_ms: Option<u64>,
+    #[serde(default)]
+    pub files_poll_count: Option<u32>,
+    #[serde(default)]
+    pub gemini_generate_ms: Option<u64>,
+    #[serde(default)]
+    pub gemini_delete_ms: Option<u64>,
+    #[serde(default)]
+    pub strict_literals_ms: Option<u64>,
+    #[serde(default)]
+    pub clipboard_ms: Option<u64>,
+    #[serde(default)]
+    pub total_pipeline_ms: Option<u64>,
+    /// `inline` | `files_api`
+    #[serde(default)]
+    pub gemini_transport: Option<String>,
 }
