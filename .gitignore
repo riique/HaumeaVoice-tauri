@@ -1,0 +1,23 @@
+# JavaScript
+node_modules/
+dist/
+npm-debug.log*
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/target-*/
+src-tauri/check_err.txt
+
+# Local tooling and generated diagnostics
+.kimchi/
+nul
+*.log
+
+# Environment and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
