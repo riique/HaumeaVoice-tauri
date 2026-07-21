@@ -27,6 +27,9 @@ pub enum TranscriptionMode {
     Precise,
     /// Whisper + sanitizer + Gemini with audio.
     UltraPrecise,
+    /// Google Chirp 3 through OpenRouter's dedicated STT endpoint.
+    #[serde(rename = "chirp-3-experimental")]
+    Chirp3Experimental,
 }
 
 impl TranscriptionMode {
@@ -36,6 +39,7 @@ impl TranscriptionMode {
             Self::FastAccurate => "fast-accurate",
             Self::Precise => "precise",
             Self::UltraPrecise => "ultra-precise",
+            Self::Chirp3Experimental => "chirp-3-experimental",
         }
     }
 
@@ -46,6 +50,7 @@ impl TranscriptionMode {
             Self::FastAccurate => "Rápido e preciso",
             Self::Precise => "Preciso",
             Self::UltraPrecise => "Ultrapreciso",
+            Self::Chirp3Experimental => "Chirp 3",
         }
     }
 
@@ -912,7 +917,9 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
     let run_sanitizer = match req.mode {
         TranscriptionMode::UltraPrecise => true,
         TranscriptionMode::UltraFast => req.sanitizer_enabled,
-        TranscriptionMode::FastAccurate | TranscriptionMode::Precise => false,
+        TranscriptionMode::FastAccurate
+        | TranscriptionMode::Precise
+        | TranscriptionMode::Chirp3Experimental => false,
     };
 
     if run_sanitizer {
@@ -987,11 +994,11 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
                     stage: PipelineStage::GeminiAudio,
                     ok: true,
                     text: Some(t),
-                    model: Some("gemini-3.5-flash".into()),
+                    model: Some("gemini-3.5-flash-lite".into()),
                     latency_ms: 40,
                     error: None,
                 });
-                result.models_used.push("gemini-3.5-flash".into());
+                result.models_used.push("gemini-3.5-flash-lite".into());
                 result.timings.gemini_ms = Some(40);
             }
             Ok(_) => {

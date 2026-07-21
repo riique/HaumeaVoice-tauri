@@ -108,6 +108,8 @@ pub struct ApiKeys {
     pub google: Option<String>,
     #[serde(default)]
     pub deepgram: Option<String>,
+    #[serde(default)]
+    pub openrouter: Option<String>,
 }
 
 /// Payload received from the frontend when the user changes the active
@@ -162,6 +164,8 @@ pub struct ApiKeysPayload {
     pub google: Option<String>,
     #[serde(default)]
     pub deepgram: Option<String>,
+    #[serde(default)]
+    pub openrouter: Option<String>,
 }
 
 /// Global application state guarded by locks for safe concurrent
@@ -326,21 +330,26 @@ impl AppState {
     /// overlay window. Returns `0.0` when the buffer is empty. The RMS is scaled
     /// up because speech rarely approaches full-scale amplitude.
     pub fn recent_level(&self, window: usize) -> f32 {
-        let buf = self.audio_buffer.lock();
-        let n = buf.len();
-        if n == 0 {
-            return 0.0;
-        }
-        let start = n.saturating_sub(window);
-        let slice = &buf[start..];
-        let sum_sq: f64 = slice
+        // Copy the small analysis window and release the capture lock before
+        // calculating RMS. This keeps the callback's critical section short
+        // without forcing it to discard samples when the meter runs.
+        let samples = {
+            let buf = self.audio_buffer.lock();
+            let n = buf.len();
+            if n == 0 {
+                return 0.0;
+            }
+            let start = n.saturating_sub(window);
+            buf[start..].to_vec()
+        };
+        let sum_sq: f64 = samples
             .iter()
             .map(|&s| {
                 let f = s as f64 / 32768.0;
                 f * f
             })
             .sum();
-        let rms = (sum_sq / slice.len() as f64).sqrt();
+        let rms = (sum_sq / samples.len() as f64).sqrt();
         // Perceptual boost: conversational speech sits far below full-scale,
         // so amplify aggressively for the gadget waveform. Tuned so normal
         // talking near the mic reliably pushes the meter into the upper range.

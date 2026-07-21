@@ -24,7 +24,8 @@ export type TranscriptionMode =
   | "ultra-fast"
   | "fast-accurate"
   | "precise"
-  | "ultra-precise";
+  | "ultra-precise"
+  | "chirp-3-experimental";
 
 export interface EngineConfigPayload {
   engine: TranscriptionEngine;
@@ -80,6 +81,7 @@ export interface ApiKeysPayload {
   groq?: string | null;
   google?: string | null;
   deepgram?: string | null;
+  openrouter?: string | null;
 }
 
 export async function updateEngineConfig(

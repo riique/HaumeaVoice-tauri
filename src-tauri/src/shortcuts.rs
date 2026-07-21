@@ -77,8 +77,10 @@ pub fn save_store(cfg: &ShortcutConfig) {
 /// Core toggle logic shared by the IPC command path and the global
 /// `<Ctrl+B>` shortcut handler.
 ///
-/// Returns the new recording flag immediately so callers on the main thread
-/// (the global-shortcut callback) are never blocked.
+/// Returns the requested recording flag immediately so callers on the main
+/// thread (the global-shortcut callback) are never blocked. The
+/// `recording-started` event is emitted only after CPAL confirms that the input
+/// stream is running, so the UI is a reliable cue that speech is being captured.
 ///
 /// **All blocking work** â€” COM microphone unmute, CPAL device acquisition,
 /// stream playback â€” is dispatched to a background `std::thread::spawn` so
@@ -93,34 +95,48 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
     log::info!("shortcut: toggle recording {} -> {}", current, next);
 
     if next {
-        // Optimistically emit "started" so the UI reacts instantly while
-        // the background thread acquires the microphone.
-        state.mark_recording_start();
-        if let Err(e) = app.emit(
-            event_names::RECORDING_STARTED,
-            &RecordingEvent::RecordingStarted,
-        ) {
-            log::warn!("failed to emit {}: {}", event_names::RECORDING_STARTED, e);
-        }
-
         // Heavy work (COM unmute + CPAL device open) runs off the main
         // thread to prevent AppHang when drivers stall.
         let app_bg = app.clone();
         let state_bg = state.clone();
         std::thread::spawn(move || {
-            // Auto-unmute every active capture endpoint via Windows COM.
-            let was_muted = crate::mic_control::ensure_mic_unmuted();
-            if was_muted {
-                // Brief pause so the OS propagates the unmute before cpal
-                // opens the device.
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
+            let start_requested_at = std::time::Instant::now();
 
-            match start_capture(&state_bg) {
+            // Opening the CPAL stream and asking Windows to unmute the input
+            // are independent. Run them concurrently so a muted endpoint does
+            // not add a fixed delay before capture can become ready.
+            let (capture_result, was_muted) = std::thread::scope(|scope| {
+                let unmute = scope.spawn(crate::mic_control::ensure_mic_unmuted);
+                let capture_result = start_capture(&state_bg);
+                let was_muted = unmute.join().unwrap_or(false);
+                (capture_result, was_muted)
+            });
+
+            match capture_result {
                 Ok(()) => {
+                    // A second toggle may have stopped the pending recording
+                    // while the driver was opening. Never resurrect that stale
+                    // start or emit a misleading ready event.
+                    if !state_bg.is_recording() {
+                        let _ = state_bg.drop_audio_stream();
+                        log::info!("shortcut: capture became ready after stop; discarded");
+                        return;
+                    }
+
+                    state_bg.mark_recording_start();
+                    if let Err(e) = app_bg.emit(
+                        event_names::RECORDING_STARTED,
+                        &RecordingEvent::RecordingStarted,
+                    ) {
+                        log::warn!("failed to emit {}: {}", event_names::RECORDING_STARTED, e);
+                    }
                     crate::audio::spawn_audio_level_emitter(app_bg.clone(), state_bg.clone());
                     log::info!("shortcut: live audio-level emitter started for gadget waveform");
-                    log::info!("shortcut: capture started successfully (background)");
+                    log::info!(
+                        "shortcut: capture ready in {}ms (mic_was_muted={})",
+                        start_requested_at.elapsed().as_millis(),
+                        was_muted
+                    );
                 }
                 Err(e) => {
                     log::error!("shortcut: failed to start capture: {}", e);

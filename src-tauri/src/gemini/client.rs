@@ -3,8 +3,12 @@
 use serde::{Deserialize, Serialize};
 use std::{sync::OnceLock, time::Duration};
 
-/// Multimodal model used for audio STT, refinement and pronunciation.
-pub const GEMINI_MODEL: &str = "gemini-3.5-flash";
+/// Multimodal model used for refinement and pronunciation.
+pub const GEMINI_MODEL: &str = "gemini-3.5-flash-lite";
+/// Low-latency multimodal model used only by FastAccurate direct STT.
+pub const FAST_ACCURATE_MODEL: &str = "gemini-3.5-flash-lite";
+/// Higher-capability model used for pronunciation evaluation (CEFR rubric).
+pub const PRONUNCIATION_MODEL: &str = "gemini-3.5-flash";
 
 pub const API_ROOT: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub const UPLOAD_ROOT: &str = "https://generativelanguage.googleapis.com/upload/v1beta";
@@ -74,16 +78,42 @@ pub struct GenerateContentRequest {
 
 #[derive(Debug, Serialize)]
 pub struct GenerationConfig {
-    /// Near-deterministic decoding for STT / refine.
-    pub temperature: f32,
+    /// Sampling parameters are omitted for Gemini 3.5+ compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingConfig")]
+    pub thinking_config: Option<ThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThinkingConfig {
+    #[serde(rename = "thinkingLevel")]
+    pub thinking_level: &'static str,
 }
 
 impl GenerateContentRequest {
     pub fn with_parts(parts: Vec<Part>) -> Self {
         Self {
             contents: vec![Content { parts }],
-            generation_config: Some(GenerationConfig { temperature: 0.0 }),
+            generation_config: Some(GenerationConfig {
+                temperature: None,
+                thinking_config: Some(ThinkingConfig {
+                    thinking_level: "minimal",
+                }),
+            }),
         }
+    }
+
+    /// Direct STT is a simple task: use the fastest supported reasoning level
+    /// and leave temperature at the Gemini 3 default.
+    pub fn for_fast_accurate(mut self) -> Self {
+        self.generation_config = Some(GenerationConfig {
+            temperature: None,
+            thinking_config: Some(ThinkingConfig {
+                thinking_level: "minimal",
+            }),
+        });
+        self
     }
 }
 
@@ -202,9 +232,17 @@ pub async fn generate_content(
     api_key: &str,
     body: &GenerateContentRequest,
 ) -> Result<(String, u64), String> {
+    generate_content_with_model(api_key, GEMINI_MODEL, body).await
+}
+
+pub async fn generate_content_with_model(
+    api_key: &str,
+    model: &str,
+    body: &GenerateContentRequest,
+) -> Result<(String, u64), String> {
     require_api_key(api_key)?;
     let client = http_client()?;
-    let url = generate_url(GEMINI_MODEL, api_key);
+    let url = generate_url(model, api_key);
     let t0 = std::time::Instant::now();
 
     let response = tokio::time::timeout(TIMEOUT_GENERATE, client.post(url).json(body).send())
@@ -297,5 +335,18 @@ mod tests {
     fn empty_key_rejected() {
         assert!(require_api_key("").is_err());
         assert!(require_api_key("   ").is_err());
+    }
+
+    #[test]
+    fn fast_accurate_uses_explicit_minimal_thinking_without_temperature() {
+        let request = build_inline_request("transcreva", "audio/wav", "AA==").for_fast_accurate();
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(FAST_ACCURATE_MODEL, "gemini-3.5-flash-lite");
+        assert_eq!(
+            json.pointer("/generationConfig/thinkingConfig/thinkingLevel"),
+            Some(&serde_json::Value::String("minimal".into()))
+        );
+        assert!(json.pointer("/generationConfig/temperature").is_none());
     }
 }

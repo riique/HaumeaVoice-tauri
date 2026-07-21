@@ -66,7 +66,7 @@ pub fn mock_transcribe(
     Ok(GeminiGenerateResult {
         operation: GeminiOperation::Transcribe,
         text,
-        model: "gemini-3.5-flash".into(),
+        model: "gemini-3.5-flash-lite".into(),
         prompt_version: TRANSCRIBE_PROMPT_VERSION.into(),
         latency_ms: 1,
         remote_file_name: Some(name),
@@ -94,7 +94,7 @@ pub fn mock_refine(
     Ok(GeminiGenerateResult {
         operation: GeminiOperation::Refine,
         text,
-        model: "gemini-3.5-flash".into(),
+        model: "gemini-3.5-flash-lite".into(),
         prompt_version: REFINE_PROMPT_VERSION.into(),
         latency_ms: 2,
         remote_file_name: Some(name),

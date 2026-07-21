@@ -231,12 +231,10 @@ pub fn start_capture(state: &Arc<AppState>) -> Result<(), AudioError> {
                             return;
                         }
                         let mono = downmix_i16(samples, ch);
-                        // Use try_lock to avoid blocking the real-time audio
-                        // thread if the buffer is momentarily held by another
-                        // caller (e.g. drain_audio_buffer during stop).
-                        if let Some(mut guard) = st.audio_buffer.try_lock() {
-                            guard.extend_from_slice(&mono);
-                        }
+                        // Never discard a capture block. The stream is stopped
+                        // before the buffer is drained, and the level meter only
+                        // holds this lock long enough to copy a small window.
+                        st.audio_buffer.lock().extend_from_slice(&mono);
                         // Fan-out to live Deepgram while the user is speaking
                         // so stop only needs a Finalize flush (not a full re-upload).
                         push_live_deepgram_pcm(&st, &mono);
@@ -256,9 +254,7 @@ pub fn start_capture(state: &Arc<AppState>) -> Result<(), AudioError> {
                             return;
                         }
                         let mono = downmix_f32(samples, ch);
-                        if let Some(mut guard) = st.audio_buffer.try_lock() {
-                            guard.extend_from_slice(&mono);
-                        }
+                        st.audio_buffer.lock().extend_from_slice(&mono);
                         push_live_deepgram_pcm(&st, &mono);
                     },
                     err_callback,

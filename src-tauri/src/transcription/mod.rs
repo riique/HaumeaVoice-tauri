@@ -25,3 +25,45 @@ pub use pipeline::{
     build_failed_entry, build_success_entry, emit_saved, run_sanitize, update_failed_entry,
 };
 pub use types::{AcousticOutcome, SanitizeOutcome};
+
+const KNOWN_TRANSCRIPTION_ARTIFACTS: &[&str] = &["Legenda por Sônia Ruberti"];
+
+/// Removes deterministic phrases hallucinated by transcription engines before
+/// the text is persisted, emitted to the UI, copied or pasted.
+pub fn remove_known_transcription_artifacts(text: &str) -> String {
+    let mut cleaned = text.to_string();
+    for artifact in KNOWN_TRANSCRIPTION_ARTIFACTS {
+        cleaned = cleaned.replace(artifact, "");
+    }
+
+    while cleaned.contains("  ") {
+        cleaned = cleaned.replace("  ", " ");
+    }
+
+    cleaned.trim().to_string()
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::remove_known_transcription_artifacts;
+
+    #[test]
+    fn removes_sonia_ruberti_caption_artifact() {
+        assert_eq!(
+            remove_known_transcription_artifacts("Legenda por Sônia Ruberti"),
+            ""
+        );
+        assert_eq!(
+            remove_known_transcription_artifacts(
+                "Texto antes. Legenda por Sônia Ruberti Texto depois."
+            ),
+            "Texto antes. Texto depois."
+        );
+    }
+
+    #[test]
+    fn preserves_unrelated_transcription() {
+        let text = "Esta é uma transcrição normal.";
+        assert_eq!(remove_known_transcription_artifacts(text), text);
+    }
+}

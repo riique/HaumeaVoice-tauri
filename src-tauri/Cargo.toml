@@ -1,6 +1,6 @@
 [package]
 name = "haumea-voice"
-version = "1.0.3"
+version = "1.0.8"
 description = "Haumea Voice desktop application"
 authors = ["Haumea Voice"]
 edition = "2021"

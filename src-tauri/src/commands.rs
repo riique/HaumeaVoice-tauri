@@ -154,6 +154,9 @@ fn mode_copy(mode: TranscriptionMode) -> (&'static str, &'static str) {
         TranscriptionMode::UltraPrecise => {
             ("Ultrapreciso", "Whisper, validador e Gemini em sequência")
         }
+        TranscriptionMode::Chirp3Experimental => {
+            ("Chirp 3", "Transcrição experimental via OpenRouter")
+        }
     }
 }
 
@@ -209,54 +212,37 @@ pub async fn update_mode_config(
     .map_err(|e| CommandError::Internal(e.to_string()))?
 }
 
-/// Validates the format of a non-empty API key for the given provider.
-/// Returns `Ok(())` if the key is empty (treated as “not set”) or matches
-/// the expected prefix; returns `Err(message)` for clearly malformed keys
-/// so the user gets immediate feedback instead of a cryptic failure at
-/// transcription time.
+/// Performs only provider-agnostic safety validation on a non-empty API key.
+/// Provider key formats are opaque and may change; authentication is verified
+/// by the provider when the credential is first used.
 fn validate_api_key(provider: &str, key: &str) -> Result<(), String> {
     if key.is_empty() {
         return Ok(());
     }
-    match provider {
-        "groq" => {
-            if !key.starts_with("gsk_") {
-                return Err("A chave da API do Groq deve começar com 'gsk_'.".to_string());
-            }
-        }
-        "google" => {
-            if !key.starts_with("AIza") {
-                return Err(
-                    "A chave da API do Google (Gemini) deve começar com 'AIza'.".to_string()
-                );
-            }
-        }
-        // Deepgram keys are UUIDs: 8-4-4-4-12 hex digits separated by dashes.
-        "deepgram" if !is_valid_uuid(key) => {
-            return Err("A chave da API do Deepgram deve ser um UUID (formato xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).".to_string());
-        }
-        _ => {}
+    if key.chars().any(char::is_control) {
+        return Err(format!(
+            "A chave da API do {} contém caracteres de controle inválidos.",
+            provider
+        ));
     }
     Ok(())
 }
 
-/// Lightweight UUID format check (8-4-4-4-12 hex digits) without pulling
-/// in the `uuid` or `regex` crates.
-fn is_valid_uuid(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.len() != 36 {
-        return false;
+#[cfg(test)]
+mod api_key_validation_tests {
+    use super::validate_api_key;
+
+    #[test]
+    fn accepts_opaque_provider_key_formats() {
+        assert!(validate_api_key("deepgram", "0123456789abcdef0123456789abcdef01234567").is_ok());
+        assert!(validate_api_key("google", "future-format-without-known-prefix").is_ok());
+        assert!(validate_api_key("groq", "another-opaque-format").is_ok());
     }
-    // Dashes at positions 8, 13, 18, 23
-    for &pos in &[8, 13, 18, 23] {
-        if bytes[pos] != b'-' {
-            return false;
-        }
+
+    #[test]
+    fn rejects_embedded_control_characters() {
+        assert!(validate_api_key("google", "valid-part\nsecond-part").is_err());
     }
-    // All other positions must be hex digits
-    bytes.iter().enumerate().all(|(i, &b)| {
-        b == b'-' || (i != 8 && i != 13 && i != 18 && i != 23 && b.is_ascii_hexdigit())
-    })
 }
 
 /// `save_api_keys`
@@ -271,30 +257,47 @@ pub async fn save_api_keys(
     payload: ApiKeysPayload,
 ) -> Result<(), CommandError> {
     log::info!(
-        "save_api_keys: groq={} google={} deepgram={}",
+        "save_api_keys: groq={} google={} deepgram={} openrouter={}",
         payload.groq.as_ref().map(|k| k.len()).unwrap_or(0),
         payload.google.as_ref().map(|k| k.len()).unwrap_or(0),
         payload.deepgram.as_ref().map(|k| k.len()).unwrap_or(0),
+        payload.openrouter.as_ref().map(|k| k.len()).unwrap_or(0),
     );
 
-    // Validate key formats before persisting so the user gets immediate
-    // feedback instead of a failure at transcription time.
+    // Treat provider credentials as opaque. Do not reject valid keys based on
+    // guessed prefixes or shapes (Deepgram keys, for example, are not UUIDs).
     if let Some(ref k) = payload.groq {
-        validate_api_key("groq", k).map_err(CommandError::InvalidPayload)?;
+        validate_api_key("groq", k.trim()).map_err(CommandError::InvalidPayload)?;
     }
     if let Some(ref k) = payload.google {
-        validate_api_key("google", k).map_err(CommandError::InvalidPayload)?;
+        validate_api_key("google", k.trim()).map_err(CommandError::InvalidPayload)?;
     }
     if let Some(ref k) = payload.deepgram {
-        validate_api_key("deepgram", k).map_err(CommandError::InvalidPayload)?;
+        validate_api_key("deepgram", k.trim()).map_err(CommandError::InvalidPayload)?;
+    }
+    if let Some(ref k) = payload.openrouter {
+        validate_api_key("openrouter", k.trim()).map_err(CommandError::InvalidPayload)?;
     }
 
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let keys = crate::models::ApiKeys {
-            groq: payload.groq.filter(|s| !s.is_empty()),
-            google: payload.google.filter(|s| !s.is_empty()),
-            deepgram: payload.deepgram.filter(|s| !s.is_empty()),
+            groq: payload
+                .groq
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            google: payload
+                .google
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            deepgram: payload
+                .deepgram
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            openrouter: payload
+                .openrouter
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         };
 
         {

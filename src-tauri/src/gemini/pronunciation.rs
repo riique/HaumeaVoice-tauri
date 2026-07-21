@@ -6,8 +6,8 @@
 use base64::{engine::general_purpose, Engine as _};
 
 use super::client::{
-    generate_content, mime_for_ext, require_api_key, Content, GenerateContentRequest, InlineData,
-    Part,
+    generate_content_with_model, mime_for_ext, require_api_key, Content, GenerateContentRequest,
+    InlineData, Part, PRONUNCIATION_MODEL,
 };
 use super::prompts::{pronunciation_prompt, PRONUNCIATION_PROMPT_VERSION};
 
@@ -52,7 +52,7 @@ pub async fn evaluate_pronunciation(
         audio_bytes.len()
     );
 
-    let (feedback, _) = generate_content(api_key, &body).await?;
+    let (feedback, _) = generate_content_with_model(api_key, PRONUNCIATION_MODEL, &body).await?;
     if feedback.trim().is_empty() {
         return Err("o Gemini não retornou nenhum feedback".to_string());
     }

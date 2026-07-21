@@ -148,6 +148,7 @@ pub async fn run_sanitize(
         );
         warnings.push(format!("strict_literals:{}", strict_hits.len()));
     }
+    let final_text = crate::transcription::remove_known_transcription_artifacts(&final_text);
     let sanitizer_latency_ms = start_sanitizer.elapsed().as_millis() as u64;
 
     SanitizeOutcome {

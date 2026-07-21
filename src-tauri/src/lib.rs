@@ -7,6 +7,7 @@ pub mod groq;
 pub mod history;
 pub mod mic_control;
 pub mod models;
+pub mod openrouter;
 pub mod pipeline_contract;
 pub mod sanitizer_json;
 pub mod secrets;

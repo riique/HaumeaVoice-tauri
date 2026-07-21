@@ -70,6 +70,7 @@ const MODE_CARDS: {
   title: string;
   engine: string;
   blurb: string;
+  badge?: string;
   Icon: LucideIcon;
 }[] = [
   {
@@ -96,9 +97,17 @@ const MODE_CARDS: {
   {
     id: "ultra-precise",
     title: "Ultrapreciso",
-    engine: "Pipeline completa",
+    engine: "Whisper → Sanitizer → Gemini",
     blurb: "Para conteúdo importante",
     Icon: Gem,
+  },
+  {
+    id: "chirp-3-experimental",
+    title: "Chirp 3",
+    engine: "OpenRouter · google/chirp-3",
+    blurb: "STT dedicado para avaliar velocidade e precisão",
+    badge: "Experimental",
+    Icon: FlaskConical,
   },
 ];
 
@@ -470,11 +479,18 @@ function PipelinesTab() {
                   >
                     <Icon className="h-5 w-5" aria-hidden />
                   </div>
-                  {active && (
-                    <span className="text-[10px] font-medium uppercase tracking-wider text-coral-400">
-                      Selecionado
-                    </span>
-                  )}
+                  <div className="flex flex-wrap justify-end gap-1.5">
+                    {card.badge && (
+                      <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-300">
+                        {card.badge}
+                      </span>
+                    )}
+                    {active && (
+                      <span className="text-[10px] font-medium uppercase tracking-wider text-coral-400">
+                        Selecionado
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="mt-4 text-base font-semibold text-zinc-100">
                   {card.title}
@@ -547,6 +563,18 @@ function PipelinesTab() {
             }}
           />
         </Card>
+      )}
+
+      {mode === "chirp-3-experimental" && modesEnabled && (
+        <div className="flex gap-3 rounded-xl border border-amber-800/40 bg-amber-950/15 px-4 py-3 text-xs leading-5 text-amber-200/90">
+          <FlaskConical className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <p>
+            Usa o endpoint dedicado de transcrição do OpenRouter com idioma
+            português. Não aplica Gemini, sanitizer ou fallback: o Histórico
+            registra somente o resultado real do Chirp 3. Requer saldo e chave
+            OpenRouter configurada.
+          </p>
+        </div>
       )}
 
       {(mode === "ultra-precise" || !modesEnabled) && (
@@ -756,14 +784,20 @@ function PipelinesTab() {
 
 /* --------------------------- Provedores e APIs --------------------------- */
 
-type KeyId = "groq" | "google" | "deepgram";
+type KeyId = "groq" | "google" | "deepgram" | "openrouter";
 
 function ProvedoresTab() {
-  const [keys, setKeys] = useState({ groq: "", google: "", deepgram: "" });
+  const [keys, setKeys] = useState({
+    groq: "",
+    google: "",
+    deepgram: "",
+    openrouter: "",
+  });
   const [visible, setVisible] = useState<Record<KeyId, boolean>>({
     groq: false,
     google: false,
     deepgram: false,
+    openrouter: false,
   });
   const [saving, setSaving] = useState<KeyId | null>(null);
   const [saved, setSaved] = useState<KeyId | null>(null);
@@ -776,6 +810,7 @@ function ProvedoresTab() {
           groq: k.groq ?? "",
           google: k.google ?? "",
           deepgram: k.deepgram ?? "",
+          openrouter: k.openrouter ?? "",
         }),
       )
       .catch(console.error);
@@ -805,9 +840,16 @@ function ProvedoresTab() {
     {
       id: "deepgram",
       name: "Deepgram",
-      placeholder: "uuid…",
+      placeholder: "Cole sua chave Deepgram…",
       help: "Apenas no fluxo legado / experimental.",
       requiredFor: "Avançado · dual / Deepgram",
+    },
+    {
+      id: "openrouter",
+      name: "OpenRouter",
+      placeholder: "sk-or-v1-…",
+      help: "Acesso ao Google Chirp 3 pelo endpoint dedicado de transcrição.",
+      requiredFor: "Chirp 3 · Experimental",
     },
   ];
 
@@ -825,6 +867,7 @@ function ProvedoresTab() {
         groq: keys.groq,
         google: keys.google,
         deepgram: keys.deepgram,
+        openrouter: keys.openrouter,
       });
       setSaved(id);
       window.setTimeout(() => setSaved((c) => (c === id ? null : c)), 2000);

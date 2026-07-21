@@ -46,6 +46,10 @@ pub struct ModePipelineResult {
     pub gemini_transport: Option<String>,
     pub warnings: Vec<String>,
     pub content_type: Option<String>,
+    pub openrouter_cost_usd: Option<f64>,
+    pub openrouter_audio_seconds: Option<f64>,
+    pub openrouter_generation_id: Option<String>,
+    pub reported_total_tokens: Option<usize>,
 }
 
 fn pipeline_debug_snapshot(result: &ModePipelineResult) -> SanitizerDebug {
@@ -78,6 +82,10 @@ fn pipeline_debug_snapshot(result: &ModePipelineResult) -> SanitizerDebug {
         "files_poll_count": result.files_poll_count,
         "gemini_generate_ms": result.gemini_generate_ms,
         "total_pipeline_ms": result.total_pipeline_ms,
+        "openrouter_cost_usd": result.openrouter_cost_usd,
+        "openrouter_audio_seconds": result.openrouter_audio_seconds,
+        "openrouter_generation_id": result.openrouter_generation_id,
+        "reported_total_tokens": result.reported_total_tokens,
     });
     SanitizerDebug {
         endpoint: format!("product-mode:{}", result.mode.as_str()),
@@ -156,6 +164,66 @@ pub async fn run_ultra_fast(
         history_engine_label: "UltraFast/Whisper".into(),
         whisper_ms: Some(ms),
         total_pipeline_ms: Some(ms),
+        ..Default::default()
+    })
+}
+
+/// Experimental: audio → OpenRouter dedicated STT → Google Chirp 3 → text.
+pub async fn run_chirp3_experimental(
+    state: &Arc<AppState>,
+    audio: Vec<u8>,
+    ext: &str,
+    duration_ms: Option<u64>,
+) -> Result<ModePipelineResult, String> {
+    let t0 = std::time::Instant::now();
+    let api_key = state
+        .api_keys
+        .read()
+        .openrouter
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| {
+            "Configure a chave da API do OpenRouter em Provedores e APIs.".to_string()
+        })?;
+
+    log::info!(
+        "modes: Chirp3Experimental → OpenRouter STT model={} bytes={} duration_ms={:?}",
+        crate::openrouter::CHIRP_3_MODEL,
+        audio.len(),
+        duration_ms
+    );
+    let response = crate::openrouter::transcribe_chirp3(&audio, ext, &api_key).await?;
+    let total_ms = t0.elapsed().as_millis() as u64;
+    let resolved_ct = crate::sanitizer_json::resolve_content_type(
+        *state.content_type.read(),
+        response.text.trim(),
+    );
+    let mut stages = vec![
+        format!("base64:{}ms", response.base64_ms),
+        format!("openrouter_chirp3:{}ms", response.request_ms),
+    ];
+    if response.cost_usd.is_some() {
+        stages.push("usage_cost_reported".into());
+    }
+
+    Ok(ModePipelineResult {
+        final_text: response.text,
+        mode: TranscriptionMode::Chirp3Experimental,
+        model: crate::openrouter::CHIRP_3_MODEL.into(),
+        stages,
+        transcription_latency_ms: total_ms,
+        history_engine_label: "Experimental/OpenRouter/Chirp3".into(),
+        base64_ms: Some(response.base64_ms),
+        gemini_generate_ms: Some(response.request_ms),
+        total_pipeline_ms: Some(total_ms),
+        gemini_transport: Some("openrouter_stt_json".into()),
+        content_type: Some(resolved_ct.as_str().to_string()),
+        openrouter_cost_usd: response.cost_usd,
+        openrouter_audio_seconds: response.audio_seconds,
+        openrouter_generation_id: response.generation_id,
+        reported_total_tokens: response
+            .total_tokens
+            .and_then(|value| usize::try_from(value).ok()),
         ..Default::default()
     })
 }
@@ -1117,7 +1185,9 @@ pub fn mode_result_to_history(
         }),
         realtime_factor,
         deepgram_mode: None,
-        total_tokens: Some(est_total_tokens(words)),
+        total_tokens: result
+            .reported_total_tokens
+            .or_else(|| Some(est_total_tokens(words))),
         is_error: Some(false),
         error_message: None,
         debug_info: result
@@ -1223,6 +1293,7 @@ pub fn should_use_product_mode(state: &AppState) -> bool {
             | TranscriptionMode::FastAccurate
             | TranscriptionMode::Precise
             | TranscriptionMode::UltraPrecise
+            | TranscriptionMode::Chirp3Experimental
     )
 }
 
@@ -1258,6 +1329,9 @@ pub async fn run_product_mode_with_duration(
         TranscriptionMode::UltraPrecise => {
             run_ultra_precise(state, audio, ext, file_name, mime, duration_ms).await?
         }
+        TranscriptionMode::Chirp3Experimental => {
+            run_chirp3_experimental(state, audio, ext, duration_ms).await?
+        }
     };
     // Global strict pass (may double-apply with in-mode; safe / idempotent).
     let vocab = state.vocabulary.read().clone();
@@ -1275,9 +1349,9 @@ pub async fn run_product_mode_with_duration(
         result
             .stages
             .push(format!("strict_literals:{}", hits.len()));
-        result.final_text = text;
         result.warnings.extend(hits);
     }
+    result.final_text = crate::transcription::remove_known_transcription_artifacts(&text);
     Ok(result)
 }
 
@@ -1324,7 +1398,7 @@ mod tests {
         let r = ModePipelineResult {
             final_text: "x".into(),
             mode: TranscriptionMode::UltraPrecise,
-            model: "gemini-3.5-flash".into(),
+            model: "gemini-3.5-flash-lite".into(),
             stages: vec!["sanitizer:120ms".into()],
             transcription_latency_ms: 500,
             history_engine_label: "UltraPrecise".into(),
