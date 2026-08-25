@@ -1,317 +1,194 @@
-import { useEffect, useRef, useState, type ComponentType } from "react";
-import {
-  Circle,
-  Mic,
-  FileText,
-  Type,
-  AlignLeft,
-  Clock,
-} from "lucide-react";
+import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Card } from "../components/ui/Card";
+import {
+  ArrowRight,
+  FileText,
+  Settings2,
+  Zap,
+} from "lucide-react";
+import { Button } from "../components/ui/Button";
 import { KbdCombo } from "../components/ui/Kbd";
+import { PageHeader, SkeletonRows } from "../components/ui/Surface";
 import {
   getHistory,
+  getModeConfig,
   getRecordingState,
-  getRecordingElapsed,
+  getShortcuts,
   onRecordingEvent,
-  toggleRecordingState,
   type HistoryEntry,
+  type ModeConfigSnapshot,
+  type ShortcutConfig,
 } from "../lib/tauri";
+import type { ViewKey } from "./index";
 
-/** Formats an elapsed millisecond count as `MM:SS`. */
-function formatClock(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+const MODE_LABELS: Record<string, string> = {
+  "ultra-fast": "Ultrarrápido",
+  "fast-accurate": "Rápido e preciso",
+  precise: "Preciso",
+  "ultra-precise": "Ultrapreciso",
+};
+
+function formatEntryDuration(ms?: number): string {
+  if (!ms) return "—";
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes}:${String(seconds % 60).padStart(2, "0")}` : `${seconds}s`;
 }
 
-/** Aggregated usage metrics derived from the full transcription history. */
-interface Stats {
-  transcriptions: number;
-  recordings: number;
-  words: number;
-  avgWordsPerSentence: number;
-  durationMs: number;
-}
-
-/** Computes the dashboard metrics from the persisted history entries. */
-function computeStats(entries: HistoryEntry[]): Stats {
-  let words = 0;
-  let sentences = 0;
-  let recordings = 0;
-  let durationMs = 0;
-
-  for (const e of entries) {
-    words += e.words ?? 0;
-    durationMs += e.duration_ms ?? 0;
-    if (e.source === "mic") recordings += 1;
-    const s = (e.text ?? "")
-      .split(/[.!?…]+/)
-      .map((t) => t.trim())
-      .filter(Boolean).length;
-    sentences += Math.max(s, e.text?.trim() ? 1 : 0);
+function routeDetails(config: ModeConfigSnapshot | null) {
+  if (!config) return { engine: "Carregando…", model: "—", provider: "—" };
+  if (!config.modes_enabled) {
+    return { engine: "Fluxo legado", model: "Configuração manual", provider: "Avançado" };
   }
-
+  if (config.mode === "ultra-fast") {
+    return {
+      engine: "Whisper · baixa latência",
+      model: config.gemini_pipelines.ultra_fast_whisper === "large-v3" ? "Whisper Large v3" : "Whisper Large v3 Turbo",
+      provider: "OpenRouter · Groq",
+    };
+  }
+  const key =
+    config.mode === "fast-accurate"
+      ? "fast_accurate"
+      : config.mode === "precise"
+        ? "precise"
+        : "ultra_precise";
+  const route = config.gemini_pipelines[key];
   return {
-    transcriptions: entries.length,
-    recordings,
-    words,
-    avgWordsPerSentence: sentences > 0 ? words / sentences : 0,
-    durationMs,
+    engine: config.mode === "fast-accurate" ? "Gemini com áudio" : config.mode === "precise" ? "Whisper + Gemini" : "Whisper + validador + Gemini",
+    model: route.use_custom_model ? route.custom_model || "Modelo customizado" : route.model === "flash36" ? "Gemini 3.6 Flash" : "Gemini 3.5 Flash-Lite",
+    provider: route.provider === "open-router" ? "OpenRouter" : "Google AI Studio",
   };
 }
 
-/** Formats a millisecond span as a compact human label (e.g. `1h 04m`). */
-function formatDuration(ms: number): string {
-  const totalSec = Math.round(ms / 1000);
-  if (totalSec <= 0) return "0s";
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
-  if (m > 0) return `${m}m ${String(s).padStart(2, "0")}s`;
-  return `${s}s`;
-}
-
-/** Formats large counts compactly (1.2k, 3.4M). */
-function formatCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
-
-export function InicioView() {
+export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void }) {
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [pipeline, setPipeline] = useState<ModeConfigSnapshot | null>(null);
+  const [shortcuts, setShortcutsState] = useState<ShortcutConfig>({ toggle: "Control+B", cancel: "Control+Q" });
   const [recording, setRecording] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const [stats, setStats] = useState<Stats>({
-    transcriptions: 0,
-    recordings: 0,
-    words: 0,
-    avgWordsPerSentence: 0,
-    durationMs: 0,
-  });
-  const tickRef = useRef<number | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  // Load the usage metrics and keep them fresh whenever a new transcription is
-  // persisted (mic capture or file upload both emit `transcription-saved`).
-  useEffect(() => {
-    let mounted = true;
-    const refresh = () =>
-      getHistory()
-        .then((h) => {
-          if (mounted) setStats(computeStats(h));
-        })
-        .catch((e) => console.error("Failed to load history stats:", e));
-
-    refresh();
-    const unlisten = listen("transcription-saved", refresh);
-    return () => {
-      mounted = false;
-      unlisten.then((u) => u());
-    };
-  }, []);
-
-  // Sync local state with the backend on mount, restoring elapsed time from
-  // the backend so the timer survives navigating between views.
-  useEffect(() => {
-    let mounted = true;
-
-    (async () => {
-      try {
-        const [active, ms] = await Promise.all([
-          getRecordingState(),
-          getRecordingElapsed(),
-        ]);
-        if (mounted) {
-          setRecording(active);
-          if (active && ms > 0) setElapsed(ms);
-        }
-      } catch {
-        // Outside of Tauri — keep the local-only behaviour.
-      }
-    })();
-
-    const unlistenPromise = onRecordingEvent((type) => {
-      if (type === "recording-started") {
-        setRecording(true);
-        setElapsed(0);
-      } else if (
-        type === "recording-stopped" ||
-        type === "recording-cancelled"
-      ) {
-        setRecording(false);
-        setElapsed(0);
-      }
-    });
-
-    return () => {
-      mounted = false;
-      if (tickRef.current !== null) {
-        clearInterval(tickRef.current);
-        tickRef.current = null;
-      }
-      unlistenPromise.then((unlisten) => unlisten());
-    };
-  }, []);
-
-  // Drive the elapsed-time counter locally while recording. When the component
-  // re-mounts mid-recording the elapsed state already carries the restored
-  // value from the backend, so the interval just increments from there.
-  useEffect(() => {
-    if (recording) {
-      tickRef.current = window.setInterval(
-        () => setElapsed((e) => e + 1000),
-        1000,
-      );
-    } else if (tickRef.current !== null) {
-      clearInterval(tickRef.current);
-      tickRef.current = null;
-    }
-    // Always clear on cleanup. Switching sidebar tabs (App.tsx unmounts this
-    // view wholesale) while recording used to abandon the 1s interval onto a
-    // dead React root, leaking the timer and calling setState on an unmounted
-    // component. Under StrictMode it stacked twice.
-    return () => {
-      if (tickRef.current !== null) {
-        clearInterval(tickRef.current);
-        tickRef.current = null;
-      }
-    };
-  }, [recording]);
-
-  const handleToggle = async () => {
+  const refresh = async () => {
     try {
-      const next = await toggleRecordingState();
-      setRecording(next);
-      if (!next) setElapsed(0);
-    } catch (e) {
-      console.error("failed to toggle recording:", e);
+      const [entries, config] = await Promise.all([getHistory(), getModeConfig()]);
+      setHistory(entries);
+      setPipeline(config);
+    } catch (error) {
+      console.error("Failed to load home hub:", error);
+    } finally {
+      setLoading(false);
     }
   };
+
+  useEffect(() => {
+    void refresh();
+    getShortcuts().then(setShortcutsState).catch(() => {});
+    getRecordingState().then(setRecording).catch(() => {});
+    const saved = listen("transcription-saved", refresh);
+    const recordingEvents = onRecordingEvent((type) => setRecording(type === "recording-started"));
+    return () => {
+      saved.then((unlisten) => unlisten());
+      recordingEvents.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  const details = routeDetails(pipeline);
+  const recent = history.slice(0, 3);
+  const toggleKeys = shortcuts.toggle
+    .split("+")
+    .map((key) => (key === "Control" || key === "CommandOrControl" ? "Ctrl" : key));
 
   return (
-    <div className="space-y-10">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-100">
-          Início
-        </h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Dite e o Haumea Voice transcreve para a área de transferência.
-        </p>
-      </header>
+    <div>
+      <PageHeader
+        title="Haumea"
+        description="Comece a falar em qualquer aplicativo com o atalho global."
+        action={<KbdCombo keys={toggleKeys} />}
+      />
 
-      {/* Hub de Gravacao - card elevado proeminente */}
-      <Card variant="hub" className="mx-auto mt-10 max-w-2xl px-16 py-14">
-        <div className="flex flex-col items-center gap-6 text-center">
-          {/* Cronometro - inset mais escuro dentro do card elevado */}
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 px-12 py-6">
-            <div className="font-mono text-6xl font-light tabular-nums text-zinc-100">
-              {formatClock(elapsed)}
+      {recording && (
+        <div className="mb-6 flex items-center gap-2 rounded-[10px] bg-[#fff1ef] px-4 py-3 text-[13px] font-medium text-[#9f2720]" role="status">
+          <span className="h-2 w-2 rounded-full bg-[#c2392f] animate-quiet-pulse" />
+          Gravação em andamento no gadget
+        </div>
+      )}
+
+      <section className="surface px-6 py-5" aria-labelledby="active-pipeline">
+        <div className="flex items-start justify-between gap-5">
+          <div className="min-w-0">
+            <h2 id="active-pipeline" className="meta-label">Pipeline ativa</h2>
+            <div className="mt-2 flex items-center gap-3">
+              <span className="flex h-8 w-8 items-center justify-center rounded-[9px] bg-[#efefeb] text-ink">
+                <Zap className="h-4 w-4" strokeWidth={1.8} aria-hidden />
+              </span>
+              <div>
+                <p className="text-[17px] font-semibold tracking-[-0.015em] text-ink">
+                  {pipeline?.modes_enabled === false ? "Legado" : MODE_LABELS[pipeline?.mode ?? ""] ?? "Carregando…"}
+                </p>
+                <p className="mt-0.5 text-[12px] text-muted">{details.engine}</p>
+              </div>
             </div>
           </div>
-
-          {/* Status */}
-          <div className="flex items-center gap-2 text-sm text-zinc-500">
-            <Circle
-              className={
-                "h-2 w-2 " +
-                (recording
-                  ? "fill-coral-500 text-coral-500"
-                  : "text-zinc-600")
-              }
-            />
-            {recording ? "Gravando..." : "Aguardando Gravação..."}
-          </div>
-
-          {/* Botao Gravar */}
-          <button
-            onClick={handleToggle}
-            className={
-              "group mt-2 flex h-24 w-24 items-center justify-center rounded-full transition-all duration-300 " +
-              (recording
-                ? "bg-coral-600 scale-105 shadow-glow-coral"
-                : "bg-coral-500 hover:scale-105 hover:shadow-glow-coral")
-            }
-          >
-            {recording ? (
-              <span className="h-6 w-6 rounded-sm bg-white" />
-            ) : (
-              <Mic className="h-9 w-9 text-white" />
-            )}
-          </button>
-
-          {/* Atalhos */}
-          <div className="flex items-center gap-3 text-xs text-zinc-500">
-            <span>Iniciar Gravação</span>
-            <KbdCombo keys={["Ctrl", "B"]} />
-          </div>
+          <Button variant="secondary" size="sm" onClick={() => onNavigate("configuracoes")}>
+            <Settings2 className="h-3.5 w-3.5" aria-hidden />
+            Configurar
+          </Button>
         </div>
-      </Card>
+        <dl className="mt-5 grid grid-cols-3 divide-x divide-line border-t border-line pt-4 max-[980px]:grid-cols-1 max-[980px]:divide-x-0 max-[980px]:divide-y">
+          <PipelineFact label="Modelo" value={details.model} />
+          <PipelineFact label="Provedor" value={details.provider} />
+          <PipelineFact label="Tipo de conteúdo" value={pipeline?.content_type === "programming" ? "Programação" : pipeline?.content_type === "study" ? "Estudo" : "Automático"} />
+        </dl>
+      </section>
 
-      {/* Estatísticas de uso */}
-      <section className="mx-auto max-w-5xl">
-        <h2 className="mb-4 text-xs font-medium uppercase tracking-wider text-zinc-500">
-          Suas estatísticas
-        </h2>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-          <StatCard
-            Icon={FileText}
-            label="Transcrições"
-            value={formatCount(stats.transcriptions)}
-          />
-          <StatCard
-            Icon={Mic}
-            label="Gravações"
-            value={formatCount(stats.recordings)}
-          />
-          <StatCard
-            Icon={Type}
-            label="Palavras transcritas"
-            value={formatCount(stats.words)}
-          />
-          <StatCard
-            Icon={AlignLeft}
-            label="Média palavras/frase"
-            value={
-              stats.avgWordsPerSentence
-                ? stats.avgWordsPerSentence.toFixed(1)
-                : "0"
-            }
-          />
-          <StatCard
-            Icon={Clock}
-            label="Tempo de áudio"
-            value={formatDuration(stats.durationMs)}
-          />
+      <section className="mt-8" aria-labelledby="recent-activity">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 id="recent-activity" className="section-title">Atividade recente</h2>
+          <Button variant="ghost" size="sm" onClick={() => onNavigate("historico")}>
+            Ver histórico <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+          </Button>
+        </div>
+        <div className="surface">
+          {loading ? (
+            <SkeletonRows count={3} />
+          ) : recent.length ? (
+            <div className="divider-list">
+              {recent.map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  onClick={() => onNavigate("historico")}
+                  className="flex w-full items-center gap-4 px-5 py-4 text-left transition-colors hover:bg-[#fafaf8] first:rounded-t-[14px] last:rounded-b-[14px]"
+                >
+                  <FileText className="h-4 w-4 shrink-0 text-[#7a7b74]" strokeWidth={1.7} aria-hidden />
+                  <div className="min-w-0 flex-1">
+                    <p className={`truncate text-[13px] font-medium ${entry.is_error ? "text-[#a72a21]" : "text-ink"}`}>
+                      {entry.is_error ? entry.error_message || "Falha na transcrição" : entry.text || "Transcrição sem texto"}
+                    </p>
+                    <p className="mt-1 truncate text-[11px] text-muted">{entry.date}</p>
+                  </div>
+                  <span className="shrink-0 text-[11px] tabular-nums text-muted">{formatEntryDuration(entry.duration_ms)}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="px-5 py-10 text-center">
+              <p className="text-[13px] font-medium text-ink">Nenhuma atividade ainda</p>
+              <p className="mt-1 text-[12px] text-muted">Use {toggleKeys.join(" + ")} para criar sua primeira transcrição.</p>
+            </div>
+          )}
         </div>
       </section>
+
     </div>
   );
 }
 
-/** A single metric tile used in the Início dashboard. */
-function StatCard({
-  Icon,
-  label,
-  value,
-}: {
-  Icon: ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-}) {
+function PipelineFact({ label, value }: { label: string; value: string }) {
   return (
-    <Card className="group flex flex-col gap-3 p-5 transition-colors duration-200 hover:border-zinc-700">
-      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-coral-500/10 text-coral-400 transition-colors duration-200 group-hover:bg-coral-500/15">
-        <Icon className="h-5 w-5" />
-      </div>
-      <div>
-        <div className="font-mono text-2xl font-semibold tabular-nums text-zinc-100">
-          {value}
-        </div>
-        <div className="mt-0.5 text-xs leading-tight text-zinc-500">{label}</div>
-      </div>
-    </Card>
+    <div className="min-w-0 px-5 first:pl-0 last:pr-0 max-[980px]:px-0 max-[980px]:py-3 max-[980px]:first:pt-0">
+      <dt className="text-[11px] text-muted">{label}</dt>
+      <dd className="mt-1 truncate text-[13px] font-medium text-ink" title={value}>{value}</dd>
+    </div>
   );
 }

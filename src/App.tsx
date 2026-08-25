@@ -12,17 +12,15 @@ export default function App() {
   const [view, setView] = useState<ViewKey>("inicio");
 
   return (
-    <div className="relative flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100">
-      {/* Transparent frameless title bar overlaid on the top edge. It takes no
-          vertical space, so the sidebar and main content keep their original
-          top alignment (no downward shift). */}
+    <div className="relative flex h-screen w-screen overflow-hidden bg-canvas text-ink">
+      <a href="#main-content" className="skip-link">Pular para o conteúdo</a>
       <TitleBar />
 
       <Sidebar current={view} onSelect={setView} />
 
-      <main className="scrollbar-thin flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-[1400px] px-14 py-12">
-          {view === "inicio" && <InicioView />}
+      <main id="main-content" tabIndex={-1} className="scrollbar-thin min-w-0 flex-1 overflow-y-auto">
+        <div className="page-shell">
+          {view === "inicio" && <InicioView onNavigate={setView} />}
           {view === "transcricao" && <TranscricaoView />}
           {view === "historico" && <HistoricoView />}
           {view === "atalhos" && <AtalhosView />}

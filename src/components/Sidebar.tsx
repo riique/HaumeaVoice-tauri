@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import {
-  Home,
-  Mic,
+  AudioLines,
+  FileAudio,
   History,
+  Home,
   Keyboard,
   Settings,
   type LucideIcon,
@@ -12,7 +13,7 @@ import type { ViewKey } from "../views";
 
 const NAV: { key: ViewKey; label: string; icon: LucideIcon }[] = [
   { key: "inicio", label: "Início", icon: Home },
-  { key: "transcricao", label: "Transcrição", icon: Mic },
+  { key: "transcricao", label: "Transcrição", icon: FileAudio },
   { key: "historico", label: "Histórico", icon: History },
   { key: "atalhos", label: "Atalhos", icon: Keyboard },
   { key: "configuracoes", label: "Configurações", icon: Settings },
@@ -23,7 +24,7 @@ export function Sidebar({
   onSelect,
 }: {
   current: ViewKey;
-  onSelect: (v: ViewKey) => void;
+  onSelect: (view: ViewKey) => void;
 }) {
   const [version, setVersion] = useState("");
 
@@ -32,50 +33,46 @@ export function Sidebar({
   }, []);
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-800/50 bg-zinc-900">
-      <div className="px-7 pt-9 pb-12">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-coral-500 shadow-glow-coral">
-            <Mic className="h-5 w-5 text-white" />
-          </div>
-          <div className="flex flex-col leading-tight">
-            <span className="text-[15px] font-semibold tracking-tight text-zinc-100">
-              Haumea Voice
-            </span>
-            <span className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
-              Desktop
-            </span>
-          </div>
+    <aside className="flex w-[216px] shrink-0 flex-col border-r border-line bg-sidebar pb-6 pt-8 max-[1180px]:w-[76px]">
+      <div className="flex h-12 items-center gap-2.5 px-5 max-[1180px]:justify-center max-[1180px]:px-0">
+        <div className="flex h-8 w-8 items-center justify-center rounded-[10px] border border-[#cacbc4] bg-white text-ink">
+          <AudioLines className="h-[17px] w-[17px]" strokeWidth={1.8} aria-hidden />
         </div>
+        <span className="text-[16px] font-semibold tracking-[-0.02em] text-ink max-[1180px]:hidden">
+          Haumea
+        </span>
       </div>
 
-      <nav className="flex flex-1 flex-col gap-1.5 px-4">
+      <nav className="mt-8 flex flex-1 flex-col gap-1 px-3" aria-label="Navegação principal">
         {NAV.map((item) => {
           const Icon = item.icon;
           const active = current === item.key;
           return (
             <button
               key={item.key}
+              type="button"
+              aria-current={active ? "page" : undefined}
+              aria-label={item.label}
+              title={item.label}
               onClick={() => onSelect(item.key)}
               className={
-                "group flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition-all duration-200 " +
+                "flex h-10 items-center gap-3 rounded-[10px] px-3 text-[13px] font-medium transition-colors duration-150 max-[1180px]:justify-center max-[1180px]:px-0 " +
                 (active
-                  ? "bg-coral-500/15 text-coral-300"
-                  : "text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200")
+                  ? "bg-[#dfdfd9] text-ink"
+                  : "text-[#5e5f59] hover:bg-[#e8e8e3] hover:text-ink")
               }
             >
-              <Icon className="h-[18px] w-[18px]" />
-              {item.label}
-              {active && (
-                <span className="ml-auto h-1.5 w-1.5 rounded-full bg-coral-500" />
-              )}
+              <Icon className="h-[17px] w-[17px] shrink-0" strokeWidth={1.8} aria-hidden />
+              <span className="max-[1180px]:hidden">{item.label}</span>
             </button>
           );
         })}
       </nav>
 
       {version && (
-        <div className="px-7 py-7 text-[11px] text-zinc-600">v{version}</div>
+        <div className="px-5 text-[11px] tabular-nums text-[#5d5e58] max-[1180px]:px-0 max-[1180px]:text-center">
+          <span className="max-[1180px]:hidden">Haumea Voice </span>v{version}
+        </div>
       )}
     </aside>
   );

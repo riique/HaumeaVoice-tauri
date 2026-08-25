@@ -4,54 +4,35 @@ export default {
   theme: {
     extend: {
       colors: {
-        coral: {
-          DEFAULT: "#E14D2A",
-          50: "#FFF3EF",
-          100: "#FFE0D6",
-          200: "#FFC2AC",
-          300: "#FF9B7B",
-          400: "#F26D48",
-          500: "#E14D2A",
-          600: "#C13D1F",
-          700: "#9A2F18",
-          800: "#722413",
-          900: "#4D1809",
-        },
+        canvas: "#f7f7f4",
+        sidebar: "#f1f1ed",
+        surface: "#ffffff",
+        ink: "#181816",
+        muted: "#6f706a",
+        line: "#deded8",
+        "line-strong": "#c7c8c0",
       },
       fontFamily: {
-        mono: ["JetBrains Mono", "Fira Code", "monospace"],
+        sans: ["Segoe UI Variable Text", "Segoe UI", "system-ui", "sans-serif"],
+        mono: ["Cascadia Mono", "Cascadia Code", "Consolas", "monospace"],
       },
       boxShadow: {
-        "glow-coral": "0 0 32px -4px rgba(225, 77, 42, 0.45)",
-        elevated: "0 8px 24px -6px rgba(0, 0, 0, 0.55)",
-        "elevated-lg": "0 16px 40px -10px rgba(0, 0, 0, 0.6)",
-        "elevated-xl": "0 24px 60px -12px rgba(0, 0, 0, 0.65)",
-        gadget: "0 12px 40px -8px rgba(0, 0, 0, 0.7), 0 0 28px -6px rgba(225, 77, 42, 0.35)",
+        float: "0 18px 44px -18px rgba(20, 20, 18, 0.42), 0 4px 14px -6px rgba(20, 20, 18, 0.24)",
+        menu: "0 18px 48px -20px rgba(20, 20, 18, 0.28)",
       },
       keyframes: {
-        "gadget-pop": {
-          "0%": { opacity: "0", transform: "scale(0.82) translateY(6px)" },
-          "100%": { opacity: "1", transform: "scale(1) translateY(0)" },
+        "gadget-enter": {
+          "0%": { opacity: "0.72", transform: "translateY(5px) scale(0.97)", filter: "blur(2px)" },
+          "100%": { opacity: "1", transform: "translateY(0) scale(1)", filter: "blur(0)" },
         },
-        "soft-pulse": {
-          "0%, 100%": { opacity: "1" },
-          "50%": { opacity: "0.45" },
-        },
-        "ring-pulse": {
-          "0%": { transform: "scale(1)", opacity: "0.55" },
-          "70%": { transform: "scale(1.8)", opacity: "0" },
-          "100%": { transform: "scale(1.8)", opacity: "0" },
-        },
-        breathe: {
-          "0%, 100%": { transform: "scale(1)" },
-          "50%": { transform: "scale(1.06)" },
+        "quiet-pulse": {
+          "0%, 100%": { opacity: "0.35" },
+          "50%": { opacity: "1" },
         },
       },
       animation: {
-        "gadget-pop": "gadget-pop 0.4s cubic-bezier(0.22, 1, 0.36, 1)",
-        "soft-pulse": "soft-pulse 1.4s ease-in-out infinite",
-        "ring-pulse": "ring-pulse 1.8s ease-out infinite",
-        breathe: "breathe 3.2s ease-in-out infinite",
+        "gadget-enter": "gadget-enter 180ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "quiet-pulse": "quiet-pulse 1.2s ease-in-out infinite",
       },
     },
   },

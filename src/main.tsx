@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
-import { GadgetApp } from "./views/GadgetView";
+import { GadgetApp, GadgetPreviewApp } from "./views/GadgetView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./index.css";
 
@@ -17,6 +17,7 @@ try {
 }
 
 const isGadget = windowLabel === "gadget";
+const isGadgetPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has("gadgetPreview");
 
 if (isGadget) {
   // The gadget window must be see-through so only its pill is painted.
@@ -27,7 +28,7 @@ if (isGadget) {
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>
-      {isGadget ? <GadgetApp /> : <App />}
+      {isGadget ? <GadgetApp /> : isGadgetPreview ? <GadgetPreviewApp /> : <App />}
     </ErrorBoundary>
   </React.StrictMode>,
 );

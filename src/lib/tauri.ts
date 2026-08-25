@@ -159,6 +159,11 @@ export async function toggleRecordingState(): Promise<boolean> {
   return invoke<boolean>("toggle_recording_state");
 }
 
+/** Discards the active capture through the same path as the global cancel shortcut. */
+export async function cancelRecording(): Promise<void> {
+  await invoke<void>("cancel_recording");
+}
+
 /** Returns the current recording flag from the backend. */
 export async function getRecordingState(): Promise<boolean> {
   return invoke<boolean>("get_recording_state");
@@ -346,6 +351,44 @@ export async function getCompactMode(): Promise<boolean> {
 /** Persists the gadget compact-mode preference and notifies the gadget window. */
 export async function setCompactMode(value: boolean): Promise<void> {
   await invoke<void>("set_compact_mode", { value });
+}
+
+export type WidgetVisibilityMode = "auto" | "always";
+export type WidgetDock = "bottom" | "left" | "right";
+export interface WidgetPreferences {
+  visibility_mode: WidgetVisibilityMode;
+  dock: WidgetDock;
+  display?: string | null;
+}
+
+export type GadgetVisualState =
+  | "hidden"
+  | "idle"
+  | "hover"
+  | "appearing"
+  | "initializing"
+  | "recording"
+  | "stopping"
+  | "processing"
+  | "processing_long"
+  | "success"
+  | "error";
+
+export async function getWidgetPreferences(): Promise<WidgetPreferences> {
+  return invoke<WidgetPreferences>("get_widget_preferences");
+}
+
+export async function setWidgetVisibilityMode(
+  mode: WidgetVisibilityMode,
+): Promise<WidgetPreferences> {
+  return invoke<WidgetPreferences>("set_widget_visibility_mode", { mode });
+}
+
+/** Applies state-derived native visibility, size and frozen-monitor placement. */
+export async function setGadgetVisualState(
+  visualState: GadgetVisualState,
+): Promise<GadgetVisualState> {
+  return invoke<GadgetVisualState>("set_gadget_visual_state", { visualState });
 }
 
 /** Visible-pill rectangle of the gadget overlay, in logical pixels relative to

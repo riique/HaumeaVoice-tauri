@@ -1,494 +1,353 @@
-﻿import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, Loader2, Mic, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertCircle, Check, Mic, RefreshCw, Square, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  getCompactMode,
-  getRecordingElapsed,
+  cancelRecording,
   getRecordingState,
+  getShortcuts,
+  getWidgetPreferences,
   retryTranscription,
   setGadgetHitRect,
+  setGadgetVisualState,
+  toggleRecordingState,
   type HistoryEntry,
+  type WidgetPreferences,
+  type WidgetVisibilityMode,
 } from "../lib/tauri";
+import {
+  GADGET_STATES,
+  restState,
+  stateAfterTimeout,
+  type GadgetState,
+} from "../gadget/machine";
 
-/** Number of bars rendered in the live waveform. */
-const BAR_COUNT = 16;
-const WAVE_BAR_WEIGHTS = [
-  0.22, 0.34, 0.48, 0.62, 0.78, 0.92, 1, 0.88,
-  0.82, 0.96, 0.74, 0.58, 0.46, 0.34, 0.26, 0.2,
+const BAR_COUNT = 18;
+const WAVE_WEIGHTS = [
+  0.18, 0.28, 0.42, 0.6, 0.78, 0.92, 0.7, 0.48, 0.82,
+  1, 0.76, 0.58, 0.88, 0.72, 0.54, 0.38, 0.26, 0.18,
 ];
 
-/** Formats an elapsed millisecond count as `MM:SS`. */
-function formatClock(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+function shortcutLabel(value: string): string {
+  return value.replace("CommandOrControl", "Ctrl").replace("Control", "Ctrl").split("+").join(" + ");
 }
 
-/**
- * Compact floating gadget rendered in the `"gadget"` window. Draggable by
- * pressing the pill (see `handleMouseDown` â†’ `startDragging`).
- *
- * The overlay window is a fixed, mostly-transparent box. To stop its
- * transparent area from swallowing clicks meant for whatever sits behind/around
- * it, the visible pill's rectangle is continuously reported to the backend
- * (`setGadgetHitRect`); a backend watcher then keeps the window click-through
- * everywhere except over the pill.
- *
- *  - Idle + compact   â†’ coral mic dot only.
- *  - Idle + normal    â†’ dot + "Haumea Voice" label.
- *  - Recording        â†’ pulsing dot, mini waveform, timer.
- */
 export function GadgetApp() {
-  const [recording, setRecording] = useState(false);
-  const [compact, setCompact] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
+  const [state, setState] = useState<GadgetState>("hidden");
+  const [visibilityMode, setVisibilityMode] = useState<WidgetVisibilityMode>("auto");
   const [audioLevel, setAudioLevel] = useState(0);
-  const [failure, setFailure] = useState<{
-    id: string;
-    message: string;
-    canRetry: boolean;
-  } | null>(null);
+  const [shortcut, setShortcut] = useState("Ctrl + B");
+  const [failure, setFailure] = useState<{ id: string; message: string; canRetry: boolean } | null>(null);
   const [retrying, setRetrying] = useState(false);
-  const tickRef = useRef<number | null>(null);
   const pillRef = useRef<HTMLDivElement>(null);
-  // Skip identical hit-rect IPCs (ResizeObserver + stateKey can re-fire with
-  // the same box). Cuts unnecessary main-thread `set_gadget_hit_rect` traffic.
-  const lastHitRectRef = useRef<{
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } | null>(null);
+  const stateRef = useRef<GadgetState>("hidden");
+  const modeRef = useRef<WidgetVisibilityMode>("auto");
+  const lastHitRectRef = useRef("");
 
-  // Reports the visible pill's rectangle (logical px, relative to the window's
-  // top-left) to the backend so the overlay can be click-through outside it.
-  // The pill is always centered in the full-window container, so we derive the
-  // rect from the window size and the pill's *layout* box (offsetWidth/Height,
-  // which ignore the entrance scale animation — keeping the rect stable).
-  const reportHitRect = useCallback(() => {
-    const el = pillRef.current;
-    if (!el) return;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    if (!w || !h) return;
-    const PAD = 4; // small forgiving margin around the pill
-    const next = {
-      x: (window.innerWidth - w) / 2 - PAD,
-      y: (window.innerHeight - h) / 2 - PAD,
-      width: w + PAD * 2,
-      height: h + PAD * 2,
-    };
-    const prev = lastHitRectRef.current;
-    if (
-      prev &&
-      Math.abs(prev.x - next.x) < 0.5 &&
-      Math.abs(prev.y - next.y) < 0.5 &&
-      Math.abs(prev.width - next.width) < 0.5 &&
-      Math.abs(prev.height - next.height) < 0.5
-    ) {
-      return;
-    }
-    lastHitRectRef.current = next;
-    setGadgetHitRect(next).catch(() => {
-      // Outside Tauri (plain browser dev) or window gone — nothing to do.
-    });
+  const transition = useCallback((next: GadgetState) => {
+    if (stateRef.current === next) return;
+    stateRef.current = next;
+    setState(next);
+    void setGadgetVisualState(next).catch((error) => console.error("set_gadget_visual_state failed:", error));
   }, []);
+
+  const transitionToRest = useCallback(() => {
+    setAudioLevel(0);
+    transition(restState(modeRef.current));
+  }, [transition]);
 
   useEffect(() => {
     let mounted = true;
+    void Promise.all([getRecordingState(), getWidgetPreferences(), getShortcuts()])
+      .then(([recording, preferences, shortcuts]) => {
+        if (!mounted) return;
+        modeRef.current = preferences.visibility_mode;
+        setVisibilityMode(preferences.visibility_mode);
+        setShortcut(shortcutLabel(shortcuts.toggle));
+        transition(recording ? "recording" : restState(preferences.visibility_mode));
+      })
+      .catch((error) => console.error("gadget bootstrap failed:", error));
 
-    (async () => {
-      try {
-        const [rec, cmp, ms] = await Promise.all([
-          getRecordingState(),
-          getCompactMode(),
-          getRecordingElapsed(),
-        ]);
-        if (mounted) {
-          setRecording(rec);
-          setCompact(cmp);
-          if (rec && ms > 0) setElapsed(ms);
-        }
-      } catch {
-        // Outside Tauri (plain browser dev).
-      }
-    })();
-
-    const unlisteners: Array<Promise<() => void>> = [
-      listen("recording-started", () => {
+    const subscriptions: Array<Promise<() => void>> = [
+      listen("recording-initializing", () => {
         setFailure(null);
         setRetrying(false);
-        setRecording(true);
-        setElapsed(0);
         setAudioLevel(0);
+        transition("appearing");
+      }),
+      listen("recording-started", () => {
+        setFailure(null);
+        setAudioLevel(0);
+        transition("recording");
       }),
       listen("recording-stopped", () => {
-        setRecording(false);
         setAudioLevel(0);
+        transition("stopping");
       }),
-      listen("recording-cancelled", () => {
-        setRecording(false);
-        setAudioLevel(0);
+      listen("recording-cancelled", transitionToRest),
+      listen<number>("audio-level", (event) => {
+        const level = Number.isFinite(event.payload) ? Math.max(0, Math.min(1, event.payload)) : 0;
+        setAudioLevel((previous) => Math.abs(previous - level) < 0.005 ? previous : level);
       }),
-      listen<number>("audio-level", (e) => {
-        const level = Number.isFinite(e.payload) ? e.payload : 0;
-        const clamped = Math.max(0, Math.min(1, level));
-        // Epsilon: skip React re-renders for imperceptible level noise.
-        // Waveform still smooths via rAF + ref inside RecordingPill.
-        setAudioLevel((prev) =>
-          Math.abs(prev - clamped) < 0.008 ? prev : clamped,
-        );
+      listen<boolean>("transcribing", (event) => {
+        if (event.payload) {
+          transition("processing");
+        } else if (["processing", "processing_long", "stopping"].includes(stateRef.current)) {
+          setFailure({ id: "", message: "Nenhuma fala foi detectada na gravação.", canRetry: false });
+          transition("error");
+        }
       }),
-      listen<boolean>("transcribing", (e) => {
-        setTranscribing(!!e.payload);
-      }),
-      listen<HistoryEntry>("transcription-saved", (e) => {
-        const entry = e.payload;
+      listen<HistoryEntry>("transcription-saved", (event) => {
+        const entry = event.payload;
+        if (entry.source && entry.source !== "mic") return;
+        setRetrying(false);
         if (entry.is_error) {
           setFailure({
             id: entry.id,
-            message: entry.error_message || "Não foi possível transcrever o áudio.",
+            message: entry.error_message || "Não foi possível transcrever.",
             canRetry: Boolean(entry.audio_path),
           });
+          transition("error");
         } else {
           setFailure(null);
-          setRetrying(false);
+          transition("success");
         }
       }),
-      listen<boolean>("compact-mode-changed", (e) => setCompact(!!e.payload)),
+      listen<WidgetPreferences>("widget-preferences-changed", (event) => {
+        const mode = event.payload.visibility_mode;
+        modeRef.current = mode;
+        setVisibilityMode(mode);
+        if (["hidden", "idle", "hover"].includes(stateRef.current)) transition(restState(mode));
+      }),
     ];
 
     return () => {
       mounted = false;
-      unlisteners.forEach((p) => p.then((u) => u()));
+      subscriptions.forEach((subscription) => void subscription.then((unlisten) => unlisten()));
     };
+  }, [transition, transitionToRest]);
+
+  useEffect(() => {
+    const timeout = GADGET_STATES[state].timeoutMs;
+    if (timeout === null) return;
+    const timer = window.setTimeout(() => {
+      const next = stateAfterTimeout(stateRef.current, modeRef.current);
+      if (next) transition(next);
+    }, timeout);
+    return () => window.clearTimeout(timer);
+  }, [state, transition]);
+
+  const reportHitRect = useCallback(() => {
+    const element = pillRef.current;
+    if (!element || GADGET_STATES[stateRef.current].visibility === "hidden") return;
+    const rect = element.getBoundingClientRect();
+    const next = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+    const serialized = JSON.stringify(next);
+    if (serialized === lastHitRectRef.current) return;
+    lastHitRectRef.current = serialized;
+    void setGadgetHitRect(next).catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    if (recording) {
-      tickRef.current = window.setInterval(
-        () => setElapsed((e) => e + 200),
-        200,
-      );
-    } else if (tickRef.current !== null) {
-      window.clearInterval(tickRef.current);
-      tickRef.current = null;
-    }
-    // Unconditionally clear the interval on cleanup. The previous guard
-    // (`&& !recording`) leaked the timer if the gadget unmounted/remounted
-    // (e.g. via React.StrictMode) while a recording was in progress. The
-    // orphaned 200ms interval then kept calling setState on a dead React
-    // root, eventually saturating the JS task queue and making the whole
-    // overlay window appear hung ("NÃ£o respondendo") â€” the root cause of
-    // the app freezing when focus moved away to another window.
-    return () => {
-      if (tickRef.current !== null) {
-        window.clearInterval(tickRef.current);
-        tickRef.current = null;
-      }
-    };
-  }, [recording]);
+    reportHitRect();
+    const element = pillRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(reportHitRect);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [state, reportHitRect]);
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.button === 0) { // Clique esquerdo
-      try {
-        getCurrentWindow().startDragging();
-      } catch (err) {
-        console.error("Erro ao arrastar janela:", err);
-      }
+  const startOrStop = async () => {
+    if (["idle", "hover"].includes(stateRef.current)) transition("appearing");
+    if (stateRef.current === "recording") transition("stopping");
+    try {
+      await toggleRecordingState();
+    } catch (error) {
+      setFailure({ id: "", message: typeof error === "string" ? error : "Não foi possível acessar o microfone.", canRetry: false });
+      transition("error");
     }
   };
 
-  const handleRetry = async () => {
+  const cancel = async () => {
+    try {
+      await cancelRecording();
+    } catch (error) {
+      console.error("cancel_recording failed:", error);
+    }
+  };
+
+  const retry = async () => {
     if (!failure?.canRetry || retrying) return;
     setRetrying(true);
+    transition("processing_long");
     try {
       await retryTranscription(failure.id);
-      setFailure(null);
     } catch (error) {
-      setFailure((current) =>
-        current
-          ? {
-              ...current,
-              message:
-                typeof error === "string"
-                  ? error
-                  : "A regeneração da transcrição falhou.",
-            }
-          : current,
-      );
-    } finally {
       setRetrying(false);
+      setFailure((current) => current ? { ...current, message: typeof error === "string" ? error : "A retranscrição falhou." } : current);
+      transition("error");
     }
   };
 
-  const stateKey = transcribing
-    ? "loading"
-    : recording
-      ? "rec"
-      : failure
-        ? "error"
-      : compact
-        ? "idle-compact"
-        : "idle-full";
-
-  // Re-report the pill rect whenever it remounts (state change) or resizes
-  // (waveform/timer/label width changes), so the click-through region always
-  // tracks the visible pill.
-  useEffect(() => {
-    reportHitRect();
-    const el = pillRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => reportHitRect());
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [stateKey, reportHitRect]);
-
-  // Window size changes (e.g. DPI move) shift the centered pill too.
-  useEffect(() => {
-    const onResize = () => reportHitRect();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [reportHitRect]);
+  if (state === "hidden") return null;
 
   return (
-    <div
-      className="flex h-screen w-screen select-none items-center justify-center overflow-hidden bg-transparent"
-    >
+    <div className="gadget-window">
       <div
-        key={stateKey}
         ref={pillRef}
-        onMouseDown={handleMouseDown}
-        className="animate-gadget-pop will-change-transform cursor-grab active:cursor-grabbing"
+        className={`gadget-stage gadget-stage--${GADGET_STATES[state].animation}`}
+        onPointerEnter={() => {
+          if (stateRef.current === "idle" && visibilityMode === "always") transition("hover");
+        }}
+        onPointerLeave={() => {
+          if (stateRef.current === "hover") transition("idle");
+        }}
+        aria-live="polite"
+        aria-label={GADGET_STATES[state].accessibleLabel}
       >
-        {transcribing ? (
-          <TranscribingPill />
-        ) : recording ? (
-          <RecordingPill elapsed={elapsed} level={audioLevel} />
-        ) : failure ? (
-          <TranscriptionErrorPill
-            message={failure.message}
-            canRetry={failure.canRetry}
-            retrying={retrying}
-            onRetry={handleRetry}
-          />
-        ) : compact ? (
-          <CompactOrb />
+        <GadgetPill
+          state={state}
+          level={audioLevel}
+          shortcut={shortcut}
+          failure={failure}
+          retrying={retrying}
+          onToggle={() => void startOrStop()}
+          onCancel={() => void cancel()}
+          onRetry={() => void retry()}
+        />
+      </div>
+    </div>
+  );
+}
+
+interface GadgetPillProps {
+  state: Exclude<GadgetState, "hidden">;
+  level: number;
+  shortcut: string;
+  failure: { id: string; message: string; canRetry: boolean } | null;
+  retrying: boolean;
+  onToggle: () => void;
+  onCancel: () => void;
+  onRetry: () => void;
+}
+
+function GadgetPill({ state, level, shortcut, failure, retrying, onToggle, onCancel, onRetry }: GadgetPillProps) {
+  if (state === "idle") {
+    return <button type="button" onClick={onToggle} className="haumea-bar haumea-bar--idle" aria-label={`Iniciar ditado. ${shortcut}`}><MiniWave /></button>;
+  }
+  if (state === "hover") {
+    return (
+      <button type="button" onClick={onToggle} className="haumea-bar haumea-bar--hover" aria-label={`Iniciar ditado. ${shortcut}`}>
+        <MiniWave /><Mic className="h-[15px] w-[15px]" aria-hidden /><span className="haumea-bar__shortcut">{shortcut}</span>
+      </button>
+    );
+  }
+  if (state === "recording") {
+    return (
+      <div className="haumea-bar haumea-bar--recording" role="status">
+        <BarButton label="Cancelar e descartar" onClick={onCancel}><X className="h-[17px] w-[17px]" strokeWidth={2} /></BarButton>
+        <Waveform level={level} />
+        <BarButton label="Parar e transcrever" onClick={onToggle} primary><Square className="h-[11px] w-[11px] fill-current" strokeWidth={1.5} /></BarButton>
+      </div>
+    );
+  }
+  if (state === "processing" || state === "processing_long") {
+    return (
+      <div className={`haumea-bar ${state === "processing" ? "haumea-bar--processing" : "haumea-bar--processing-long"}`} role="status">
+        <ProcessingDots />
+        {state === "processing_long" && <span className="haumea-bar__status">{retrying ? "Tentando novamente…" : "Transcrevendo…"}</span>}
+      </div>
+    );
+  }
+  if (state === "success") {
+    return <div className="haumea-bar haumea-bar--success" role="status"><Check className="h-[17px] w-[17px]" strokeWidth={2.2} aria-hidden /></div>;
+  }
+  if (state === "error") {
+    return (
+      <div className="haumea-bar haumea-bar--error" role="alert" title={failure?.message}>
+        <AlertCircle className="h-4 w-4 shrink-0 text-[#ffaaa3]" aria-hidden />
+        <span className="haumea-bar__error-text">Falha na transcrição</span>
+        {failure?.canRetry ? (
+          <button type="button" onClick={onRetry} disabled={retrying} className="haumea-bar__retry" aria-label="Tentar transcrever o áudio salvo novamente">
+            <RefreshCw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} aria-hidden /><span>Tentar novamente</span>
+          </button>
         ) : (
-          <FullPill />
+          <button type="button" onClick={onCancel} className="haumea-bar__dismiss" aria-label="Dispensar erro"><X className="h-3.5 w-3.5" aria-hidden /></button>
         )}
       </div>
-    </div>
-  );
+    );
+  }
+  return <div className="haumea-bar haumea-bar--activity" role="status"><ActivityMark settled={state === "stopping"} /></div>;
 }
 
-/* ------------------------------- Idle states ------------------------------- */
-
-function Orb({ size = "h-7 w-7" }: { size?: string }) {
-  return (
-    <div className="relative flex items-center justify-center pointer-events-none">
-      <span className="absolute inline-flex h-full w-full rounded-full bg-coral-500/40 animate-ring-pulse pointer-events-none" />
-      <div
-        className={
-          "relative flex items-center justify-center rounded-full bg-gradient-to-br from-coral-400 to-coral-600 shadow-glow-coral animate-breathe pointer-events-none " +
-          size
-        }
-      >
-        <Mic className="h-3.5 w-3.5 text-white pointer-events-none" strokeWidth={2.2} />
-      </div>
-    </div>
-  );
+function BarButton({ label, onClick, primary = false, children }: { label: string; onClick: () => void; primary?: boolean; children: React.ReactNode }) {
+  return <button type="button" onClick={onClick} className={`haumea-bar__control ${primary ? "haumea-bar__control--primary" : ""}`} aria-label={label}>{children}</button>;
 }
 
-function CompactOrb() {
-  return (
-    <div
-      className="rounded-full border border-white/10 bg-zinc-900/80 p-1 shadow-gadget backdrop-blur-xl"
-    >
-      <Orb />
-    </div>
-  );
+function ActivityMark({ settled = false }: { settled?: boolean }) {
+  return <span className={`activity-mark ${settled ? "activity-mark--settled" : ""}`} aria-hidden><span /><span /><span /></span>;
 }
 
-function FullPill() {
-  return (
-    <div
-      className="flex items-center gap-2 rounded-full border border-white/10 bg-zinc-900/80 py-1 pl-1 pr-3.5 shadow-gadget backdrop-blur-xl"
-    >
-      <Orb />
-      <div className="leading-none pointer-events-none">
-        <div className="text-[11px] font-semibold tracking-tight text-zinc-100 pointer-events-none">
-          Haumea Voice
-        </div>
-        <div className="text-[8px] font-medium uppercase tracking-wider text-zinc-500 pointer-events-none">
-          Pronto
-        </div>
-      </div>
-    </div>
-  );
+function ProcessingDots() {
+  return <span className="processing-dots" aria-hidden><span /><span /><span /></span>;
 }
 
-/* ------------------------------ Recording state ---------------------------- */
-
-function RecordingPill({
-  elapsed,
-  level,
-}: {
-  elapsed: number;
-  level: number;
-}) {
-  return (
-    <div
-      className="flex items-center gap-2.5 rounded-full border border-coral-500/30 bg-zinc-900/85 py-1.5 pl-3 pr-3.5 shadow-gadget backdrop-blur-xl"
-    >
-      {/* Pulsing live dot */}
-      <span className="relative flex h-2 w-2 shrink-0 pointer-events-none">
-        <span className="absolute inline-flex h-full w-full rounded-full bg-coral-500/60 animate-ring-pulse pointer-events-none" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-coral-500 animate-soft-pulse pointer-events-none" />
-      </span>
-
-      {/* Live waveform */}
-      <div className="pointer-events-none flex items-center">
-        <Waveform level={level} />
-      </div>
-
-      {/* Elapsed time */}
-      <div className="shrink-0 font-mono text-[11px] font-medium tabular-nums text-zinc-100 pointer-events-none">
-        {formatClock(elapsed)}
-      </div>
-    </div>
-  );
+function MiniWave() {
+  return <span className="mini-wave" aria-hidden>{[5, 10, 15, 9, 5].map((height, index) => <span key={index} style={{ height }} />)}</span>;
 }
 
 function Waveform({ level }: { level: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const targetLevelRef = useRef(0);
-  const smoothLevelRef = useRef(0);
+  const targetRef = useRef(0);
+  const envelopeRef = useRef(0);
 
   useEffect(() => {
-    // Extra frontend boost so quiet speech still moves the bars hard.
-    targetLevelRef.current = Math.min(1, level * 1.35);
+    targetRef.current = Math.min(1, Math.max(0, level));
   }, [level]);
 
   useEffect(() => {
-    let animFrame: number;
-    let time = 0;
-
+    let frame = 0;
+    let phase = 0;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const tick = () => {
-      time += 0.16;
-
-      if (containerRef.current) {
-        const spans = containerRef.current.children;
-        // Fast attack / medium release so speech pops immediately.
-        const target = targetLevelRef.current;
-        const current = smoothLevelRef.current;
-        const alpha = target > current ? 0.42 : 0.22;
-        smoothLevelRef.current += (target - current) * alpha;
-        const voice = smoothLevelRef.current < 0.008 ? 0 : smoothLevelRef.current;
-
-        for (let i = 0; i < spans.length; i++) {
-          const weight = WAVE_BAR_WEIGHTS[i] ?? 0.3;
-          const shimmer = voice > 0
-            ? 1 + Math.sin(time + i * 0.72) * 0.14 + Math.sin(time * 0.9 + i) * 0.1
-            : 1;
-          // Taller bars + more of the available height while speaking.
-          const height = 12 + voice * 92 * weight * shimmer;
-          const opacity = 0.55 + voice * 0.45 * Math.max(0.55, weight);
-          const bar = spans[i] as HTMLElement;
-          bar.style.height = `${Math.max(10, Math.min(100, height))}%`;
-          bar.style.opacity = `${Math.max(0.45, Math.min(1, opacity))}`;
-          // Glow intensity scales with voice so loud speech lights up coral/amber.
-          const glow = 0.35 + voice * 0.75;
-          bar.style.boxShadow = `0 0 ${6 + voice * 14}px rgba(255, 120, 60, ${glow}), 0 0 ${4 + voice * 8}px rgba(255, 200, 80, ${glow * 0.55})`;
-        }
-      }
-      animFrame = requestAnimationFrame(tick);
+      const target = targetRef.current;
+      const current = envelopeRef.current;
+      envelopeRef.current += (target - current) * (target > current ? 0.42 : 0.12);
+      const envelope = envelopeRef.current < 0.008 ? 0 : envelopeRef.current;
+      if (!reduceMotion && envelope > 0) phase += 0.11 + envelope * 0.035;
+      Array.from(containerRef.current?.children ?? []).forEach((child, index) => {
+        const weight = WAVE_WEIGHTS[index] ?? 0.3;
+        const organic = envelope > 0 && !reduceMotion ? 0.92 + Math.sin(phase + index * 0.73) * 0.09 : 1;
+        const height = 3 + envelope * 25 * weight * organic;
+        const bar = child as HTMLElement;
+        bar.style.height = `${Math.max(3, Math.min(28, height))}px`;
+        bar.style.opacity = `${0.42 + envelope * 0.58}`;
+      });
+      frame = requestAnimationFrame(tick);
     };
-
-    animFrame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animFrame);
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
   }, []);
 
-  return (
-    <div ref={containerRef} className="flex h-7 w-[58px] items-center justify-center gap-[2.5px] pointer-events-none">
-      {Array.from({ length: BAR_COUNT }).map((_, i) => (
-        <span
-          key={i}
-          className="w-[3px] rounded-full bg-gradient-to-t from-coral-600 via-coral-400 to-amber-100 pointer-events-none transition-none will-change-[height,opacity,box-shadow]"
-          style={{
-            height: "12%",
-            opacity: 0.5,
-            boxShadow: "0 0 6px rgba(255, 120, 60, 0.4)",
-          }}
-        />
-      ))}
-    </div>
-  );
+  return <div ref={containerRef} className="live-wave" aria-hidden>{Array.from({ length: BAR_COUNT }).map((_, index) => <span key={index} />)}</div>;
 }
 
-function TranscribingPill() {
+/** Deterministic visual QA surface; reachable only from the Vite dev build. */
+export function GadgetPreviewApp() {
+  const [level, setLevel] = useState(0.66);
+  const states: Array<Exclude<GadgetState, "hidden">> = ["idle", "hover", "initializing", "recording", "processing", "processing_long", "success", "error"];
   return (
-    <div
-      className="flex items-center gap-2.5 rounded-full border border-coral-500/30 bg-zinc-900/85 py-1.5 pl-3.5 pr-4 shadow-gadget backdrop-blur-xl animate-pulse"
-    >
-      <div className="flex items-center gap-1 shrink-0 pointer-events-none">
-        <span className="h-1.5 w-1.5 rounded-full bg-coral-500 animate-bounce [animation-delay:-0.3s] pointer-events-none" />
-        <span className="h-1.5 w-1.5 rounded-full bg-coral-500 animate-bounce [animation-delay:-0.15s] pointer-events-none" />
-        <span className="h-1.5 w-1.5 rounded-full bg-coral-500 animate-bounce pointer-events-none" />
+    <main className="gadget-preview">
+      <header><h1>Haumea Bar — visual QA</h1><label>RMS<input type="range" min="0" max="1" step="0.01" value={level} onChange={(event) => setLevel(Number(event.target.value))} /></label></header>
+      <div className="gadget-preview__grid">
+        {states.map((previewState) => (
+          <figure key={previewState}>
+            <div className="gadget-preview__stage">
+              <GadgetPill state={previewState} level={level} shortcut="Ctrl + B" failure={{ id: "preview", message: "Falha na transcrição", canRetry: true }} retrying={false} onToggle={() => undefined} onCancel={() => undefined} onRetry={() => undefined} />
+            </div>
+            <figcaption>{previewState}</figcaption>
+          </figure>
+        ))}
       </div>
-      <div className="text-[11px] font-semibold tracking-tight text-zinc-100 pointer-events-none">
-        Processando...
-      </div>
-    </div>
-  );
-}
-
-function TranscriptionErrorPill({
-  message,
-  canRetry,
-  retrying,
-  onRetry,
-}: {
-  message: string;
-  canRetry: boolean;
-  retrying: boolean;
-  onRetry: () => void;
-}) {
-  return (
-    <div
-      className="flex max-w-[272px] items-center gap-2 rounded-full border border-red-500/35 bg-zinc-900/95 py-1.5 pl-3 pr-2 shadow-gadget backdrop-blur-xl"
-      title={message}
-      role="alert"
-    >
-      <AlertCircle className="h-4 w-4 shrink-0 text-red-400" aria-hidden />
-      <span className="min-w-0 truncate text-[10px] font-semibold text-zinc-100">
-        Erro na transcrição
-      </span>
-      {canRetry ? (
-        <button
-          type="button"
-          disabled={retrying}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onRetry();
-          }}
-          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-red-500/30 bg-red-500/15 px-2 py-1 text-[9px] font-semibold text-red-200 transition-colors hover:bg-red-500/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 disabled:cursor-wait disabled:opacity-60"
-          aria-label="Regenerar transcrição"
-        >
-          {retrying ? (
-            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-          ) : (
-            <RefreshCw className="h-3 w-3" aria-hidden />
-          )}
-          {retrying ? "Tentando…" : "Regenerar"}
-        </button>
-      ) : (
-        <span className="shrink-0 text-[9px] text-zinc-500">Áudio indisponível</span>
-      )}
-    </div>
+    </main>
   );
 }

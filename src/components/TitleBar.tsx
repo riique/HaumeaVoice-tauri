@@ -63,7 +63,7 @@ export function TitleBar() {
         <TitleBarButton
           label="Minimizar"
           onClick={handleMinimize}
-          hoverClass="hover:bg-zinc-800/80 hover:text-zinc-100"
+          hoverClass="hover:bg-[#e8e8e3] hover:text-ink"
         >
           <Minus className="h-4 w-4" strokeWidth={2} />
         </TitleBarButton>
@@ -71,7 +71,7 @@ export function TitleBar() {
         <TitleBarButton
           label={maximized ? "Restaurar" : "Maximizar"}
           onClick={handleToggleMaximize}
-          hoverClass="hover:bg-zinc-800/80 hover:text-zinc-100"
+          hoverClass="hover:bg-[#e8e8e3] hover:text-ink"
         >
           {maximized ? (
             <Copy className="h-3.5 w-3.5 -scale-x-100" strokeWidth={2} />
@@ -112,7 +112,7 @@ function TitleBarButton({
       // Prevent the drag region from intercepting the click.
       onMouseDown={(e) => e.stopPropagation()}
       className={
-        "flex h-9 w-11 items-center justify-center text-zinc-400 transition-colors duration-150 " +
+        "flex h-9 w-11 items-center justify-center text-[#6f706a] transition-colors duration-150 " +
         hoverClass
       }
     >

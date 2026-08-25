@@ -36,9 +36,9 @@ export class ErrorBoundary extends Component<Props, State> {
   render(): ReactNode {
     if (this.state.hasError) {
       return (
-        <div className="flex h-screen w-screen flex-col items-center justify-center gap-6 bg-zinc-950 text-zinc-100">
+        <div className="flex h-screen w-screen flex-col items-center justify-center gap-6 bg-canvas text-ink">
           <div className="flex flex-col items-center gap-3 text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-coral-500/10 text-coral-400">
+            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#fff1ef] text-[#a72a21]">
               <svg
                 viewBox="0 0 24 24"
                 fill="none"
@@ -52,19 +52,19 @@ export class ErrorBoundary extends Component<Props, State> {
               </svg>
             </div>
             <h1 className="text-lg font-semibold">Algo deu errado</h1>
-            <p className="max-w-md text-sm text-zinc-500">
+            <p className="max-w-md text-sm text-muted">
               Ocorreu um erro inesperado. Tente recarregar a página. Se o
               problema persistir, reinicie o aplicativo.
             </p>
             {this.state.error && (
-              <pre className="mt-2 max-w-lg overflow-auto rounded-lg bg-zinc-900 p-4 text-xs text-zinc-400">
+              <pre className="mt-2 max-w-lg overflow-auto rounded-lg bg-[#252522] p-4 text-xs text-[#e8e8e2]">
                 {this.state.error.message}
               </pre>
             )}
           </div>
           <button
             onClick={this.handleReload}
-            className="rounded-xl bg-coral-500 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-coral-600"
+            className="rounded-[9px] bg-[#1d1d1b] px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-black"
           >
             Tentar novamente
           </button>

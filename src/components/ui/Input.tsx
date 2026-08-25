@@ -1,19 +1,19 @@
 import type { InputHTMLAttributes, SelectHTMLAttributes, TextareaHTMLAttributes } from "react";
 
 const base =
-  "w-full rounded-xl border border-zinc-800/70 bg-zinc-950/60 px-4 py-2.5 text-sm text-zinc-100 " +
-  "placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-coral-500/40 focus:border-coral-500/40 " +
-  "transition-all duration-200";
+  "w-full rounded-[10px] border border-line bg-white px-3.5 text-[13px] text-ink placeholder:text-[#5d5e58] " +
+  "transition-[border-color,box-shadow,background-color] duration-150 hover:border-line-strong " +
+  "focus:border-[#999a93] focus:outline-none focus:ring-2 focus:ring-[#20201e]/10 disabled:cursor-not-allowed disabled:bg-[#f0f0ec] disabled:text-[#8c8d86]";
 
 export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
-  return <input {...props} className={base + " " + (props.className ?? "")} />;
+  return <input {...props} autoComplete={props.autoComplete ?? "off"} className={base + " h-10 " + (props.className ?? "")} />;
 }
 
 export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select
       {...props}
-      className={base + " cursor-pointer appearance-none " + (props.className ?? "")}
+      className={base + " h-10 cursor-pointer pr-9 " + (props.className ?? "")}
     />
   );
 }
@@ -22,7 +22,7 @@ export function Textarea(props: TextareaAttributes) {
   return (
     <textarea
       {...props}
-      className={base + " resize-none leading-relaxed " + (props.className ?? "")}
+      className={base + " min-h-28 resize-y py-3 leading-6 " + (props.className ?? "")}
     />
   );
 }

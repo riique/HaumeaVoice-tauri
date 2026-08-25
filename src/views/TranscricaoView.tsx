@@ -1,16 +1,15 @@
 import { useEffect, useState } from "react";
-import { Cloud, UploadCloud, FileAudio, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { AlertCircle, CheckCircle2, FileAudio, Loader2, UploadCloud } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "../components/ui/Button";
-import { Card } from "../components/ui/Card";
+import { PageHeader } from "../components/ui/Surface";
 import { transcribeFile } from "../lib/tauri";
 
 type Status = "idle" | "transcribing" | "done" | "error";
 
 const AUDIO_EXTENSIONS = ["wav", "mp3", "m4a", "flac", "ogg", "aac", "webm", "mp4"];
 
-/** Extracts the file name from an absolute path (handles both separators). */
 function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
@@ -22,33 +21,32 @@ export function TranscricaoView() {
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
 
-  // Native (Tauri) drag-and-drop. The webview reports file paths directly, so
-  // we keep only the first dropped file and ignore non-audio extensions.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    (async () => {
-      unlisten = await getCurrentWebview().onDragDropEvent((event) => {
-        const p = event.payload;
-        if (p.type === "over" || p.type === "enter") {
-          setDragging(true);
-        } else if (p.type === "leave") {
-          setDragging(false);
-        } else if (p.type === "drop") {
-          setDragging(false);
-          const dropped = p.paths?.[0];
-          if (dropped && AUDIO_EXTENSIONS.includes(dropped.split(".").pop()?.toLowerCase() ?? "")) {
-            selectPath(dropped);
-          }
-        }
-      });
-    })();
-    return () => {
-      if (unlisten) unlisten();
-    };
+    void getCurrentWebview().onDragDropEvent((event) => {
+      const payload = event.payload;
+      if (payload.type === "over" || payload.type === "enter") {
+        setDragging(true);
+        return;
+      }
+      if (payload.type === "leave") {
+        setDragging(false);
+        return;
+      }
+      if (payload.type === "drop") {
+        setDragging(false);
+        const dropped = payload.paths?.[0];
+        const extension = dropped?.split(".").pop()?.toLowerCase() ?? "";
+        if (dropped && AUDIO_EXTENSIONS.includes(extension)) selectPath(dropped);
+      }
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => unlisten?.();
   }, []);
 
-  const selectPath = (p: string) => {
-    setFilePath(p);
+  const selectPath = (path: string) => {
+    setFilePath(path);
     setStatus("idle");
     setResult("");
     setError("");
@@ -61,11 +59,9 @@ export function TranscricaoView() {
         directory: false,
         filters: [{ name: "Áudio", extensions: AUDIO_EXTENSIONS }],
       });
-      if (typeof selected === "string") {
-        selectPath(selected);
-      }
-    } catch (e) {
-      console.error("file dialog failed:", e);
+      if (typeof selected === "string") selectPath(selected);
+    } catch (browseError) {
+      console.error("file dialog failed:", browseError);
     }
   };
 
@@ -75,102 +71,66 @@ export function TranscricaoView() {
     setError("");
     setResult("");
     try {
-      const text = await transcribeFile(filePath);
-      setResult(text);
+      setResult(await transcribeFile(filePath));
       setStatus("done");
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+    } catch (transcriptionError) {
+      setError(typeof transcriptionError === "string" ? transcriptionError : String(transcriptionError));
       setStatus("error");
     }
   };
 
   return (
     <div className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-100">
-          Transcrição
-        </h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Envie um arquivo de áudio para transcrever via motores em nuvem.
-        </p>
-      </header>
+      <PageHeader title="Transcrição" description="Envie um arquivo de áudio para transcrever com a pipeline ativa." />
 
-      {/* Drag & Drop gigante */}
-      <Card
-        onClick={handleBrowse}
-        className={
-          "flex min-h-[280px] cursor-pointer flex-col items-center justify-center gap-4 p-12 text-center transition-all duration-300 " +
-          (dragging || filePath
-            ? "border-coral-500/50 bg-coral-500/5"
-            : "border-dashed border-zinc-700 hover:border-coral-500/40 hover:bg-zinc-800/20")
-        }
-      >
-        <div className="flex flex-col items-center gap-4">
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-zinc-800 text-coral-400">
-            {filePath ? <FileAudio className="h-8 w-8" /> : <UploadCloud className="h-8 w-8" />}
-          </div>
-          {filePath ? (
-            <>
-              <p className="text-base font-medium text-zinc-200">{baseName(filePath)}</p>
-              <p className="text-xs text-zinc-600">Clique para escolher outro arquivo</p>
-            </>
-          ) : (
-            <>
-              <p className="text-base font-medium text-zinc-200">
-                Clique ou arraste seu arquivo de áudio aqui para transcrever
-              </p>
-              <p className="text-xs text-zinc-600">
-                Formatos suportados: WAV, MP3, M4A, FLAC
-              </p>
-            </>
-          )}
-        </div>
-      </Card>
-
-      <Card className="p-4 border-zinc-800/60">
-        <p className="text-xs text-zinc-500 leading-relaxed flex items-start gap-2">
-          <Cloud className="h-3.5 w-3.5 text-coral-400 shrink-0 mt-0.5" />
-          <span>
-            Usa a <strong className="text-zinc-400">pipeline ativa</strong> em
-            Configurações › Pipelines (não um seletor separado aqui). O idioma
-            segue o áudio e as regras do motor — sem seletor cosmético.
-          </span>
-        </p>
-      </Card>
-
-      {/* Botão de ação */}
-      <div className="flex items-center justify-end gap-3 pt-2">
-        {status === "error" && (
-          <span className="flex items-center gap-1.5 text-sm text-red-400">
-            <AlertCircle className="h-4 w-4" /> {error}
-          </span>
-        )}
-        {status === "done" && (
-          <span className="flex items-center gap-1.5 text-sm text-emerald-400">
-            <CheckCircle2 className="h-4 w-4" /> Transcrição salva no histórico.
-          </span>
-        )}
-        <Button
-          variant="primary"
-          disabled={!filePath || status === "transcribing"}
-          className="gap-2 px-8 py-3 text-base"
-          onClick={handleTranscribe}
+      <section className="surface overflow-hidden" aria-labelledby="upload-title">
+        <button
+          type="button"
+          onClick={handleBrowse}
+          className={
+            "m-6 flex min-h-[330px] w-[calc(100%-3rem)] flex-col items-center justify-center rounded-[12px] border border-dashed px-10 py-14 text-center transition-colors " +
+            (dragging
+              ? "border-[#656660] bg-[#f0f0eb]"
+              : "border-[#d7d7d1] bg-[#fcfcfa] hover:border-[#a8a9a2] hover:bg-[#f8f8f4]")
+          }
+          aria-describedby="upload-formats"
         >
-          {status === "transcribing" && <Loader2 className="h-4 w-4 animate-spin" />}
-          {status === "transcribing" ? "Transcrevendo..." : "Transcrever Arquivo"}
-        </Button>
-      </div>
+          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-line bg-white text-[#50514c]">
+            {filePath ? <FileAudio className="h-5 w-5" aria-hidden /> : <UploadCloud className="h-5 w-5" aria-hidden />}
+          </span>
+          <span id="upload-title" className="mt-5 text-[15px] font-medium text-ink">
+            {filePath ? baseName(filePath) : "Clique ou arraste seu arquivo de áudio aqui"}
+          </span>
+          <span id="upload-formats" className="mt-2 text-[13px] text-muted">
+            {filePath ? "Clique para escolher outro arquivo" : "WAV, MP3, M4A, FLAC, OGG, AAC, WEBM ou MP4"}
+          </span>
+          {!filePath && <span className="mt-5 text-[12px] font-medium text-[#555650]">Escolher arquivo</span>}
+        </button>
 
-      {/* Resultado */}
-      {result && (
-        <Card className="p-7">
-          <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-zinc-500">
-            Resultado
-          </h3>
-          <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-zinc-300">
-            {result}
-          </p>
-        </Card>
+        <div className="flex min-h-[62px] items-center justify-between gap-5 border-t border-line px-6 py-4">
+          <p className="text-[12px] leading-5 text-muted">A pipeline definida em Configurações será usada automaticamente.</p>
+          <Button variant="primary" disabled={!filePath || status === "transcribing"} onClick={handleTranscribe}>
+            {status === "transcribing" && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
+            {status === "transcribing" ? "Transcrevendo…" : "Transcrever arquivo"}
+          </Button>
+        </div>
+      </section>
+
+      {status === "error" && (
+        <div className="flex items-start gap-3 rounded-[10px] bg-[#fff1ef] px-4 py-3 text-[13px] text-[#9f2720]" role="alert">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {status === "done" && (
+        <div className="surface overflow-hidden">
+          <div className="flex items-center gap-2 border-b border-line px-5 py-4 text-[13px] font-medium text-[#25613f]" role="status">
+            <CheckCircle2 className="h-4 w-4" aria-hidden />
+            Transcrição concluída e salva no histórico
+          </div>
+          <p className="whitespace-pre-wrap px-5 py-5 text-[14px] leading-6 text-[#343530]">{result}</p>
+        </div>
       )}
     </div>
   );

@@ -17,8 +17,8 @@ pub mod shortcuts;
 pub mod transcription;
 pub mod vocabulary;
 
-use models::SharedState;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU64, Ordering};
+use models::{GadgetSessionAnchor, GadgetVisualState, SharedState, WidgetVisibilityMode};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, Ordering};
 use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -43,89 +43,201 @@ fn cache_gadget_hwnd(window: &tauri::WebviewWindow) {
 #[cfg(not(target_os = "windows"))]
 fn cache_gadget_hwnd(_window: &tauri::WebviewWindow) {}
 
-/// Logical size of the floating gadget window. Kept tight so the overlay
-/// footprint is minimal — just enough to house the pill in any state.
-const GADGET_W: f64 = 280.0;
-const GADGET_H: f64 = 56.0;
+const GADGET_BOTTOM_MARGIN: f64 = 18.0;
 
-#[derive(Clone, Copy, Debug)]
-struct MonitorBounds {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    scale: f64,
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GadgetGeometry {
+    width: f64,
+    height: f64,
 }
 
-/// Chooses the monitor that contains most of the requested gadget rectangle,
-/// then clamps the complete overlay inside that monitor. When a saved monitor
-/// no longer exists, the nearest current monitor wins instead of leaving the
-/// gadget outside the virtual desktop.
-fn clamp_gadget_placement(
-    desired_x: i32,
-    desired_y: i32,
-    monitors: &[MonitorBounds],
+/// The native footprint is state-derived and stays close to the painted pill.
+/// The small extra inset is only for the real shadow, not a permanent hitbox.
+fn gadget_geometry(state: GadgetVisualState) -> GadgetGeometry {
+    match state {
+        GadgetVisualState::Hidden => GadgetGeometry {
+            width: 1.0,
+            height: 1.0,
+        },
+        GadgetVisualState::Idle | GadgetVisualState::Appearing => GadgetGeometry {
+            width: 72.0,
+            height: 52.0,
+        },
+        GadgetVisualState::Hover => GadgetGeometry {
+            width: 142.0,
+            height: 58.0,
+        },
+        GadgetVisualState::Initializing | GadgetVisualState::Stopping => GadgetGeometry {
+            width: 74.0,
+            height: 52.0,
+        },
+        GadgetVisualState::Recording => GadgetGeometry {
+            width: 186.0,
+            height: 48.0,
+        },
+        GadgetVisualState::Processing => GadgetGeometry {
+            width: 78.0,
+            height: 52.0,
+        },
+        GadgetVisualState::ProcessingLong => GadgetGeometry {
+            width: 158.0,
+            height: 52.0,
+        },
+        GadgetVisualState::Success => GadgetGeometry {
+            width: 54.0,
+            height: 52.0,
+        },
+        GadgetVisualState::Error => GadgetGeometry {
+            width: 326.0,
+            height: 58.0,
+        },
+    }
+}
+
+fn bottom_center_placement(
+    anchor: &GadgetSessionAnchor,
+    geometry: GadgetGeometry,
 ) -> (i32, i32, u32, u32) {
+    let width = (geometry.width * anchor.scale).round().max(1.0) as u32;
+    let height = (geometry.height * anchor.scale).round().max(1.0) as u32;
+    let x = anchor.work_x as i64 + (anchor.work_width as i64 - width as i64) / 2;
+    let y = anchor.work_y as i64 + anchor.work_height as i64
+        - height as i64
+        - (GADGET_BOTTOM_MARGIN * anchor.scale).round() as i64;
+    (x as i32, y as i32, width, height)
+}
+
+fn monitor_anchor(monitor: &tauri::Monitor) -> GadgetSessionAnchor {
+    let work = monitor.work_area();
+    GadgetSessionAnchor {
+        display_name: monitor.name().map(ToOwned::to_owned),
+        work_x: work.position.x,
+        work_y: work.position.y,
+        work_width: work.size.width,
+        work_height: work.size.height,
+        scale: monitor.scale_factor(),
+    }
+}
+
+fn choose_gadget_anchor(app: &tauri::AppHandle) -> Option<GadgetSessionAnchor> {
+    let monitors = app.available_monitors().ok()?;
     if monitors.is_empty() {
-        return (desired_x, desired_y, GADGET_W as u32, GADGET_H as u32);
+        return None;
     }
 
-    let overlap = |monitor: &MonitorBounds| -> i64 {
-        let width = (GADGET_W * monitor.scale).round().max(1.0) as i64;
-        let height = (GADGET_H * monitor.scale).round().max(1.0) as i64;
-        let left = (desired_x as i64).max(monitor.x as i64);
-        let top = (desired_y as i64).max(monitor.y as i64);
-        let right = (desired_x as i64 + width).min(monitor.x as i64 + monitor.width as i64);
-        let bottom = (desired_y as i64 + height).min(monitor.y as i64 + monitor.height as i64);
-        (right - left).max(0) * (bottom - top).max(0)
-    };
+    if let Some(saved_name) = crate::settings::load_widget_display() {
+        if let Some(monitor) = monitors
+            .iter()
+            .find(|monitor| monitor.name().map(String::as_str) == Some(saved_name.as_str()))
+        {
+            return Some(monitor_anchor(monitor));
+        }
+        log::warn!(
+            "gadget: persisted display '{}' is unavailable; using cursor/primary fallback",
+            saved_name
+        );
+    }
 
-    let distance = |monitor: &MonitorBounds| -> i64 {
-        let right = monitor.x as i64 + monitor.width as i64;
-        let bottom = monitor.y as i64 + monitor.height as i64;
-        let x = desired_x as i64;
-        let y = desired_y as i64;
-        let dx = if x < monitor.x as i64 {
-            monitor.x as i64 - x
-        } else if x > right {
-            x - right
-        } else {
-            0
-        };
-        let dy = if y < monitor.y as i64 {
-            monitor.y as i64 - y
-        } else if y > bottom {
-            y - bottom
-        } else {
-            0
-        };
-        dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
-    };
+    if let Ok(cursor) = app.cursor_position() {
+        if let Some(monitor) = monitors.iter().find(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            cursor.x >= position.x as f64
+                && cursor.x < (position.x as f64 + size.width as f64)
+                && cursor.y >= position.y as f64
+                && cursor.y < (position.y as f64 + size.height as f64)
+        }) {
+            return Some(monitor_anchor(monitor));
+        }
+    }
 
-    let best_overlap = monitors.iter().map(overlap).max().unwrap_or(0);
-    let monitor = if best_overlap > 0 {
-        monitors.iter().max_by_key(|monitor| overlap(monitor))
+    app.primary_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| monitor_anchor(&monitor))
+}
+
+fn apply_gadget_presentation(
+    app: &tauri::AppHandle,
+    state: &SharedState,
+    requested: GadgetVisualState,
+) -> Result<GadgetVisualState, String> {
+    let resolved = if requested == GadgetVisualState::Hidden
+        && *state.widget_visibility_mode.read() == WidgetVisibilityMode::Always
+    {
+        GadgetVisualState::Idle
     } else {
-        monitors.iter().min_by_key(|monitor| distance(monitor))
+        requested
+    };
+    *state.gadget_visual_state.write() = resolved;
+
+    let Some(window) = app.get_webview_window("gadget") else {
+        return Err("gadget window is unavailable".to_string());
+    };
+
+    if resolved == GadgetVisualState::Hidden {
+        let _ = window.set_ignore_cursor_events(true);
+        window.hide().map_err(|error| error.to_string())?;
+        *state.gadget_hit_rect.write() = None;
+        *state.gadget_session_anchor.lock() = None;
+        return Ok(resolved);
     }
-    .expect("monitors is not empty");
 
-    let width = (GADGET_W * monitor.scale).round().max(1.0) as u32;
-    let height = (GADGET_H * monitor.scale).round().max(1.0) as u32;
-    let margin = (8.0 * monitor.scale).round() as i32;
-    let min_x = monitor.x.saturating_add(margin);
-    let min_y = monitor.y.saturating_add(margin);
-    let max_x = (monitor.x as i64 + monitor.width as i64 - width as i64 - margin as i64)
-        .max(min_x as i64) as i32;
-    let max_y = (monitor.y as i64 + monitor.height as i64 - height as i64 - margin as i64)
-        .max(min_y as i64) as i32;
+    let anchor = {
+        let mut frozen = state.gadget_session_anchor.lock();
+        if frozen.is_none() {
+            *frozen = choose_gadget_anchor(app);
+        }
+        frozen.clone()
+    }
+    .ok_or_else(|| "no display is available for the gadget".to_string())?;
 
-    (
-        desired_x.clamp(min_x, max_x),
-        desired_y.clamp(min_y, max_y),
-        width,
-        height,
-    )
+    let geometry = gadget_geometry(resolved);
+    let (x, y, physical_width, physical_height) = bottom_center_placement(&anchor, geometry);
+
+    *state.gadget_hit_rect.write() = None;
+    let _ = window.set_ignore_cursor_events(true);
+    window
+        .set_size(tauri::PhysicalSize::new(physical_width, physical_height))
+        .map_err(|error| error.to_string())?;
+    window
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    log::info!(
+        "gadget: state={:?} display={:?} work=({},{} {}x{}) window=({},{} {}x{}) scale={:.2}",
+        resolved,
+        anchor.display_name,
+        anchor.work_x,
+        anchor.work_y,
+        anchor.work_width,
+        anchor.work_height,
+        x,
+        y,
+        physical_width,
+        physical_height,
+        anchor.scale,
+    );
+    Ok(resolved)
+}
+
+pub(crate) fn begin_gadget_session(app: &tauri::AppHandle, state: &SharedState) {
+    let mut anchor = state.gadget_session_anchor.lock();
+    if anchor.is_none() {
+        *anchor = choose_gadget_anchor(app);
+    }
+    drop(anchor);
+    if let Err(error) = apply_gadget_presentation(app, state, GadgetVisualState::Appearing) {
+        log::warn!("gadget: failed to begin session: {}", error);
+    }
+}
+
+pub(crate) fn present_gadget(
+    app: &tauri::AppHandle,
+    state: &SharedState,
+    visual_state: GadgetVisualState,
+) -> Result<GadgetVisualState, String> {
+    apply_gadget_presentation(app, state, visual_state)
 }
 
 /// Creates the always-on-top floating gadget overlay. It loads the same bundle
@@ -143,83 +255,32 @@ fn clamp_gadget_placement(
 /// monitor would be reinterpreted against the 1.0x primary monitor and land
 /// in the wrong spot. Physical pixels are scale-independent and therefore
 /// round-trip reliably across any monitor configuration.
-fn setup_gadget(app: &tauri::AppHandle) {
-    let monitors: Vec<MonitorBounds> = app
-        .available_monitors()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|monitor| MonitorBounds {
-            x: monitor.position().x,
-            y: monitor.position().y,
-            width: monitor.size().width,
-            height: monitor.size().height,
-            scale: monitor.scale_factor(),
-        })
-        .collect();
-
-    // Default position: top-center of the primary monitor (physical pixels).
-    let default_pos = app.primary_monitor().ok().flatten().map(|monitor| {
-        let scale = monitor.scale_factor();
-        let phys_w = monitor.size().width as i32;
-        let x = ((phys_w as f64) - (GADGET_W * scale)) / 2.0;
-        (
-            monitor.position().x.saturating_add(x as i32),
-            monitor.position().y.saturating_add((18.0 * scale) as i32),
-        )
-    });
-
-    // Prefer the persisted physical position; fall back to logical (legacy)
-    // position converted to physical using the primary monitor's scale; finally
-    // fall back to the computed default.
-    let (desired_x, desired_y) =
-        if let Some((x, y)) = crate::settings::load_gadget_physical_position() {
-            (x, y)
-        } else if let Some((lx, ly)) = crate::settings::load_gadget_position() {
-            let scale = app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|m| m.scale_factor())
-                .unwrap_or(1.0);
-            ((lx * scale) as i32, (ly * scale) as i32)
-        } else if let Some((x, y)) = default_pos {
-            (x, y)
-        } else {
-            (520, 18)
-        };
-
-    let (phys_x, phys_y, init_phys_w, init_phys_h) =
-        clamp_gadget_placement(desired_x, desired_y, &monitors);
-
+fn setup_gadget(app: &tauri::AppHandle, state: &SharedState) {
+    let initial = if *state.widget_visibility_mode.read() == WidgetVisibilityMode::Always {
+        GadgetVisualState::Idle
+    } else {
+        GadgetVisualState::Hidden
+    };
+    let geometry = gadget_geometry(initial);
     let builder = WebviewWindowBuilder::new(app, "gadget", WebviewUrl::App("index.html".into()))
-        .title("Haumea Gadget")
-        .inner_size(GADGET_W, GADGET_H)
+        .title("Haumea Dictation Bar")
+        .inner_size(geometry.width, geometry.height)
         .resizable(false)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
-        .visible(true)
-        .focused(false);
+        .visible(false)
+        .focused(false)
+        .focusable(false);
 
     match builder.build() {
         Ok(window) => {
-            // Move the window to the selected monitor, then apply the inner
-            // size using that monitor's DPI. Doing this *after* build avoids the builder's
-            // logical-only position path, which is what was clamping the
-            // gadget to the primary monitor on multi-monitor systems.
-            use tauri::PhysicalPosition;
-            let _ = window.set_position(PhysicalPosition::new(phys_x, phys_y));
-            let _ = window.set_size(tauri::PhysicalSize::new(init_phys_w, init_phys_h));
-            // Cache HWND so the cursor watcher can hit-test with pure Win32 APIs
-            // off the Tauri event loop (the main fix for AppHang under Task Manager).
             cache_gadget_hwnd(&window);
-            log::info!(
-                "gadget: overlay window created at physical ({}, {})",
-                phys_x,
-                phys_y
-            );
+            if let Err(error) = apply_gadget_presentation(app, state, initial) {
+                log::warn!("gadget: initial presentation failed: {}", error);
+            }
         }
         Err(e) => log::error!("gadget: failed to create overlay window: {}", e),
     }
@@ -254,7 +315,7 @@ fn win32_cursor_inside_pill(hwnd_raw: isize, state: &SharedState) -> bool {
             return true;
         }
         if !IsWindowVisible(hwnd).as_bool() {
-            return true;
+            return false;
         }
 
         let mut rect = RECT::default();
@@ -270,7 +331,7 @@ fn win32_cursor_inside_pill(hwnd_raw: isize, state: &SharedState) -> bool {
         let scale = if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 };
 
         match *state.gadget_hit_rect.read() {
-            None => true,
+            None => false,
             Some(r) => {
                 let left = rect.left as f64 + r.x * scale;
                 let top = rect.top as f64 + r.y * scale;
@@ -282,136 +343,6 @@ fn win32_cursor_inside_pill(hwnd_raw: isize, state: &SharedState) -> bool {
             }
         }
     }
-}
-
-/// Reasserts the native topmost Z-order without activating the gadget. The
-/// asynchronous flag is important: this runs from the cursor worker and must
-/// never synchronously wait on the Tauri/Windows UI thread (the old source of
-/// AppHangB1 under focus storms).
-///
-/// It also recovers an overlay left entirely outside the virtual desktop after
-/// a monitor is unplugged by moving it to the top-center of the primary work
-/// area. A partially visible gadget is left alone so normal cross-monitor
-/// dragging is not interrupted.
-#[cfg(target_os = "windows")]
-fn win32_keep_gadget_visible_and_topmost(hwnd_raw: isize) -> bool {
-    use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL,
-        MONITOR_DEFAULTTOPRIMARY,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, IsWindow, SetWindowPos, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    };
-
-    if hwnd_raw == 0 {
-        return false;
-    }
-    let hwnd = HWND(hwnd_raw as *mut _);
-
-    // SAFETY: the cached HWND is validated before use. SetWindowPos is queued
-    // asynchronously when the owner belongs to another input thread, so this
-    // worker cannot block the main event loop.
-    unsafe {
-        if !IsWindow(hwnd).as_bool() {
-            GADGET_HWND.store(0, Ordering::Release);
-            return false;
-        }
-
-        let visible_monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
-        let mut x = 0;
-        let mut y = 0;
-        let mut flags =
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_SHOWWINDOW;
-
-        if visible_monitor.0.is_null() {
-            let primary = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
-            let mut info = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let mut rect = RECT::default();
-            if !primary.0.is_null()
-                && GetMonitorInfoW(primary, &mut info).as_bool()
-                && GetWindowRect(hwnd, &mut rect).is_ok()
-            {
-                let width = (rect.right - rect.left).max(1);
-                let work_width = (info.rcWork.right - info.rcWork.left).max(width);
-                x = info.rcWork.left + (work_width - width) / 2;
-                y = info.rcWork.top + 18;
-                flags &= !SWP_NOMOVE;
-                log::warn!(
-                    "gadget: saved monitor disappeared; recovering overlay at ({}, {})",
-                    x,
-                    y
-                );
-            }
-        }
-
-        SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, flags).is_ok()
-    }
-}
-
-/// Returns the current foreground HWND as raw pointer bits. This is a cheap,
-/// read-only Win32 query used by the gadget worker to react immediately when
-/// the user switches to another application. A zero value is valid while the
-/// desktop is transitioning between foreground windows.
-#[cfg(target_os = "windows")]
-fn win32_foreground_window_raw() -> isize {
-    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-
-    // SAFETY: GetForegroundWindow takes no pointers and only returns a borrowed
-    // HWND value owned by Windows. We never dereference the handle here.
-    unsafe { GetForegroundWindow().0 as isize }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn win32_keep_gadget_visible_and_topmost(_hwnd_raw: isize) -> bool {
-    false
-}
-
-static GADGET_POS_X: AtomicI32 = AtomicI32::new(0);
-static GADGET_POS_Y: AtomicI32 = AtomicI32::new(0);
-static GADGET_POS_VERSION: AtomicU64 = AtomicU64::new(0);
-static GADGET_POS_WRITER_RUNNING: AtomicBool = AtomicBool::new(false);
-
-/// Debounces per-pixel `Moved` events into one trailing background write. This
-/// both preserves the exact final drag position and avoids spawning a thread
-/// (or touching disk) for every few pixels of movement.
-fn queue_gadget_position_save(x: i32, y: i32) {
-    GADGET_POS_X.store(x, Ordering::Relaxed);
-    GADGET_POS_Y.store(y, Ordering::Relaxed);
-    GADGET_POS_VERSION.fetch_add(1, Ordering::AcqRel);
-
-    if GADGET_POS_WRITER_RUNNING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-
-    std::thread::spawn(|| loop {
-        let observed = GADGET_POS_VERSION.load(Ordering::Acquire);
-        std::thread::sleep(std::time::Duration::from_millis(350));
-        if GADGET_POS_VERSION.load(Ordering::Acquire) != observed {
-            continue;
-        }
-
-        crate::settings::save_gadget_physical_position(
-            GADGET_POS_X.load(Ordering::Relaxed),
-            GADGET_POS_Y.load(Ordering::Relaxed),
-        );
-
-        GADGET_POS_WRITER_RUNNING.store(false, Ordering::Release);
-        if GADGET_POS_VERSION.load(Ordering::Acquire) == observed {
-            break;
-        }
-
-        // Close the tiny race between clearing the flag and checking the
-        // version. If another event already started a writer, this one exits;
-        // otherwise it reacquires ownership and persists the newer position.
-        if GADGET_POS_WRITER_RUNNING.swap(true, Ordering::AcqRel) {
-            break;
-        }
-    });
 }
 
 /// Spawns a lightweight background thread that keeps the gadget overlay
@@ -432,21 +363,14 @@ fn queue_gadget_position_save(x: i32, y: i32) {
 ///   window calls per tick).
 /// - **Main-thread work only when the ignore flag actually changes**, and at
 ///   most one pending toggle at a time.
-/// - Cadence ~200 ms (imperceptible for a ~280×56 pill).
+/// - Cadence ~200 ms (imperceptible for a small floating pill).
 ///
-/// Until the first pill rect is reported the overlay stays fully interactive.
+/// Until the first pill rect is reported the overlay stays click-through.
 fn spawn_gadget_cursor_watcher_safe(app: tauri::AppHandle, state: SharedState) {
     let pending_toggle = Arc::new(AtomicBool::new(false));
 
-    #[cfg(target_os = "windows")]
-    log::info!(
-        "gadget: native topmost keeper enabled (foreground-aware + 400ms fallback, async Win32 Z-order)"
-    );
-
     std::thread::spawn(move || {
         let mut last_ignore: Option<bool> = None;
-        #[cfg(target_os = "windows")]
-        let mut last_foreground_hwnd = 0isize;
         let mut tick: u32 = 0;
 
         loop {
@@ -455,7 +379,7 @@ fn spawn_gadget_cursor_watcher_safe(app: tauri::AppHandle, state: SharedState) {
 
             #[cfg(target_os = "windows")]
             {
-                let mut hwnd_raw = GADGET_HWND.load(Ordering::Acquire);
+                let hwnd_raw = GADGET_HWND.load(Ordering::Acquire);
 
                 // Rare HWND re-resolve if cache is empty (window recreated, etc.).
                 // Coalesced with the toggle pending flag so we never flood main.
@@ -481,30 +405,9 @@ fn spawn_gadget_cursor_watcher_safe(app: tauri::AppHandle, state: SharedState) {
                     continue;
                 }
 
-                // Reassert as soon as the foreground application changes (at
-                // most one 200 ms polling interval later), with a 400ms fallback
-                // for topmost popups that do not become the foreground window.
-                // Unlike Tauri's `set_always_on_top`, this does not change
-                // window styles and never synchronously crosses into the UI
-                // thread.
-                let foreground_hwnd = win32_foreground_window_raw();
-                let foreground_changed = foreground_hwnd != last_foreground_hwnd;
-                if foreground_changed {
-                    last_foreground_hwnd = foreground_hwnd;
-                }
-                if foreground_changed || tick % 2 == 0 {
-                    let _ = win32_keep_gadget_visible_and_topmost(hwnd_raw);
-                    hwnd_raw = GADGET_HWND.load(Ordering::Acquire);
-                    if hwnd_raw == 0 {
-                        last_ignore = None;
-                        continue;
-                    }
-                }
-
                 let inside = win32_cursor_inside_pill(hwnd_raw, &state);
                 // If HWND was invalidated during hit-test, skip this tick.
-                hwnd_raw = GADGET_HWND.load(Ordering::Acquire);
-                if hwnd_raw == 0 {
+                if GADGET_HWND.load(Ordering::Acquire) == 0 {
                     last_ignore = None;
                     continue;
                 }
@@ -565,7 +468,7 @@ fn spawn_gadget_cursor_watcher_safe(app: tauri::AppHandle, state: SharedState) {
                         return;
                     }
                     let inside = match *state_for_tick.gadget_hit_rect.read() {
-                        None => true,
+                        None => false,
                         Some(r) => {
                             match (app_for_tick.cursor_position(), window.outer_position()) {
                                 (Ok(cursor), Ok(pos)) => {
@@ -605,6 +508,97 @@ fn spawn_gadget_cursor_watcher_safe(app: tauri::AppHandle, state: SharedState) {
         }
     });
 }
+
+#[cfg(target_os = "windows")]
+fn win32_foreground_monitor_anchor() -> Option<GadgetSessionAnchor> {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    // SAFETY: all calls are read-only OS queries. The foreground HWND and
+    // monitor handle are validated by their documented null results.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() || foreground.0 as isize == GADGET_HWND.load(Ordering::Acquire) {
+            return None;
+        }
+        let monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+        if monitor.0.is_null() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        let dpi = GetDpiForWindow(foreground);
+        let work = info.rcWork;
+        Some(GadgetSessionAnchor {
+            display_name: None,
+            work_x: work.left,
+            work_y: work.top,
+            work_width: (work.right - work.left).max(1) as u32,
+            work_height: (work.bottom - work.top).max(1) as u32,
+            scale: if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 },
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_gadget_focus_monitor_watcher(app: tauri::AppHandle, state: SharedState) {
+    let pending_move = Arc::new(AtomicBool::new(false));
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let Some(next_anchor) = win32_foreground_monitor_anchor() else {
+            continue;
+        };
+        if *state.gadget_visual_state.read() == GadgetVisualState::Hidden {
+            continue;
+        }
+        let unchanged = state
+            .gadget_session_anchor
+            .lock()
+            .as_ref()
+            .map(|current| {
+                current.work_x == next_anchor.work_x
+                    && current.work_y == next_anchor.work_y
+                    && current.work_width == next_anchor.work_width
+                    && current.work_height == next_anchor.work_height
+                    && (current.scale - next_anchor.scale).abs() < 0.01
+            })
+            .unwrap_or(false);
+        if unchanged || pending_move.swap(true, Ordering::AcqRel) {
+            continue;
+        }
+
+        let app_for_move = app.clone();
+        let state_for_move = state.clone();
+        let pending_for_move = pending_move.clone();
+        let pending_for_error = pending_move.clone();
+        let queued = app.run_on_main_thread(move || {
+            let current_state = *state_for_move.gadget_visual_state.read();
+            if current_state != GadgetVisualState::Hidden {
+                *state_for_move.gadget_session_anchor.lock() = Some(next_anchor);
+                if let Err(error) =
+                    apply_gadget_presentation(&app_for_move, &state_for_move, current_state)
+                {
+                    log::warn!("gadget: focus-monitor move failed: {}", error);
+                }
+            }
+            pending_for_move.store(false, Ordering::Release);
+        });
+        if queued.is_err() {
+            pending_for_error.store(false, Ordering::Release);
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_gadget_focus_monitor_watcher(_app: tauri::AppHandle, _state: SharedState) {}
 
 /// Builds the system tray icon and its context menu. The app keeps running in
 /// the background (window hidden) when closed, and the tray lets the user
@@ -987,6 +981,9 @@ pub fn run() {
                         // Lightweight UI preferences (gadget compact mode).
                         settings::init(dir.join("settings.json"));
                         *state.compact_mode.write() = settings::load_compact();
+                        *state.widget_visibility_mode.write() =
+                            settings::load_widget_visibility_mode();
+                        *state.widget_dock.write() = settings::load_widget_dock();
                         *state.system_prompt.write() = settings::load_system_prompt();
 
                         if let Some(engine) = settings::load_engine() {
@@ -1031,11 +1028,12 @@ pub fn run() {
                 }
 
                 // Spawn the always-on-top floating gadget overlay.
-                setup_gadget(app.handle());
+                setup_gadget(app.handle(), &state);
 
                 // Make the overlay click-through outside its visible pill so it
                 // no longer eats clicks that land near (but not on) the gadget.
                 spawn_gadget_cursor_watcher_safe(app.handle().clone(), state.clone());
+                spawn_gadget_focus_monitor_watcher(app.handle().clone(), state.clone());
 
                 // If not launched via autostart, show the main window.
                 let is_autostart = std::env::args().any(|arg| arg == "--autostart");
@@ -1065,6 +1063,7 @@ pub fn run() {
             commands::transcribe_file,
             commands::evaluate_pronunciation,
             commands::toggle_recording_state,
+            commands::cancel_recording,
             commands::get_recording_state,
             commands::get_recording_elapsed,
             commands::get_history,
@@ -1082,6 +1081,9 @@ pub fn run() {
             commands::set_vocabulary,
             commands::get_compact_mode,
             commands::set_compact_mode,
+            commands::get_widget_preferences,
+            commands::set_widget_visibility_mode,
+            commands::set_gadget_visual_state,
             commands::set_gadget_hit_rect,
             commands::get_shortcuts,
             commands::set_shortcuts,
@@ -1109,16 +1111,6 @@ pub fn run() {
             match &event {
                 WindowEvent::Focused(focused) => {
                     log::info!("window: '{}' focus -> {}", window.label(), focused);
-                    // Reassert immediately when our main window gains focus or
-                    // the gadget loses it to another app. This direct Win32
-                    // request does not mutate styles through Tauri's event loop.
-                    #[cfg(target_os = "windows")]
-                    if (*focused && window.label() == "main")
-                        || (!*focused && window.label() == "gadget")
-                    {
-                        let hwnd = GADGET_HWND.load(Ordering::Acquire);
-                        let _ = win32_keep_gadget_visible_and_topmost(hwnd);
-                    }
                 }
                 WindowEvent::Destroyed => {
                     log::info!("window: '{}' destroyed", window.label());
@@ -1133,30 +1125,10 @@ pub fn run() {
                 _ => {}
             }
 
-            if window.label() == "gadget" {
-                if let WindowEvent::Moved(position) = event {
-                    // `position` is a `PhysicalPosition<i32>` relative to the
-                    // virtual desktop origin. Persisting it *as physical*
-                    // (instead of dividing by the scale factor) makes the
-                    // restore path independent of which monitor's DPI was in
-                    // effect when the window was saved — the root cause of the
-                    // gadget always snapping back to the primary monitor.
-                    let x = position.x;
-                    let y = position.y;
-                    // Sanity-check: reject absurd values that occasionally show
-                    // up during window creation/teardown on some WSL/Wine
-                    // setups (e.g. i32::MIN). A real position is always within
-                    // a few hundred thousand pixels of the origin.
-                    if x.abs() < 1_000_000 && y.abs() < 1_000_000 {
-                        queue_gadget_position_save(x, y);
-                    }
-                }
-            }
-
             // Closing the main window only hides it: the app keeps running in
             // the system tray. "Sair" in the tray menu performs a real exit.
-            // The gadget should never be closed or hidden — just block the
-            // event without touching its visibility.
+            // The gadget is lifecycle-managed by its state machine; a close
+            // request must not destroy the reusable WebView.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     let _ = window.hide();
@@ -1170,39 +1142,56 @@ pub fn run() {
 
 #[cfg(test)]
 mod gadget_placement_tests {
-    use super::{clamp_gadget_placement, MonitorBounds};
-
-    const PRIMARY: MonitorBounds = MonitorBounds {
-        x: 0,
-        y: 0,
-        width: 1920,
-        height: 1080,
-        scale: 1.0,
-    };
-    const SECONDARY: MonitorBounds = MonitorBounds {
-        x: -2560,
-        y: -200,
-        width: 2560,
-        height: 1440,
-        scale: 1.5,
-    };
+    use super::{bottom_center_placement, gadget_geometry};
+    use crate::models::{GadgetSessionAnchor, GadgetVisualState};
 
     #[test]
-    fn keeps_a_valid_secondary_monitor_position_and_dpi() {
-        let placement = clamp_gadget_placement(-1800, 20, &[PRIMARY, SECONDARY]);
-        assert_eq!(placement, (-1800, 20, 420, 84));
+    fn centers_recording_on_negative_mixed_dpi_work_area() {
+        let anchor = GadgetSessionAnchor {
+            display_name: Some("DISPLAY-2".to_string()),
+            work_x: -2560,
+            work_y: -200,
+            work_width: 2560,
+            work_height: 1392,
+            scale: 1.5,
+        };
+        let placement =
+            bottom_center_placement(&anchor, gadget_geometry(GadgetVisualState::Recording));
+        assert_eq!(placement, (-1420, 1093, 279, 72));
     }
 
     #[test]
-    fn recovers_a_position_from_a_disconnected_monitor() {
-        let (x, y, width, height) = clamp_gadget_placement(5000, 4000, &[PRIMARY]);
-        assert_eq!((width, height), (280, 56));
-        assert_eq!((x, y), (1632, 1016));
+    fn uses_work_area_not_full_monitor_height() {
+        let anchor = GadgetSessionAnchor {
+            display_name: None,
+            work_x: 0,
+            work_y: 0,
+            work_width: 1920,
+            work_height: 1040,
+            scale: 1.0,
+        };
+        let placement = bottom_center_placement(&anchor, gadget_geometry(GadgetVisualState::Idle));
+        assert_eq!(placement, (924, 970, 72, 52));
     }
 
     #[test]
-    fn clamps_negative_edges_without_forcing_the_primary_monitor() {
-        let (x, y, _, _) = clamp_gadget_placement(-2700, -500, &[PRIMARY, SECONDARY]);
-        assert_eq!((x, y), (-2548, -188));
+    fn every_visual_state_has_a_positive_native_footprint() {
+        use GadgetVisualState::*;
+        for state in [
+            Hidden,
+            Idle,
+            Hover,
+            Appearing,
+            Initializing,
+            Recording,
+            Stopping,
+            Processing,
+            ProcessingLong,
+            Success,
+            Error,
+        ] {
+            let geometry = gadget_geometry(state);
+            assert!(geometry.width > 0.0 && geometry.height > 0.0);
+        }
     }
 }

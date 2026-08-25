@@ -95,6 +95,16 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
     log::info!("shortcut: toggle recording {} -> {}", current, next);
 
     if next {
+        // Seed the anchor from the cursor immediately. The foreground-monitor
+        // watcher may replace it later if focus crosses to another display.
+        crate::begin_gadget_session(app, state);
+        if let Err(e) = app.emit(event_names::RECORDING_INITIALIZING, true) {
+            log::warn!(
+                "failed to emit {}: {}",
+                event_names::RECORDING_INITIALIZING,
+                e
+            );
+        }
         // Heavy work (COM unmute + CPAL device open) runs off the main
         // thread to prevent AppHang when drivers stall.
         let app_bg = app.clone();

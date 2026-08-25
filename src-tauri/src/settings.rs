@@ -16,8 +16,17 @@ static SETTINGS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 /// On-disk representation of the user preferences.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Settings {
+    /// Legacy flag from the old permanently-visible gadget. When the new
+    /// preference is absent, `true` migrates to `Always`; `false` to `Auto`.
     #[serde(default)]
     compact_mode: bool,
+    #[serde(default)]
+    widget_visibility_mode: Option<crate::models::WidgetVisibilityMode>,
+    #[serde(default)]
+    widget_dock: crate::models::WidgetDock,
+    /// Stable display identity (Tauri monitor name), never a display index.
+    #[serde(default)]
+    widget_display: Option<String>,
     #[serde(default)]
     input_device: Option<String>,
     #[serde(default)]
@@ -514,6 +523,35 @@ pub fn save_mode_config_batch(
 
 pub fn load_content_type() -> crate::pipeline_contract::ContentType {
     read().content_type
+}
+
+/// Loads the new visibility preference, coherently migrating the old compact
+/// flag instead of exposing two contradictory settings.
+pub fn load_widget_visibility_mode() -> crate::models::WidgetVisibilityMode {
+    let s = read();
+    s.widget_visibility_mode.unwrap_or(if s.compact_mode {
+        crate::models::WidgetVisibilityMode::Always
+    } else {
+        crate::models::WidgetVisibilityMode::Auto
+    })
+}
+
+pub fn save_widget_visibility_mode(value: crate::models::WidgetVisibilityMode) {
+    let mut s = read();
+    s.widget_visibility_mode = Some(value);
+    // Keep the legacy field meaningful for one-version backwards compatibility.
+    s.compact_mode = value == crate::models::WidgetVisibilityMode::Always;
+    write(&s);
+}
+
+pub fn load_widget_dock() -> crate::models::WidgetDock {
+    read().widget_dock
+}
+
+pub fn load_widget_display() -> Option<String> {
+    read()
+        .widget_display
+        .filter(|value| !value.trim().is_empty())
 }
 
 pub fn load_gemini_pipelines() -> crate::pipeline_contract::GeminiPipelineConfig {

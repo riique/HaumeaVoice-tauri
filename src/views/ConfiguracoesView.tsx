@@ -20,11 +20,15 @@ import {
   FolderOpen,
   HardDrive,
   RotateCcw,
+  Settings2,
+  SlidersHorizontal,
+  BookOpen,
+  ChevronRight,
   type LucideIcon,
 } from "lucide-react";
 import {
-  getCompactMode,
-  setCompactMode,
+  getWidgetPreferences,
+  setWidgetVisibilityMode,
   listAudioDevices,
   getInputDevice,
   setInputDevice,
@@ -55,11 +59,13 @@ import {
   type OpenRouterWhisperModel,
   type VocabularyTerm,
   type VocabularyCategory,
+  type WidgetVisibilityMode,
 } from "../lib/tauri";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Toggle } from "../components/ui/Toggle";
+import { PageHeader, PreferenceRow } from "../components/ui/Surface";
 
 type Tab =
   | "geral"
@@ -68,13 +74,19 @@ type Tab =
   | "vocabulario"
   | "diagnostico";
 
-const TABS: { key: Tab; label: string }[] = [
-  { key: "geral", label: "Geral" },
-  { key: "pipelines", label: "Pipelines" },
-  { key: "provedores", label: "Provedores e APIs" },
-  { key: "vocabulario", label: "Vocabulário" },
-  { key: "diagnostico", label: "Diagnóstico" },
+const TABS: { key: Tab; label: string; description: string; Icon: LucideIcon }[] = [
+  { key: "geral", label: "Geral", description: "Inicialização, áudio e armazenamento", Icon: Settings2 },
+  { key: "pipelines", label: "Pipelines", description: "Velocidade, precisão e conteúdo", Icon: SlidersHorizontal },
+  { key: "provedores", label: "Provedores e APIs", description: "Conexões e chaves locais", Icon: KeyRound },
+  { key: "vocabulario", label: "Vocabulário", description: "Grafias e variações faladas", Icon: BookOpen },
+  { key: "diagnostico", label: "Diagnóstico", description: "Logs e informações técnicas", Icon: Activity },
 ];
+
+function displayWindowsPath(path: string): string {
+  if (path.startsWith("\\\\?\\UNC\\")) return `\\\\${path.slice(8)}`;
+  if (path.startsWith("\\\\?\\")) return path.slice(4);
+  return path;
+}
 
 const MODE_CARDS: {
   id: TranscriptionMode;
@@ -133,52 +145,50 @@ const CONTENT_TYPES: { id: ContentType; label: string; hint: string }[] = [
 ];
 
 export function ConfiguracoesView() {
-  const [tab, setTab] = useState<Tab>("pipelines");
+  const [tab, setTab] = useState<Tab>("geral");
+  const currentTab = TABS.find((item) => item.key === tab)!;
 
   return (
     <div className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-100">
-          Configurações
-        </h1>
-        <p className="mt-1 text-sm text-zinc-500 max-w-2xl">
-          Escolha como o Haumea Voice transcreve, conecte suas chaves e ajuste o
-          vocabulário. Um pipeline ativo por vez — sem promessas de perfeição
-          absoluta.
-        </p>
-      </header>
-
-      <div
-        className="flex gap-1 border-b border-zinc-800/60 overflow-x-auto"
-        role="tablist"
+      <PageHeader title="Configurações" description="Ajuste o Haumea para o seu fluxo de trabalho." />
+      <div className="grid grid-cols-[220px_minmax(0,1fr)] gap-10 max-[1180px]:grid-cols-1 max-[1180px]:gap-6">
+      <nav
+        className="space-y-1 self-start max-[1180px]:flex max-[1180px]:overflow-x-auto max-[1180px]:border-b max-[1180px]:border-line max-[1180px]:pb-3"
         aria-label="Seções de configuração"
       >
         {TABS.map((t) => (
           <button
             key={t.key}
-            role="tab"
-            aria-selected={tab === t.key}
+            aria-current={tab === t.key ? "page" : undefined}
             onClick={() => setTab(t.key)}
             className={
-              "relative shrink-0 px-4 py-3 text-sm font-medium transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40 rounded-t-lg " +
+              "group flex w-full items-center gap-3 rounded-[9px] px-3 py-2.5 text-left transition-colors max-[1180px]:w-auto max-[1180px]:shrink-0 " +
               (tab === t.key
-                ? "text-coral-400"
-                : "text-zinc-500 hover:text-zinc-300")
+                ? "bg-[#e9e9e4] text-ink"
+                : "text-[#65665f] hover:bg-[#efefeb] hover:text-ink")
             }
           >
-            {t.label}
-            {tab === t.key && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-coral-500" />
-            )}
+            <t.Icon className="h-4 w-4 shrink-0" aria-hidden />
+            <span className="min-w-0 flex-1">
+              <span className="block text-[13px] font-medium">{t.label}</span>
+              <span className="mt-0.5 block truncate text-[11px] text-muted max-[1180px]:hidden">{t.description}</span>
+            </span>
+            <ChevronRight className="h-3.5 w-3.5 text-[#a0a19a] max-[1180px]:hidden" aria-hidden />
           </button>
         ))}
+      </nav>
+      <section className="min-w-0" aria-labelledby={`settings-${tab}`}>
+        <header className="mb-7 border-b border-line pb-5">
+          <h2 id={`settings-${tab}`} className="text-[20px] font-semibold tracking-[-0.02em] text-ink">{currentTab.label}</h2>
+          <p className="mt-1 text-[13px] text-muted">{currentTab.description}</p>
+        </header>
+        {tab === "geral" && <GeralTab />}
+        {tab === "pipelines" && <PipelinesTab />}
+        {tab === "provedores" && <ProvedoresTab />}
+        {tab === "vocabulario" && <VocabularioTab />}
+        {tab === "diagnostico" && <DiagnosticoTab />}
+      </section>
       </div>
-
-      {tab === "geral" && <GeralTab />}
-      {tab === "pipelines" && <PipelinesTab />}
-      {tab === "provedores" && <ProvedoresTab />}
-      {tab === "vocabulario" && <VocabularioTab />}
-      {tab === "diagnostico" && <DiagnosticoTab />}
     </div>
   );
 }
@@ -187,7 +197,7 @@ export function ConfiguracoesView() {
 
 function GeralTab() {
   const [startup, setStartup] = useState(false);
-  const [compact, setCompact] = useState(false);
+  const [widgetVisibility, setWidgetVisibility] = useState<WidgetVisibilityMode>("auto");
   const [devices, setDevices] = useState<string[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [isTesting, setIsTesting] = useState(false);
@@ -201,9 +211,9 @@ function GeralTab() {
     invoke<boolean>("get_autostart")
       .then(setStartup)
       .catch((e) => console.error("get_autostart failed:", e));
-    getCompactMode()
-      .then(setCompact)
-      .catch((e) => console.error("get_compact_mode failed:", e));
+    getWidgetPreferences()
+      .then((preferences) => setWidgetVisibility(preferences.visibility_mode))
+      .catch((e) => console.error("get_widget_preferences failed:", e));
     listAudioDevices()
       .then(setDevices)
       .catch((e) => console.error("listAudioDevices failed:", e));
@@ -212,8 +222,8 @@ function GeralTab() {
       .catch((e) => console.error("getInputDevice failed:", e));
     getAudioStorageConfig()
       .then((config) => {
-        setAudioDirectory(config.effective_directory);
-        setDefaultAudioDirectory(config.default_directory);
+        setAudioDirectory(displayWindowsPath(config.effective_directory));
+        setDefaultAudioDirectory(displayWindowsPath(config.default_directory));
         setCustomAudioDirectory(Boolean(config.custom_directory));
       })
       .catch((e) => console.error("getAudioStorageConfig failed:", e));
@@ -247,13 +257,14 @@ function GeralTab() {
   }, []);
 
   return (
-    <div className="space-y-6">
-      <Card className="divide-y divide-zinc-800/60 p-2">
+    <div className="space-y-8">
+      <div className="divide-y divide-line">
         <Row
           title="Iniciar com o Windows"
           description="Abre o Haumea Voice ao ligar o computador (em segundo plano se usar autostart)."
         >
           <Toggle
+            label="Iniciar com o Windows"
             checked={startup}
             onChange={(v) => {
               setStartup(v);
@@ -262,14 +273,18 @@ function GeralTab() {
           />
         </Row>
         <Row
-          title="Gadget compacto"
-          description="Com ocioso, o overlay mostra só o ícone. Ao gravar, expande automaticamente."
+          title="Barra de ditado"
+          description={widgetVisibility === "always" ? "Mantém uma pequena cápsula visível quando não há ditado ativo." : "Mostra a barra somente durante gravação, processamento e feedback."}
         >
           <Toggle
-            checked={compact}
+            label="Sempre mostrar a barra de ditado"
+            checked={widgetVisibility === "always"}
             onChange={(v) => {
-              setCompact(v);
-              setCompactMode(v).catch(console.error);
+              const mode: WidgetVisibilityMode = v ? "always" : "auto";
+              setWidgetVisibility(mode);
+              setWidgetVisibilityMode(mode)
+                .then((preferences) => setWidgetVisibility(preferences.visibility_mode))
+                .catch(console.error);
             }}
           />
         </Row>
@@ -277,25 +292,26 @@ function GeralTab() {
           title="Bandeja do sistema"
           description="Ao fechar a janela, o app continua na bandeja. Use Sair no menu do ícone para encerrar de verdade."
         >
-          <span className="text-xs font-medium text-emerald-400/90 shrink-0">
+          <span className="shrink-0 text-[12px] font-medium text-[#25613f]">
             Sempre ativo
           </span>
         </Row>
-      </Card>
+      </div>
 
-      <Card className="p-7 space-y-5">
+      <section className="border-t border-line pt-7">
         <div className="flex items-center gap-2.5">
-          <Mic className="h-5 w-5 text-coral-400" />
-          <h3 className="text-sm font-semibold text-zinc-100">
+          <Mic className="h-4 w-4 text-[#595a54]" />
+          <label htmlFor="microphone-input" className="text-[14px] font-medium text-ink">
             Microfone de entrada
-          </h3>
+          </label>
         </div>
-        <p className="text-xs text-zinc-500 leading-relaxed">
+        <p className="mt-1.5 text-[13px] leading-5 text-muted">
           Escolha o microfone das gravações. Se o dispositivo sumir, o app usa o
           padrão do sistema.
         </p>
-        <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center">
+        <div className="mt-5 flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
           <select
+            id="microphone-input"
             value={selectedDevice || "default"}
             onChange={async (e) => {
               const val = e.target.value === "default" ? null : e.target.value;
@@ -303,7 +319,7 @@ function GeralTab() {
               await setInputDevice(val);
               setDevices(await listAudioDevices());
             }}
-            className="w-full max-w-md bg-zinc-900 border border-zinc-800/80 text-zinc-200 text-xs rounded-xl px-4 py-3 outline-none focus:border-coral-500/40 focus-visible:ring-2 focus-visible:ring-coral-500/30"
+            className="h-10 w-full max-w-md rounded-[9px] border border-line bg-white px-3 text-[13px] text-ink outline-none"
           >
             <option value="default">Padrão do sistema</option>
             {devices.map((d) => (
@@ -323,46 +339,46 @@ function GeralTab() {
                 setIsTesting(true);
               }
             }}
-            className="h-[42px] px-6 text-xs gap-2"
+            className="gap-2"
           >
             <span
               className={
                 "h-2 w-2 rounded-full " +
-                (isTesting ? "bg-red-500 animate-pulse" : "bg-zinc-500")
+                (isTesting ? "animate-pulse bg-[#b8352d]" : "bg-[#8b8c85]")
               }
             />
             {isTesting ? "Parar teste" : "Testar microfone"}
           </Button>
         </div>
         {isTesting && (
-          <div className="space-y-2" aria-live="polite">
-            <div className="flex justify-between text-[10px] uppercase tracking-wider text-zinc-500">
+          <div className="mt-4 space-y-2" aria-live="polite">
+            <div className="flex justify-between text-[11px] text-muted">
               <span>Nível de entrada</span>
               <span className="font-mono">{Math.round(micLevel * 100)}%</span>
             </div>
-            <div className="h-2 w-full bg-zinc-900/60 rounded-full overflow-hidden border border-zinc-800/40">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#e8e8e2]">
               <div
-                className="h-full bg-gradient-to-r from-coral-500 via-coral-400 to-amber-400 rounded-full transition-all duration-75"
+                className="h-full rounded-full bg-[#252522] transition-[width] duration-75"
                 style={{ width: `${micLevel * 100}%` }}
               />
             </div>
           </div>
         )}
-      </Card>
+      </section>
 
-      <Card className="p-7 space-y-5">
+      <section className="border-t border-line pt-7">
         <div className="flex items-center gap-2.5">
-          <HardDrive className="h-5 w-5 text-coral-400" aria-hidden />
-          <h3 className="text-sm font-semibold text-zinc-100">
+          <HardDrive className="h-4 w-4 text-[#595a54]" aria-hidden />
+          <h3 className="text-[14px] font-medium text-ink">
             Pasta dos áudios transcritos
           </h3>
         </div>
-        <p className="text-xs leading-relaxed text-zinc-500">
+        <p className="mt-1.5 max-w-[72ch] text-[13px] leading-5 text-muted">
           Define onde as próximas gravações e cópias de áudios enviados serão
           salvas. Arquivos existentes continuam no local atual e permanecem
           acessíveis pelo Histórico.
         </p>
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+        <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center">
           <Input
             name="audio-storage-directory"
             value={audioDirectory}
@@ -384,8 +400,8 @@ function GeralTab() {
                 if (typeof selected !== "string") return;
                 try {
                   const config = await setAudioStorageDirectory(selected);
-                  setAudioDirectory(config.effective_directory);
-                  setDefaultAudioDirectory(config.default_directory);
+                  setAudioDirectory(displayWindowsPath(config.effective_directory));
+                  setDefaultAudioDirectory(displayWindowsPath(config.default_directory));
                   setCustomAudioDirectory(Boolean(config.custom_directory));
                   setAudioDirectoryStatus("Pasta atualizada");
                 } catch (error) {
@@ -404,8 +420,8 @@ function GeralTab() {
                 onClick={async () => {
                   try {
                     const config = await setAudioStorageDirectory(null);
-                    setAudioDirectory(config.effective_directory);
-                    setDefaultAudioDirectory(config.default_directory);
+                    setAudioDirectory(displayWindowsPath(config.effective_directory));
+                    setDefaultAudioDirectory(displayWindowsPath(config.default_directory));
                     setCustomAudioDirectory(false);
                     setAudioDirectoryStatus("Pasta padrão restaurada");
                   } catch (error) {
@@ -419,17 +435,17 @@ function GeralTab() {
             )}
           </div>
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-          <span className="text-zinc-500">
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <span className="text-muted">
             {customAudioDirectory ? "Local personalizado" : "Local padrão do aplicativo"}
           </span>
           {audioDirectoryStatus && (
-            <span className="text-coral-300" role="status">
+            <span className="text-[#25613f]" role="status">
               {audioDirectoryStatus}
             </span>
           )}
         </div>
-      </Card>
+      </section>
     </div>
   );
 }
@@ -538,44 +554,44 @@ function PipelinesTab() {
 
   return (
     <div className="space-y-6">
-      <Card className="p-6 border-coral-500/30 bg-coral-500/5">
+      <div className="surface-subtle p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p className="text-[11px] font-medium uppercase tracking-wider text-coral-400/80">
+            <p className="meta-label">
               Pipeline ativa
             </p>
-            <h2 className="mt-1 flex items-center gap-2.5 text-lg font-semibold text-zinc-100">
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-coral-500/20 text-coral-400">
+            <h2 className="mt-1 flex items-center gap-2.5 text-[17px] font-semibold text-ink">
+              <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-line bg-white text-[#4f504b]">
                 <SelectedIcon className="h-4 w-4" aria-hidden />
               </span>
               {selected.title}
             </h2>
-            <p className="mt-1 text-sm text-zinc-400">
+            <p className="mt-1 text-[13px] text-muted">
               {selected.engine} · {selected.blurb}
             </p>
             {!modesEnabled && (
-              <p className="mt-2 text-xs text-amber-400/90 flex items-center gap-1.5">
+              <p className="mt-2 flex items-center gap-1.5 text-[12px] text-[#8a5b16]">
                 <AlertCircle className="h-3.5 w-3.5" />
                 Modos desligados — o fluxo legado (motores manuais) está em uso.
               </p>
             )}
           </div>
           {status && (
-            <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400">
+            <span className="inline-flex items-center gap-1.5 text-xs text-[#25613f]">
               <CheckCircle2 className="h-3.5 w-3.5" />
               {status}
             </span>
           )}
         </div>
-      </Card>
+      </div>
 
       <div>
-        <h3 className="text-sm font-semibold text-zinc-100 mb-3">
+        <h3 className="mb-3 text-[14px] font-medium text-ink">
           Escolha um modo
         </h3>
         <div
           className="grid grid-cols-1 sm:grid-cols-2 gap-3"
-          role="radiogroup"
+          role="group"
           aria-label="Modo de transcrição"
         >
           {MODE_CARDS.map((card) => {
@@ -593,50 +609,49 @@ function PipelinesTab() {
               <div
                 key={card.id}
                 className={
-                  "overflow-hidden rounded-2xl border transition-[border-color,background-color,box-shadow] duration-200 " +
+                  "overflow-hidden rounded-[10px] border transition-colors duration-150 " +
                   (active
-                    ? "border-coral-500/60 bg-coral-500/10 shadow-[0_0_24px_-10px_rgba(225,77,42,0.45)]"
-                    : "border-zinc-800/70 bg-zinc-900/40 hover:border-zinc-700")
+                    ? "border-[#5c5d57] bg-[#f0f0eb]"
+                    : "border-line bg-white hover:border-line-strong")
                 }
               >
                 <button
                   type="button"
-                  role="radio"
-                  aria-checked={active}
+                  aria-pressed={active}
                   onClick={() => selectMode(card.id)}
-                  className="w-full p-5 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-coral-500/40"
+                  className="w-full p-4 text-left"
                 >
                   <div className="flex items-start justify-between gap-3">
                   <div
                     className={
                       "flex h-10 w-10 items-center justify-center rounded-xl " +
                       (active
-                        ? "bg-coral-500/20 text-coral-400"
-                        : "bg-zinc-800 text-zinc-400")
+                        ? "bg-[#22221f] text-white"
+                        : "bg-[#eeeeea] text-[#65665f]")
                     }
                   >
                     <Icon className="h-5 w-5" aria-hidden />
                   </div>
                   <div className="flex flex-wrap justify-end gap-1.5">
                     {card.badge && (
-                      <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-300">
+                      <span className="rounded-[6px] bg-[#f5ecd9] px-2 py-0.5 text-[10px] font-medium text-[#80551a]">
                         {card.badge}
                       </span>
                     )}
                     {active && (
-                      <span className="text-[10px] font-medium uppercase tracking-wider text-coral-400">
+                      <span className="text-[10px] font-medium text-[#4f504b]">
                         Selecionado
                       </span>
                     )}
                   </div>
                   </div>
-                  <div className="mt-4 text-base font-semibold text-zinc-100">{card.title}</div>
-                  <div className="mt-1 text-xs font-medium text-coral-400/80">{card.engine}</div>
-                  <p className="mt-2 text-sm text-zinc-500 leading-relaxed">{card.blurb}</p>
+                  <div className="mt-3 text-[14px] font-medium text-ink">{card.title}</div>
+                  <div className="mt-1 text-[11px] font-medium text-[#555650]">{card.engine}</div>
+                  <p className="mt-1 text-[12px] leading-5 text-muted">{card.blurb}</p>
                 </button>
-                {routeKey && (
-                  <div className="grid gap-3 border-t border-zinc-800/70 px-5 py-4 sm:grid-cols-2">
-                    <label className="space-y-1.5 text-xs text-zinc-400">
+                {routeKey && active && (
+                  <div className="grid gap-3 border-t border-line px-4 py-4 sm:grid-cols-2">
+                    <label className="space-y-1.5 text-[12px] text-[#555650]">
                       <span>Modelo</span>
                       <select
                         name={`${routeKey}-gemini-model`}
@@ -655,14 +670,14 @@ function PipelinesTab() {
                             });
                           }
                         }}
-                        className="h-10 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40"
+                        className="h-10 w-full rounded-[9px] border border-line bg-white px-3 text-[12px] text-ink outline-none"
                       >
                         <option value="flash-lite35">Gemini 3.5 Flash-Lite</option>
                         <option value="flash36">Gemini 3.6 Flash</option>
                         <option value="custom">ID customizado…</option>
                       </select>
                     </label>
-                    <label className="space-y-1.5 text-xs text-zinc-400">
+                    <label className="space-y-1.5 text-[12px] text-[#555650]">
                       <span>Provedor</span>
                       <select
                         name={`${routeKey}-gemini-provider`}
@@ -671,14 +686,14 @@ function PipelinesTab() {
                           const provider = e.target.value as GeminiProvider;
                           updateGeminiRoute(routeKey, { provider });
                         }}
-                        className="h-10 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40"
+                        className="h-10 w-full rounded-[9px] border border-line bg-white px-3 text-[12px] text-ink outline-none"
                       >
                         <option value="google-ai-studio">Google AI Studio</option>
                         <option value="open-router">OpenRouter</option>
                       </select>
                     </label>
                     {geminiPipelines[routeKey].use_custom_model && (
-                      <label className="space-y-1.5 text-xs text-zinc-400 sm:col-span-2">
+                      <label className="space-y-1.5 text-[12px] text-[#555650] sm:col-span-2">
                         <span>ID do modelo customizado</span>
                         <Input
                           name={`${routeKey}-custom-model`}
@@ -707,19 +722,19 @@ function PipelinesTab() {
                       </label>
                     )}
                     {geminiPipelines[routeKey].provider === "open-router" ? (
-                      <p className="text-[11px] leading-relaxed text-zinc-500 sm:col-span-2">
+                      <p className="text-[11px] leading-5 text-muted sm:col-span-2">
                         A rota é automática: modelos dedicados como Chirp, Whisper e Transcribe usam Speech-to-Text; modelos com áudio usam Chat Completions.
                       </p>
                     ) : (
-                      <p className="text-[11px] leading-relaxed text-zinc-500 sm:col-span-2">
+                      <p className="text-[11px] leading-5 text-muted sm:col-span-2">
                         O Google AI Studio usa modelos multimodais com áudio via Gemini API. Modelos STT dedicados do Google Cloud exigem outra API e outra credencial.
                       </p>
                     )}
                   </div>
                 )}
-                {card.id === "ultra-fast" && (
-                  <div className="border-t border-zinc-800/70 px-5 py-4">
-                    <label className="space-y-1.5 text-xs text-zinc-400">
+                {card.id === "ultra-fast" && active && (
+                  <div className="border-t border-line px-4 py-4">
+                    <label className="space-y-1.5 text-[12px] text-[#555650]">
                       <span>Modelo Whisper via OpenRouter</span>
                       <select
                         name="ultra-fast-whisper-model"
@@ -732,13 +747,13 @@ function PipelinesTab() {
                           setGeminiPipelines(next);
                           persistMode({ gemini_pipelines: next });
                         }}
-                        className="mt-1.5 h-10 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40"
+                        className="mt-1.5 h-10 w-full rounded-[9px] border border-line bg-white px-3 text-[12px] text-ink outline-none"
                       >
                         <option value="large-v3-turbo">openai/whisper-large-v3-turbo</option>
                         <option value="large-v3">openai/whisper-large-v3</option>
                       </select>
                     </label>
-                    <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                    <p className="mt-2 text-[11px] leading-5 text-muted">
                       Usa somente o endpoint de transcrição do OpenRouter, com o provedor Groq fixo e sem fallback para outro provedor.
                     </p>
                   </div>
@@ -749,15 +764,15 @@ function PipelinesTab() {
         </div>
       </div>
 
-      <Card className="p-6 space-y-4">
-        <h3 className="text-sm font-semibold text-zinc-100">Tipo de conteúdo</h3>
-        <p className="text-xs text-zinc-500">
+      <section className="border-t border-line pt-6">
+        <h3 className="text-[14px] font-medium text-ink">Tipo de conteúdo</h3>
+        <p className="mt-1 text-[12px] leading-5 text-muted">
           Ajusta o tom do validador e do Gemini. Não garante resultado perfeito —
           só orienta o pipeline.
         </p>
         <div
-          className="grid grid-cols-1 sm:grid-cols-2 gap-2"
-          role="radiogroup"
+          className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3"
+          role="group"
           aria-label="Tipo de conteúdo"
         >
           {CONTENT_TYPES.map((ct) => {
@@ -766,59 +781,60 @@ function PipelinesTab() {
               <button
                 key={ct.id}
                 type="button"
-                role="radio"
-                aria-checked={on}
+                aria-pressed={on}
                 onClick={() => {
                   setContentType(ct.id);
                   persistMode({ content_type: ct.id });
                 }}
                 className={
-                  "rounded-xl border px-4 py-3 text-left transition-[border-color,background-color] focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40 " +
+                  "rounded-[9px] border px-4 py-3 text-left transition-colors " +
                   (on
-                    ? "border-coral-500/50 bg-coral-500/10"
-                    : "border-zinc-800 bg-zinc-900/30 hover:border-zinc-700")
+                    ? "border-[#5c5d57] bg-[#f0f0eb]"
+                    : "border-line bg-white hover:border-line-strong")
                 }
               >
-                <div className="text-sm font-medium text-zinc-100">{ct.label}</div>
-                <div className="mt-0.5 text-xs text-zinc-500">{ct.hint}</div>
+                <div className="text-[13px] font-medium text-ink">{ct.label}</div>
+                <div className="mt-0.5 text-[11px] leading-4 text-muted">{ct.hint}</div>
               </button>
             );
           })}
         </div>
-      </Card>
+      </section>
 
       {mode === "fast-accurate" && modesEnabled && (
-        <Card className="p-5 flex items-center justify-between gap-4">
+        <div className="surface-subtle flex items-center justify-between gap-4 px-5 py-4">
           <div>
-            <h4 className="text-sm font-medium text-zinc-100">
+            <h4 className="text-[13px] font-medium text-ink">
               Se o Gemini falhar, usar Whisper
             </h4>
-            <p className="text-xs text-zinc-500 mt-1">
+            <p className="mt-1 text-[12px] text-muted">
               O histórico marca quando o fallback acontecer.
             </p>
           </div>
           <Toggle
+            label="Usar Whisper se o Gemini falhar"
             checked={geminiFallback}
             onChange={(v) => {
               setGeminiFallback(v);
               persistMode({ gemini_fallback_to_whisper: v });
             }}
           />
-        </Card>
+        </div>
       )}
 
       {(mode === "ultra-precise" || !modesEnabled) && (
-        <Card className="p-5 space-y-3">
+        <div className="surface-subtle space-y-3 p-5">
           <div className="flex items-center justify-between">
             <div>
-              <h4 className="text-sm font-medium text-zinc-100">
+              <h4 className="text-[13px] font-medium text-ink">
                 Validador semântico
               </h4>
-              <p className="text-xs text-zinc-500 mt-1">
+              <p className="mt-1 text-[12px] text-muted">
                 Limpa ortografia após o Whisper (Ultrapreciso e fluxo legado).
               </p>
             </div>
             <Toggle
+              label="Ativar validador semântico"
               checked={sanitizerEnabled}
               onChange={(v) => {
                 setSanitizerEnabledState(v);
@@ -853,10 +869,10 @@ function PipelinesTab() {
                     }).catch(console.error);
                   }}
                   className={
-                    "rounded-xl border py-2 text-xs font-medium " +
+                    "rounded-[8px] border py-2 text-[12px] font-medium " +
                     (sanitizer === id
-                      ? "border-coral-500/50 bg-coral-500/10 text-coral-400"
-                      : "border-zinc-800 text-zinc-400 hover:bg-zinc-900")
+                      ? "border-[#5c5d57] bg-[#e8e8e3] text-ink"
+                      : "border-line bg-white text-[#555650] hover:bg-[#f4f4f0]")
                   }
                 >
                   {label}
@@ -864,7 +880,7 @@ function PipelinesTab() {
               ))}
             </div>
           )}
-        </Card>
+        </div>
       )}
 
       {/* Advanced / experimental */}
@@ -872,7 +888,7 @@ function PipelinesTab() {
         <button
           type="button"
           onClick={() => setShowAdvanced((v) => !v)}
-          className="text-xs font-medium text-zinc-500 hover:text-zinc-300 flex items-center gap-2"
+          className="flex items-center gap-2 text-[12px] font-medium text-[#555650] hover:text-ink"
         >
           <FlaskConical className="h-3.5 w-3.5" />
           {showAdvanced ? "Ocultar avançado" : "Avançado e experimental"}
@@ -880,27 +896,28 @@ function PipelinesTab() {
       </div>
 
       {showAdvanced && (
-        <Card className="p-6 space-y-5 border-zinc-800/80">
+        <div className="surface-subtle space-y-5 p-5">
           <div className="flex items-start gap-2">
-            <AlertCircle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
-            <p className="text-xs text-zinc-500 leading-relaxed">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#8a5b16]" />
+            <p className="text-[12px] leading-5 text-muted">
               Opções legadas. Com um modo de pipeline ativo, o dual engine e a
               escolha manual de motor{" "}
-              <strong className="text-zinc-400">não</strong> definem o caminho
+              <strong className="font-medium text-[#444540]">não</strong> definem o caminho
               principal — só valem se você desligar os modos abaixo.
             </p>
           </div>
 
           <div className="flex items-center justify-between gap-4">
             <div>
-              <h4 className="text-sm font-medium text-zinc-100">
+              <h4 className="text-[13px] font-medium text-ink">
                 Usar modos de pipeline
               </h4>
-              <p className="text-xs text-zinc-500">
+              <p className="text-[12px] text-muted">
                 Desligado = fluxo antigo (motor + dual + Deepgram).
               </p>
             </div>
             <Toggle
+              label="Usar modos de pipeline"
               checked={modesEnabled}
               onChange={(v) => {
                 setModesEnabled(v);
@@ -912,14 +929,15 @@ function PipelinesTab() {
           <div className={"space-y-4 " + (modesEnabled ? "opacity-40" : "")}>
             <div className="flex items-center justify-between gap-4">
               <div>
-                <h4 className="text-sm font-medium text-zinc-100">
+                <h4 className="text-[13px] font-medium text-ink">
                   Dual Whisper + Deepgram
                 </h4>
-                <p className="text-xs text-zinc-500">
+                <p className="text-[12px] text-muted">
                   Só no fluxo legado. Não se mistura com os cards de modo.
                 </p>
               </div>
               <Toggle
+                label="Ativar Dual Whisper e Deepgram"
                 checked={dual}
                 disabled={modesEnabled}
                 onChange={(v) => {
@@ -939,7 +957,7 @@ function PipelinesTab() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+              <label className="field-label">
                 Deepgram (experimental)
               </label>
               <div className="flex gap-2">
@@ -967,10 +985,10 @@ function PipelinesTab() {
                       }).catch(console.error);
                     }}
                     className={
-                      "flex-1 py-2 rounded-xl text-xs font-medium border " +
+                      "flex-1 rounded-[8px] border py-2 text-[12px] font-medium " +
                       (deepgramMode === id
-                        ? "bg-coral-500 text-white border-coral-500"
-                        : "bg-zinc-900 border-zinc-800 text-zinc-400")
+                        ? "border-[#22221f] bg-[#22221f] text-white"
+                        : "border-line bg-white text-[#555650]")
                     }
                   >
                     {label}
@@ -981,14 +999,15 @@ function PipelinesTab() {
 
             <div className="flex items-center justify-between gap-4">
               <div>
-                <h4 className="text-sm font-medium text-zinc-100">
+                <h4 className="text-[13px] font-medium text-ink">
                   Reasoning no validador (GPT-OSS)
                 </h4>
-                <p className="text-xs text-zinc-500">
+                <p className="text-[12px] text-muted">
                   Desligado por padrão. Só modelos GPT-OSS.
                 </p>
               </div>
               <Toggle
+                label="Ativar reasoning no validador"
                 checked={reasoning}
                 onChange={(v) => {
                   setReasoning(v);
@@ -1006,7 +1025,7 @@ function PipelinesTab() {
               />
             </div>
           </div>
-        </Card>
+        </div>
       )}
     </div>
   );
@@ -1027,6 +1046,7 @@ function ProvedoresTab() {
   const [saving, setSaving] = useState<KeyId | null>(null);
   const [saved, setSaved] = useState<KeyId | null>(null);
   const [error, setError] = useState("");
+  const [managing, setManaging] = useState<KeyId | null>(null);
 
   useEffect(() => {
     getApiKeys()
@@ -1080,8 +1100,7 @@ function ProvedoresTab() {
 
   const statusFor = (id: KeyId) => {
     const count = keys[id].filter((key) => key.trim()).length;
-    if (!count) return { label: "Sem chaves", tone: "text-zinc-500" };
-    return { label: `${count} ${count === 1 ? "chave" : "chaves"}`, tone: "text-emerald-400" };
+    return { label: count ? `${count} ${count === 1 ? "chave" : "chaves"}` : "Sem chaves" };
   };
 
   const save = async (id: KeyId) => {
@@ -1105,110 +1124,77 @@ function ProvedoresTab() {
 
   return (
     <div className="space-y-6">
-      <p className="text-sm text-zinc-500">
-        As chaves ficam só neste computador (AppData). Nunca são enviadas a
-        servidores do Haumea.
+      <p className="max-w-[72ch] text-[13px] leading-5 text-muted">
+        As chaves ficam somente neste computador. Os campos permanecem recolhidos até você escolher gerenciá-los.
       </p>
-
-      {error && (
-        <div
-          className="flex gap-2 rounded-xl border border-red-900/40 bg-red-950/20 px-4 py-3 text-sm text-red-300"
-          role="alert"
-        >
-          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-          {error}
-        </div>
-      )}
-
-      <div className="grid gap-4">
-        {providers.map((p) => {
-          const st = statusFor(p.id);
+      {error && <div className="rounded-[10px] bg-[#fff1ef] px-4 py-3 text-[13px] text-[#9f2720]" role="alert">{error}</div>}
+      <div className="divide-y divide-line border-y border-line">
+        {providers.map((provider) => {
+          const providerStatus = statusFor(provider.id);
+          const isManaging = managing === provider.id;
           return (
-            <Card key={p.id} className="p-6 space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-800 text-coral-400">
-                    <KeyRound className="h-4 w-4" />
+            <section key={provider.id} className="py-1">
+              <div className="grid min-h-[92px] grid-cols-[44px_minmax(0,1fr)_auto_auto] items-center gap-4 px-2 py-4 max-[820px]:grid-cols-[40px_minmax(0,1fr)_auto]">
+                <span className="flex h-9 w-9 items-center justify-center rounded-full border border-line bg-white text-[#555650]">
+                  <KeyRound className="h-4 w-4" aria-hidden />
+                </span>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-[14px] font-medium text-ink">{provider.name}</h3>
+                    <span className={"text-[11px] font-medium " + (keys[provider.id].some((key) => key.trim()) ? "text-[#25613f]" : "text-muted")}>
+                      {keys[provider.id].some((key) => key.trim()) ? "Conectado" : "Não configurado"}
+                    </span>
                   </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-zinc-100">
-                      {p.name}
-                    </h3>
-                    <p className="text-[11px] text-zinc-500">{p.requiredFor}</p>
+                  <p className="mt-1 truncate text-[12px] text-muted" title={provider.requiredFor}>{provider.help}</p>
+                </div>
+                <span className="text-[12px] text-muted max-[820px]:hidden">{providerStatus.label}</span>
+                <Button size="sm" onClick={() => setManaging(isManaging ? null : provider.id)} aria-expanded={isManaging}>
+                  {isManaging ? "Fechar" : "Gerenciar"}<ChevronRight className={"h-3.5 w-3.5 transition-transform " + (isManaging ? "rotate-90" : "")} aria-hidden />
+                </Button>
+              </div>
+              {isManaging && (
+                <div className="mx-2 mb-5 rounded-[10px] bg-[#f4f4ef] p-4">
+                  <p className="mb-4 text-[12px] leading-5 text-muted">{provider.requiredFor}</p>
+                  <div className="space-y-2">
+                    {keys[provider.id].map((key, index) => {
+                      const visibilityKey = `${provider.id}-${index}`;
+                      return (
+                        <div key={visibilityKey} className="flex gap-2">
+                          <div className="relative flex-1">
+                            <Input
+                              name={`${provider.id}-api-key-${index + 1}`}
+                              type={visible[visibilityKey] ? "text" : "password"}
+                              placeholder={provider.placeholder}
+                              value={key}
+                              onChange={(event) => setKeys((current) => ({ ...current, [provider.id]: current[provider.id].map((item, itemIndex) => itemIndex === index ? event.target.value : item) }))}
+                              autoComplete="off"
+                              spellCheck={false}
+                              className="pr-10 font-mono text-xs"
+                              aria-label={`Chave ${index + 1} de ${provider.name}`}
+                            />
+                            <button type="button" className="icon-button absolute right-1 top-1" onClick={() => setVisible((current) => ({ ...current, [visibilityKey]: !current[visibilityKey] }))} aria-label={visible[visibilityKey] ? "Ocultar chave" : "Mostrar chave"}>
+                              {visible[visibilityKey] ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+                            </button>
+                          </div>
+                          <button type="button" onClick={() => setKeys((current) => ({ ...current, [provider.id]: current[provider.id].filter((_, itemIndex) => itemIndex !== index) }))} className="icon-button text-[#a72a21]" aria-label={`Remover chave ${index + 1} de ${provider.name}`}>
+                            <X className="h-4 w-4" aria-hidden />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                    <Button size="sm" variant="ghost" onClick={() => setKeys((current) => ({ ...current, [provider.id]: [...current[provider.id], ""] }))}>
+                      <Plus className="h-3.5 w-3.5" aria-hidden />Adicionar chave
+                    </Button>
+                    <Button size="sm" variant="primary" disabled={saving === provider.id} onClick={() => save(provider.id)}>
+                      <Save className="h-3.5 w-3.5" aria-hidden />
+                      {saving === provider.id ? "Salvando…" : saved === provider.id ? "Salvo" : "Salvar"}
+                    </Button>
                   </div>
                 </div>
-                <span className={"text-[11px] font-medium " + st.tone}>
-                  {st.label}
-                </span>
-              </div>
-              <p className="text-xs text-zinc-500">{p.help}</p>
-              <div className="space-y-2">
-                {keys[p.id].map((key, index) => {
-                  const visibilityKey = `${p.id}-${index}`;
-                  return (
-                    <div key={visibilityKey} className="flex gap-2">
-                      <div className="relative flex-1">
-                        <Input
-                          name={`${p.id}-api-key-${index + 1}`}
-                          type={visible[visibilityKey] ? "text" : "password"}
-                          placeholder={p.placeholder}
-                          value={key}
-                          onChange={(e) =>
-                            setKeys((current) => ({
-                              ...current,
-                              [p.id]: current[p.id].map((item, i) => i === index ? e.target.value : item),
-                            }))
-                          }
-                          autoComplete="off"
-                          spellCheck={false}
-                          className="pr-10 text-xs font-mono"
-                          aria-label={`Chave ${index + 1} de ${p.name}`}
-                        />
-                        <button
-                          type="button"
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
-                          onClick={() => setVisible((v) => ({ ...v, [visibilityKey]: !v[visibilityKey] }))}
-                          aria-label={visible[visibilityKey] ? "Ocultar chave" : "Mostrar chave"}
-                        >
-                          {visible[visibilityKey] ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setKeys((current) => ({
-                          ...current,
-                          [p.id]: current[p.id].filter((_, i) => i !== index),
-                        }))}
-                        className="flex h-10 w-10 items-center justify-center rounded-xl text-zinc-500 hover:bg-zinc-800 hover:text-red-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40"
-                        aria-label={`Remover chave ${index + 1} de ${p.name}`}
-                      >
-                        <X className="h-4 w-4" aria-hidden />
-                      </button>
-                    </div>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={() => setKeys((current) => ({ ...current, [p.id]: [...current[p.id], ""] }))}
-                  className="inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-coral-400 hover:bg-coral-500/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40"
-                >
-                  <Plus className="h-3.5 w-3.5" aria-hidden /> Adicionar chave
-                </button>
-              </div>
-              <Button
-                variant="secondary"
-                className="w-full gap-2 text-xs"
-                disabled={saving === p.id}
-                onClick={() => save(p.id)}
-              >
-                <Save className="h-3.5 w-3.5" />
-                {saving === p.id
-                  ? "Salvando…"
-                  : saved === p.id
-                    ? "Salvo"
-                    : "Salvar chaves"}
-              </Button>
-            </Card>
+              )}
+            </section>
           );
         })}
       </div>
@@ -1290,27 +1276,27 @@ function VocabularioTab() {
 
   return (
     <div className="space-y-6">
-      <Card className="p-6 border-zinc-800/60">
-        <h3 className="text-sm font-semibold text-zinc-100">
+      <div className="surface-subtle px-5 py-4">
+        <h3 className="text-[14px] font-medium text-ink">
           Vocabulário estruturado
         </h3>
-        <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+        <p className="mt-1.5 text-[12px] leading-5 text-muted">
           Cadastre a grafia correta e as variações da fala.{" "}
-          <strong className="text-zinc-400">Literal</strong> protege arquivos,
+          <strong className="font-medium text-[#444540]">Literal</strong> protege arquivos,
           comandos e identificadores. A correção só age quando o encaixe é
           claro — sem substituição cega.
         </p>
-      </Card>
+      </div>
 
-      <Card className="p-6 space-y-4">
+      <section className="surface space-y-4 p-5">
         <div className="flex items-center justify-between">
-          <h4 className="text-sm font-medium text-zinc-100">
+          <h4 className="text-[14px] font-medium text-ink">
             {editingIndex !== null ? "Editar termo" : "Novo termo"}
           </h4>
           {editingIndex !== null && (
             <button
               type="button"
-              className="text-xs text-zinc-500 hover:text-zinc-300"
+              className="text-[12px] text-muted hover:text-ink"
               onClick={() => {
                 setEditingIndex(null);
                 setDraft(emptyTerm());
@@ -1323,10 +1309,11 @@ function VocabularioTab() {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div className="space-y-1.5 sm:col-span-2">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+            <label htmlFor="vocabulary-canonical" className="field-label">
               Grafia correta
             </label>
             <Input
+              id="vocabulary-canonical"
               placeholder="ex: provider-routing.json"
               value={draft.canonical}
               onChange={(e) =>
@@ -1337,10 +1324,11 @@ function VocabularioTab() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+            <label htmlFor="vocabulary-category" className="field-label">
               Categoria
             </label>
             <select
+              id="vocabulary-category"
               value={draft.category}
               onChange={(e) =>
                 setDraft((d) => ({
@@ -1348,7 +1336,7 @@ function VocabularioTab() {
                   category: e.target.value as VocabularyCategory,
                 }))
               }
-              className="w-full bg-zinc-900 border border-zinc-800/80 text-zinc-200 text-xs rounded-xl px-4 py-3 outline-none focus:border-coral-500/40"
+              className="h-10 w-full rounded-[9px] border border-line bg-white px-3 text-[13px] text-ink outline-none"
             >
               {VOCAB_CATEGORIES.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -1358,9 +1346,9 @@ function VocabularioTab() {
             </select>
           </div>
           <div className="flex items-end gap-4 pb-1">
-            <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+            <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[#555650]">
               <input
-                type="checkbox"
+                type="checkbox" className="accent-[#1d1d1b]"
                 checked={draft.strict}
                 onChange={(e) =>
                   setDraft((d) => ({ ...d, strict: e.target.checked }))
@@ -1368,9 +1356,9 @@ function VocabularioTab() {
               />
               Literal
             </label>
-            <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+            <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[#555650]">
               <input
-                type="checkbox"
+                type="checkbox" className="accent-[#1d1d1b]"
                 checked={draft.enabled}
                 onChange={(e) =>
                   setDraft((d) => ({ ...d, enabled: e.target.checked }))
@@ -1381,11 +1369,12 @@ function VocabularioTab() {
           </div>
         </div>
         <div className="space-y-1.5">
-          <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+          <label htmlFor="vocabulary-alias" className="field-label">
             Variações da fala
           </label>
           <div className="flex gap-2">
             <Input
+              id="vocabulary-alias"
               placeholder="ex: provider routing json"
               value={aliasDraft}
               onChange={(e) => setAliasDraft(e.target.value)}
@@ -1428,12 +1417,12 @@ function VocabularioTab() {
               {draft.aliases.map((a) => (
                 <span
                   key={a}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-300"
+                  className="inline-flex items-center gap-1.5 rounded-[7px] bg-[#ecece7] px-2.5 py-1 text-[11px] text-[#4f504b]"
                 >
                   {a}
                   <button
                     type="button"
-                    className="text-zinc-600 hover:text-red-400"
+                    className="text-muted hover:text-[#a72a21]"
                     onClick={() =>
                       setDraft((d) => ({
                         ...d,
@@ -1450,7 +1439,7 @@ function VocabularioTab() {
           )}
         </div>
         {error && (
-          <p className="text-xs text-red-400" role="alert">
+          <p className="text-[12px] text-[#a72a21]" role="alert">
             {error}
           </p>
         )}
@@ -1477,52 +1466,53 @@ function VocabularioTab() {
           <Plus className="h-4 w-4" />
           {editingIndex !== null ? "Salvar" : "Adicionar termo"}
         </Button>
-      </Card>
+      </section>
 
       <Input
+        aria-label="Buscar no vocabulário"
         placeholder="Buscar por grafia, variação ou categoria…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
 
       {loading ? (
-        <Card className="p-10 text-center text-sm text-zinc-500">
+        <Card className="p-10 text-center text-[13px] text-muted">
           Carregando…
         </Card>
       ) : filtered.length === 0 ? (
-        <Card className="p-12 text-center text-sm text-zinc-500">
+        <Card className="p-12 text-center text-[13px] text-muted">
           {query.trim()
             ? "Nenhum termo na busca."
             : "Nenhum termo ainda. Cadastre nomes de arquivo, modelos ou marcas que a fala costuma errar."}
         </Card>
       ) : (
-        <div className="space-y-3">
+        <div className="divide-y divide-line border-y border-line">
           {filtered.map((t) => {
             const realIdx = terms.indexOf(t);
             return (
-              <Card key={`${t.canonical}-${realIdx}`} className="p-5">
+              <div key={`${t.canonical}-${realIdx}`} className="px-2 py-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-sm text-zinc-100 break-all">
+                      <span className="break-all font-mono text-[13px] font-medium text-ink">
                         {t.canonical}
                       </span>
-                      <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">
+                      <span className="rounded-[6px] bg-[#ecece7] px-2 py-0.5 text-[10px] text-[#5d5e58]">
                         {categoryLabel(t.category)}
                       </span>
                       {t.strict && (
-                        <span className="rounded-full bg-coral-500/15 px-2 py-0.5 text-[10px] text-coral-400">
+                        <span className="rounded-[6px] bg-[#e4efe7] px-2 py-0.5 text-[10px] text-[#25613f]">
                           Literal
                         </span>
                       )}
                       {!t.enabled && (
-                        <span className="text-[10px] text-zinc-500">
+                        <span className="text-[10px] text-muted">
                           Pausado
                         </span>
                       )}
                     </div>
                     {t.aliases.length > 0 && (
-                      <p className="text-xs text-zinc-500">
+                      <p className="text-[12px] text-muted">
                         Variações: {t.aliases.join(" · ")}
                       </p>
                     )}
@@ -1530,7 +1520,7 @@ function VocabularioTab() {
                   <div className="flex shrink-0 gap-2">
                     <Button
                       variant="secondary"
-                      className="text-xs px-3 py-1.5"
+                      size="sm"
                       onClick={() => {
                         setEditingIndex(realIdx);
                         setDraft({ ...t, aliases: [...t.aliases] });
@@ -1540,7 +1530,7 @@ function VocabularioTab() {
                     </Button>
                     <Button
                       variant="danger"
-                      className="text-xs px-3 py-1.5"
+                      size="sm"
                       onClick={() =>
                         void persist(terms.filter((_, i) => i !== realIdx))
                       }
@@ -1549,7 +1539,7 @@ function VocabularioTab() {
                     </Button>
                   </div>
                 </div>
-              </Card>
+              </div>
             );
           })}
         </div>
@@ -1568,17 +1558,14 @@ function DiagnosticoTab() {
   }, []);
 
   return (
-    <div className="space-y-6">
-      <Card className="p-6 space-y-4">
-        <div className="flex items-center gap-2">
-          <Activity className="h-5 w-5 text-coral-400" />
-          <h3 className="text-sm font-semibold text-zinc-100">Diagnóstico</h3>
-        </div>
+    <div className="space-y-8">
+      <div className="divide-y divide-line">
         <Row
           title="Modo desenvolvedor"
-          description="No Histórico, botão Request: validador Groq (Ultrapreciso/legado) ou snapshot do pipeline nos outros modos."
+          description="Exibe no Histórico os detalhes técnicos, timings e snapshots reais de cada pipeline."
         >
           <Toggle
+            label="Ativar modo desenvolvedor"
             checked={devMode}
             onChange={(v) => {
               setDevModeState(v);
@@ -1586,17 +1573,18 @@ function DiagnosticoTab() {
             }}
           />
         </Row>
-        <div className="rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-4 py-3 text-xs text-zinc-500 leading-relaxed">
-          Logs locais (Windows):{" "}
-          <span className="font-mono text-zinc-400">
-            %APPDATA%\com.haumeavoice.app\logs\
-          </span>
-          <br />
-          Arquivos <span className="font-mono">app.log</span> e{" "}
-          <span className="font-mono">crash.log</span> ajudam a diagnosticar
-          travamentos do gadget.
+      </div>
+      <section className="border-t border-line pt-7">
+        <h3 className="text-[14px] font-medium text-ink">Logs locais</h3>
+        <p className="mt-1 text-[13px] leading-5 text-muted">Informações de execução e falhas ficam somente neste computador.</p>
+        <div className="mt-4 rounded-[9px] bg-[#f1f1ec] px-4 py-3 font-mono text-[12px] text-[#4f504b]">
+          %APPDATA%\com.haumeavoice.app\logs\
         </div>
-      </Card>
+        <ul className="mt-4 space-y-2 text-[12px] leading-5 text-muted">
+          <li><span className="font-mono text-[#444540]">app.log</span> — eventos e diagnósticos do runtime.</li>
+          <li><span className="font-mono text-[#444540]">crash.log</span> — erros não tratados e relatórios de falha.</li>
+        </ul>
+      </section>
     </div>
   );
 }
@@ -1613,12 +1601,6 @@ function Row({
   children: ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-6 px-5 py-5">
-      <div className="space-y-1 min-w-0">
-        <h3 className="text-sm font-medium text-zinc-100">{title}</h3>
-        <p className="text-xs leading-relaxed text-zinc-500">{description}</p>
-      </div>
-      {children}
-    </div>
+    <PreferenceRow title={title} description={description}>{children}</PreferenceRow>
   );
 }

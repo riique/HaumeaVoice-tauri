@@ -64,6 +64,67 @@ pub struct GadgetHitRect {
     pub height: f64,
 }
 
+/// Controls whether the dictation bar exists while no dictation is active.
+/// `Auto` is intentionally the default: Haumea should disappear until needed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WidgetVisibilityMode {
+    #[default]
+    Auto,
+    Always,
+}
+
+/// Dock is persisted as a stable semantic value instead of a screen index.
+/// The current implementation deliberately ships the robust bottom anchor;
+/// side docking can be added later without migrating the settings format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WidgetDock {
+    #[default]
+    Bottom,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WidgetPreferences {
+    pub visibility_mode: WidgetVisibilityMode,
+    pub dock: WidgetDock,
+    pub display: Option<String>,
+}
+
+/// Explicit presentation states shared by the React state machine and the
+/// native window controller. Geometry and native visibility are derived from
+/// this enum in one place (`lib.rs`), never from independent booleans.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GadgetVisualState {
+    #[default]
+    Hidden,
+    Idle,
+    Hover,
+    Appearing,
+    Initializing,
+    Recording,
+    Stopping,
+    Processing,
+    ProcessingLong,
+    Success,
+    Error,
+}
+
+/// Current work-area anchor in physical pixels. It starts from the cursor (or
+/// primary fallback) and is replaced when focus crosses to another monitor.
+#[derive(Debug, Clone)]
+pub struct GadgetSessionAnchor {
+    pub display_name: Option<String>,
+    pub work_x: i32,
+    pub work_y: i32,
+    pub work_width: u32,
+    pub work_height: u32,
+    pub scale: f64,
+}
+
 /// Active transcription engine selected manually by the user from the UI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -271,11 +332,15 @@ pub struct AppState {
     /// while idle.
     pub recording_since: Mutex<Option<std::time::Instant>>,
     pub system_prompt: RwLock<String>,
-    /// When `true`, the floating gadget collapses to a bare icon while idle;
-    /// when `false` it shows the icon plus the "Haumea Voice" wordmark. The
-    /// recording state always expands the gadget regardless of this flag.
-    /// Persisted to `settings.json` (see the `settings` module).
+    /// Legacy mirror kept for compatibility with older IPC clients. New code
+    /// uses `widget_visibility_mode` exclusively.
     pub compact_mode: RwLock<bool>,
+    pub widget_visibility_mode: RwLock<WidgetVisibilityMode>,
+    pub widget_dock: RwLock<WidgetDock>,
+    /// Current monitor anchor. A native watcher updates it only when the
+    /// foreground window crosses monitor boundaries.
+    pub gadget_session_anchor: Mutex<Option<GadgetSessionAnchor>>,
+    pub gadget_visual_state: RwLock<GadgetVisualState>,
     /// User-customisable global recording shortcuts (toggle/cancel).
     pub shortcuts: RwLock<ShortcutConfig>,
     /// Tauri `AppHandle` set once during `setup`. Held by the audio
@@ -338,6 +403,10 @@ impl AppState {
             recording_since: Mutex::new(None),
             system_prompt: RwLock::new(String::new()),
             compact_mode: RwLock::new(false),
+            widget_visibility_mode: RwLock::new(WidgetVisibilityMode::Auto),
+            widget_dock: RwLock::new(WidgetDock::Bottom),
+            gadget_session_anchor: Mutex::new(None),
+            gadget_visual_state: RwLock::new(GadgetVisualState::Hidden),
             shortcuts: RwLock::new(ShortcutConfig::default()),
             app_handle: RwLock::new(None),
             dual_engine: RwLock::new(false),
@@ -511,6 +580,7 @@ pub enum RecordingEvent {
 /// module-level constant list to avoid magic strings drifting between
 /// the Rust and TypeScript sides of the codebase.
 pub mod event_names {
+    pub const RECORDING_INITIALIZING: &str = "recording-initializing";
     pub const RECORDING_STARTED: &str = "recording-started";
     pub const RECORDING_STOPPED: &str = "recording-stopped";
     pub const RECORDING_CANCELLED: &str = "recording-cancelled";
@@ -523,6 +593,7 @@ pub mod event_names {
     /// Emitted when the gadget compact-mode preference changes. Payload is the
     /// new `bool` value.
     pub const COMPACT_MODE_CHANGED: &str = "compact-mode-changed";
+    pub const WIDGET_PREFERENCES_CHANGED: &str = "widget-preferences-changed";
 }
 
 /// Developer-mode snapshot of the sanitizer (Groq Chat Completions) request and

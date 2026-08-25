@@ -1,5 +1,6 @@
 use crate::models::{
-    ApiKeysPayload, DeepgramMode, EngineConfigPayload, SharedState, TranscriptionEngine,
+    ApiKeysPayload, DeepgramMode, EngineConfigPayload, GadgetVisualState, SharedState,
+    TranscriptionEngine, WidgetPreferences, WidgetVisibilityMode,
 };
 use crate::pipeline_contract::TranscriptionMode;
 use serde::{Deserialize, Serialize};
@@ -416,6 +417,18 @@ pub fn toggle_recording_state(
     Ok(next)
 }
 
+/// Cancels the active capture through the same path as the global panic
+/// shortcut. This lets the floating gadget discard a recording without
+/// producing audio output or starting the transcription pipeline.
+#[tauri::command]
+pub fn cancel_recording(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), CommandError> {
+    crate::shortcuts::handle_cancel(&app, state.inner());
+    Ok(())
+}
+
 /// `get_recording_state`
 ///
 /// Read-only accessor used by the frontend on startup or after a
@@ -704,20 +717,69 @@ pub async fn set_compact_mode(
     state: State<'_, SharedState>,
     value: bool,
 ) -> Result<(), CommandError> {
-    log::info!("set_compact_mode: {}", value);
-    let shared = state.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        *shared.compact_mode.write() = value;
-        crate::settings::save_compact(value);
+    let mode = if value {
+        WidgetVisibilityMode::Always
+    } else {
+        WidgetVisibilityMode::Auto
+    };
+    set_widget_visibility_mode(app, state, mode)
+        .await
+        .map(|_| ())
+}
 
-        use tauri::Emitter;
-        if let Err(e) = app.emit(crate::models::event_names::COMPACT_MODE_CHANGED, value) {
-            log::warn!("failed to emit compact-mode-changed: {}", e);
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| CommandError::Internal(e.to_string()))?
+#[tauri::command]
+pub fn get_widget_preferences(state: State<'_, SharedState>) -> WidgetPreferences {
+    WidgetPreferences {
+        visibility_mode: *state.widget_visibility_mode.read(),
+        dock: *state.widget_dock.read(),
+        display: crate::settings::load_widget_display(),
+    }
+}
+
+#[tauri::command]
+pub async fn set_widget_visibility_mode(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+    mode: WidgetVisibilityMode,
+) -> Result<WidgetPreferences, CommandError> {
+    log::info!("set_widget_visibility_mode: {:?}", mode);
+    *state.widget_visibility_mode.write() = mode;
+    *state.compact_mode.write() = mode == WidgetVisibilityMode::Always;
+    tokio::task::spawn_blocking(move || crate::settings::save_widget_visibility_mode(mode))
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))?;
+
+    let current = *state.gadget_visual_state.read();
+    if matches!(
+        current,
+        GadgetVisualState::Hidden | GadgetVisualState::Idle | GadgetVisualState::Hover
+    ) {
+        let target = if mode == WidgetVisibilityMode::Always {
+            GadgetVisualState::Idle
+        } else {
+            GadgetVisualState::Hidden
+        };
+        crate::present_gadget(&app, state.inner(), target).map_err(CommandError::Internal)?;
+    }
+
+    let snapshot = get_widget_preferences(state);
+    use tauri::Emitter;
+    if let Err(error) = app.emit(
+        crate::models::event_names::WIDGET_PREFERENCES_CHANGED,
+        &snapshot,
+    ) {
+        log::warn!("failed to emit widget-preferences-changed: {}", error);
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn set_gadget_visual_state(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+    visual_state: GadgetVisualState,
+) -> Result<GadgetVisualState, CommandError> {
+    crate::present_gadget(&app, state.inner(), visual_state).map_err(CommandError::Internal)
 }
 
 /// `set_gadget_hit_rect`
