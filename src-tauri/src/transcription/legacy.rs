@@ -18,10 +18,7 @@ pub async fn transcribe_bytes(
 ) -> Result<String, String> {
     match engine {
         TranscriptionEngine::GroqWhisper => {
-            let api_key = {
-                let guard = state.api_keys.read();
-                guard.groq.clone().filter(|k| !k.trim().is_empty())
-            };
+            let api_key = state.next_groq_key();
             let Some(api_key) = api_key else {
                 log::error!("transcription: groq api key is missing, skipping transcription");
                 return Err("Chave de API do Groq não configurada.".to_string());
@@ -42,10 +39,7 @@ pub async fn transcribe_bytes(
             }
         }
         TranscriptionEngine::DeepgramNova3 => {
-            let api_key = {
-                let guard = state.api_keys.read();
-                guard.deepgram.clone().filter(|k| !k.trim().is_empty())
-            };
+            let api_key = state.next_deepgram_key();
             let Some(api_key) = api_key else {
                 log::error!("transcription: deepgram api key is missing, skipping transcription");
                 return Err("Chave de API do Deepgram não configurada.".to_string());
@@ -98,10 +92,7 @@ pub async fn deepgram_from_live_or_posthoc(
     wav: Vec<u8>,
     mime: &str,
 ) -> Result<String, String> {
-    let api_key = {
-        let guard = state.api_keys.read();
-        guard.deepgram.clone().filter(|k| !k.trim().is_empty())
-    };
+    let api_key = state.next_deepgram_key();
     let Some(api_key) = api_key else {
         return Err("Chave de API do Deepgram não configurada.".to_string());
     };

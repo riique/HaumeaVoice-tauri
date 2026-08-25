@@ -1005,6 +1005,7 @@ pub fn run() {
                         *state.gemini_fallback_to_whisper.write() =
                             settings::load_gemini_fallback_to_whisper();
                         *state.content_type.write() = settings::load_content_type();
+                        *state.gemini_pipelines.write() = settings::load_gemini_pipelines();
                     }
                     Err(e) => {
                         log::warn!("history: could not resolve app data dir: {}", e);
@@ -1066,6 +1067,9 @@ pub fn run() {
             commands::get_recording_state,
             commands::get_recording_elapsed,
             commands::get_history,
+            commands::get_audio_storage_config,
+            commands::set_audio_storage_directory,
+            commands::reveal_history_audio,
             commands::clear_history,
             commands::delete_history_entry,
             commands::update_history_text,

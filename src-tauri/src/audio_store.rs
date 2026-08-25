@@ -1,13 +1,15 @@
 //! Permanent on-disk storage for the audio that produced each transcription.
 //!
 //! Every transcription — whether captured from the microphone or uploaded as a
-//! file — has its source audio copied into `{app_data_dir}/audio/{id}.{ext}`.
+//! file — has its source audio copied into the configured directory (default:
+//! `{app_data_dir}/audio`) as `{id}.{ext}`.
 //! The resulting path is stored on the matching [`crate::models::HistoryEntry`]
 //! so the pronunciation evaluator can later re-read the exact audio bytes and
 //! hand them to Gemini.
 //!
-//! Like the `history` and `secrets` modules, the directory is resolved once
-//! during setup and access is guarded by a process-wide `Mutex`.
+//! The default directory is resolved once during setup; the effective directory
+//! is read from settings on each operation so changes apply without restarting.
+//! Access is guarded by a process-wide `Mutex`.
 
 use parking_lot::Mutex;
 use std::{fs, path::PathBuf, sync::OnceLock};
@@ -28,6 +30,33 @@ fn dir() -> Option<&'static PathBuf> {
     AUDIO_DIR.get()
 }
 
+pub fn default_directory() -> Option<PathBuf> {
+    dir().cloned()
+}
+
+pub fn effective_directory() -> Option<PathBuf> {
+    crate::settings::load_audio_directory()
+        .map(PathBuf::from)
+        .or_else(default_directory)
+}
+
+/// Validates and creates a user-selected audio directory without moving any
+/// existing files. Returns the canonical absolute path persisted in settings.
+pub fn prepare_custom_directory(path: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(path.trim());
+    if !candidate.is_absolute() {
+        return Err("Selecione uma pasta com caminho absoluto.".to_string());
+    }
+    fs::create_dir_all(&candidate)
+        .map_err(|e| format!("Não foi possível criar a pasta de áudio: {e}"))?;
+    if !candidate.is_dir() {
+        return Err("O local selecionado não é uma pasta.".to_string());
+    }
+    candidate
+        .canonicalize()
+        .map_err(|e| format!("Não foi possível validar a pasta de áudio: {e}"))
+}
+
 fn lock() -> &'static Mutex<()> {
     AUDIO_LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -38,8 +67,8 @@ fn lock() -> &'static Mutex<()> {
 /// best-effort: a failure must not abort the transcription itself).
 pub fn save(id: &str, ext: &str, bytes: &[u8]) -> Option<String> {
     let _guard = lock().lock();
-    let dir = dir()?;
-    if let Err(e) = fs::create_dir_all(dir) {
+    let dir = effective_directory()?;
+    if let Err(e) = fs::create_dir_all(&dir) {
         log::error!("audio_store: could not create audio dir: {}", e);
         return None;
     }
@@ -64,14 +93,16 @@ pub fn read(path: &str) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|e| format!("could not read saved audio at {}: {}", path, e))
 }
 
-/// Removes every file in the audio directory. Called alongside
-/// `history::clear` so wiping the history also reclaims the disk space.
+/// Removes every file in the effective audio directory. Kept for maintenance
+/// callers that explicitly own the whole directory; history cleanup deletes
+/// only the exact files referenced by its entries.
+#[allow(dead_code)]
 pub fn clear() {
     let _guard = lock().lock();
-    let Some(dir) = dir() else {
+    let Some(dir) = effective_directory() else {
         return;
     };
-    if let Ok(entries) = fs::read_dir(dir) {
+    if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let _ = fs::remove_file(entry.path());
         }
@@ -106,5 +137,22 @@ fn sanitize_ext(ext: &str) -> String {
         "bin".to_string()
     } else {
         cleaned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_is_sanitized_without_path_components() {
+        assert_eq!(sanitize_ext(".WAV"), "wav");
+        assert_eq!(sanitize_ext("../../mp3"), "mp3");
+        assert_eq!(sanitize_ext(""), "bin");
+    }
+
+    #[test]
+    fn custom_directory_must_be_absolute() {
+        assert!(prepare_custom_directory("relative/audio").is_err());
     }
 }

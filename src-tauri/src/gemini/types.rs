@@ -67,13 +67,14 @@ pub struct TranscribeRequest {
     /// File extension (wav, mp3, …) used for MIME selection.
     pub ext: String,
     pub api_key: String,
+    pub model: String,
     /// Optional display name for the Files API object.
     pub display_name: String,
     /// Audio duration when known (mic); used for transport selection.
     pub duration_ms: Option<u64>,
     /// Glossary block for FastAccurate (strict terms + aliases).
     pub glossary_block: String,
-    /// Resolved content-type label (`programming` / `study` / `general-speech`).
+    /// Optional content-type label (`programming` / `study`; empty = neutral).
     pub content_note: String,
 }
 

@@ -3,12 +3,15 @@
 use std::sync::Arc;
 
 use crate::gemini::{
-    encode_audio_base64, mime_for_ext, refine_precise, refine_precise_with_file,
+    adaptive_generate_timeout, encode_audio_base64, fast_accurate_transcription_prompt,
+    mime_for_ext, precise_refinement_prompt, refine_precise, refine_precise_with_file,
     refine_ultraprecise, spawn_cleanup, transcribe_audio, transcribe_inline, transcribe_with_file,
-    upload_and_wait, GeminiAudioTransport, TranscribeRequest,
+    transcription_prompt, ultraprecise_refinement_prompt, upload_and_wait, GeminiAudioTransport,
+    GeminiGenerateResult, GeminiOperation, GeminiStageTiming, TranscribeRequest,
+    PRECISE_PROMPT_VERSION, TRANSCRIBE_PROMPT_VERSION, ULTRAPRECISE_PROMPT_VERSION,
 };
 use crate::models::{AppState, HistoryEntry, SanitizerDebug, TranscriptionEngine};
-use crate::pipeline_contract::TranscriptionMode;
+use crate::pipeline_contract::{GeminiProvider, TranscriptionMode};
 use crate::transcription::legacy::transcribe_bytes;
 use crate::transcription::telemetry::{
     compute_realtime_factor, est_throughput, est_total_tokens, log_latency,
@@ -46,10 +49,64 @@ pub struct ModePipelineResult {
     pub gemini_transport: Option<String>,
     pub warnings: Vec<String>,
     pub content_type: Option<String>,
-    pub openrouter_cost_usd: Option<f64>,
-    pub openrouter_audio_seconds: Option<f64>,
     pub openrouter_generation_id: Option<String>,
     pub reported_total_tokens: Option<usize>,
+}
+
+async fn openrouter_audio_result(
+    audio: &[u8],
+    ext: &str,
+    prompt: &str,
+    model: &str,
+    api_key: &str,
+    duration_ms: Option<u64>,
+    operation: GeminiOperation,
+    prompt_version: &str,
+) -> Result<GeminiGenerateResult, String> {
+    let adaptive_timeout = adaptive_generate_timeout(duration_ms, audio.len());
+    let route = crate::openrouter::detect_audio_route(model).await;
+    log::info!(
+        "modes: OpenRouter automatic audio route model={} endpoint={}",
+        model,
+        route.as_str()
+    );
+    let out = match route {
+        crate::openrouter::OpenRouterAudioRoute::MultimodalLlm => {
+            crate::openrouter::generate_with_audio(
+                audio,
+                ext,
+                prompt,
+                model,
+                api_key,
+                adaptive_timeout,
+            )
+            .await?
+        }
+        crate::openrouter::OpenRouterAudioRoute::SpeechToText => {
+            crate::openrouter::transcribe_audio(
+                audio,
+                ext,
+                model,
+                api_key,
+                std::time::Duration::from_secs(120).max(adaptive_timeout),
+            )
+            .await?
+        }
+    };
+    Ok(GeminiGenerateResult {
+        operation,
+        text: out.text,
+        model: model.to_string(),
+        prompt_version: prompt_version.to_string(),
+        latency_ms: out.base64_ms + out.request_ms,
+        remote_file_name: None,
+        transport: Some(GeminiAudioTransport::Inline),
+        timing: GeminiStageTiming {
+            base64_ms: Some(out.base64_ms),
+            generate_ms: Some(out.request_ms),
+            ..Default::default()
+        },
+    })
 }
 
 fn pipeline_debug_snapshot(result: &ModePipelineResult) -> SanitizerDebug {
@@ -82,8 +139,6 @@ fn pipeline_debug_snapshot(result: &ModePipelineResult) -> SanitizerDebug {
         "files_poll_count": result.files_poll_count,
         "gemini_generate_ms": result.gemini_generate_ms,
         "total_pipeline_ms": result.total_pipeline_ms,
-        "openrouter_cost_usd": result.openrouter_cost_usd,
-        "openrouter_audio_seconds": result.openrouter_audio_seconds,
         "openrouter_generation_id": result.openrouter_generation_id,
         "reported_total_tokens": result.reported_total_tokens,
     });
@@ -129,25 +184,36 @@ fn apply_timing_from_gemini(
     }
 }
 
-/// UltraFast: audio → Whisper Large V3 Turbo → text (no sanitizer).
+/// UltraFast: audio → OpenRouter STT (Whisper on Groq) → text (no sanitizer).
 pub async fn run_ultra_fast(
     state: &Arc<AppState>,
     audio: Vec<u8>,
-    file_name: &str,
-    mime: &str,
+    ext: &str,
     _duration_ms: Option<u64>,
 ) -> Result<ModePipelineResult, String> {
     let t0 = std::time::Instant::now();
-    log::info!("modes: UltraFast → Whisper only (sanitizer off)");
-
-    let text = transcribe_bytes(
-        state,
-        audio,
-        file_name,
-        mime,
-        TranscriptionEngine::GroqWhisper,
+    let model = state
+        .gemini_pipelines
+        .read()
+        .ultra_fast_whisper
+        .openrouter_id();
+    let api_key = state.next_openrouter_key().ok_or_else(|| {
+        "Configure uma chave do OpenRouter em Provedores e APIs para usar o modo Ultrarrápido."
+            .to_string()
+    })?;
+    log::info!(
+        "modes: UltraFast → OpenRouter STT model={} provider=groq (sanitizer off)",
+        model
+    );
+    let generated = crate::openrouter::transcribe_audio(
+        &audio,
+        ext,
+        model,
+        &api_key,
+        std::time::Duration::from_secs(120),
     )
     .await?;
+    let text = generated.text;
 
     if text.trim().is_empty() {
         return Err("Nenhum texto detectado na gravação.".to_string());
@@ -157,73 +223,20 @@ pub async fn run_ultra_fast(
     Ok(ModePipelineResult {
         final_text: text.trim().to_string(),
         mode: TranscriptionMode::UltraFast,
-        model: "whisper-large-v3-turbo".into(),
-        stages: vec!["whisper".into()],
+        model: model.into(),
+        stages: vec![
+            "openrouter_stt".into(),
+            "provider:groq".into(),
+            "model_api:speech-to-text".into(),
+        ],
         whisper_text: Some(text.trim().to_string()),
         transcription_latency_ms: ms,
-        history_engine_label: "UltraFast/Whisper".into(),
-        whisper_ms: Some(ms),
+        history_engine_label: "UltraFast/OpenRouter/Groq".into(),
+        whisper_ms: Some(generated.request_ms),
+        base64_ms: Some(generated.base64_ms),
+        openrouter_generation_id: generated.generation_id,
+        reported_total_tokens: generated.reported_total_tokens,
         total_pipeline_ms: Some(ms),
-        ..Default::default()
-    })
-}
-
-/// Experimental: audio → OpenRouter dedicated STT → Google Chirp 3 → text.
-pub async fn run_chirp3_experimental(
-    state: &Arc<AppState>,
-    audio: Vec<u8>,
-    ext: &str,
-    duration_ms: Option<u64>,
-) -> Result<ModePipelineResult, String> {
-    let t0 = std::time::Instant::now();
-    let api_key = state
-        .api_keys
-        .read()
-        .openrouter
-        .clone()
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| {
-            "Configure a chave da API do OpenRouter em Provedores e APIs.".to_string()
-        })?;
-
-    log::info!(
-        "modes: Chirp3Experimental → OpenRouter STT model={} bytes={} duration_ms={:?}",
-        crate::openrouter::CHIRP_3_MODEL,
-        audio.len(),
-        duration_ms
-    );
-    let response = crate::openrouter::transcribe_chirp3(&audio, ext, &api_key).await?;
-    let total_ms = t0.elapsed().as_millis() as u64;
-    let resolved_ct = crate::sanitizer_json::resolve_content_type(
-        *state.content_type.read(),
-        response.text.trim(),
-    );
-    let mut stages = vec![
-        format!("base64:{}ms", response.base64_ms),
-        format!("openrouter_chirp3:{}ms", response.request_ms),
-    ];
-    if response.cost_usd.is_some() {
-        stages.push("usage_cost_reported".into());
-    }
-
-    Ok(ModePipelineResult {
-        final_text: response.text,
-        mode: TranscriptionMode::Chirp3Experimental,
-        model: crate::openrouter::CHIRP_3_MODEL.into(),
-        stages,
-        transcription_latency_ms: total_ms,
-        history_engine_label: "Experimental/OpenRouter/Chirp3".into(),
-        base64_ms: Some(response.base64_ms),
-        gemini_generate_ms: Some(response.request_ms),
-        total_pipeline_ms: Some(total_ms),
-        gemini_transport: Some("openrouter_stt_json".into()),
-        content_type: Some(resolved_ct.as_str().to_string()),
-        openrouter_cost_usd: response.cost_usd,
-        openrouter_audio_seconds: response.audio_seconds,
-        openrouter_generation_id: response.generation_id,
-        reported_total_tokens: response
-            .total_tokens
-            .and_then(|value| usize::try_from(value).ok()),
         ..Default::default()
     })
 }
@@ -238,10 +251,12 @@ pub async fn run_fast_accurate(
     duration_ms: Option<u64>,
 ) -> Result<ModePipelineResult, String> {
     let t0 = std::time::Instant::now();
+    let choice = state.gemini_pipelines.read().fast_accurate.clone();
+    let model_id = choice.resolved_model_id()?;
     let fallback = *state.gemini_fallback_to_whisper.read();
-    let api_key = {
-        let guard = state.api_keys.read();
-        guard.google.clone().filter(|k| !k.trim().is_empty())
+    let api_key = match choice.provider {
+        GeminiProvider::GoogleAiStudio => state.next_google_key(),
+        GeminiProvider::OpenRouter => state.next_openrouter_key(),
     };
     let glossary_block = {
         let vocab = state.vocabulary.read().clone();
@@ -271,7 +286,10 @@ pub async fn run_fast_accurate(
     let (final_text, model) = match api_key {
         None => {
             if !fallback {
-                return Err("Configure a chave de API do Google (Gemini) em Ajustes.".to_string());
+                return Err(
+                    "Configure uma chave para o provedor selecionado em Provedores e APIs."
+                        .to_string(),
+                );
             }
             stages.push("gemini_skipped_no_key".into());
             used_fallback = true;
@@ -292,17 +310,43 @@ pub async fn run_fast_accurate(
             (w, "whisper-large-v3-turbo".to_string())
         }
         Some(key) => {
+            stages.push(format!(
+                "model_api:{}",
+                if choice.provider == GeminiProvider::OpenRouter {
+                    "automatic"
+                } else {
+                    "google-generate-content"
+                }
+            ));
             stages.push("gemini_transcribe".into());
             let req = TranscribeRequest {
                 audio_bytes: audio.clone(),
                 ext: ext.to_string(),
                 api_key: key,
+                model: model_id.clone(),
                 display_name: file_name.to_string(),
                 duration_ms,
                 glossary_block,
                 content_note: content_note.clone(),
             };
-            match transcribe_audio(req).await {
+            let generated = if choice.provider == GeminiProvider::OpenRouter {
+                let prompt =
+                    fast_accurate_transcription_prompt(&req.glossary_block, &req.content_note);
+                openrouter_audio_result(
+                    &req.audio_bytes,
+                    ext,
+                    &prompt,
+                    &model_id,
+                    &req.api_key,
+                    duration_ms,
+                    GeminiOperation::Transcribe,
+                    TRANSCRIBE_PROMPT_VERSION,
+                )
+                .await
+            } else {
+                transcribe_audio(req).await
+            };
+            match generated {
                 Ok(r) if !r.text.trim().is_empty() => {
                     apply_timing_from_gemini(&mut result_meta, &r);
                     if let Some(t) = r.transport {
@@ -405,12 +449,16 @@ pub async fn run_precise(
     duration_ms: Option<u64>,
 ) -> Result<ModePipelineResult, String> {
     let t0 = std::time::Instant::now();
-    let api_key = {
-        let guard = state.api_keys.read();
-        guard.google.clone().filter(|k| !k.trim().is_empty())
+    let choice = state.gemini_pipelines.read().precise.clone();
+    let model_id = choice.resolved_model_id()?;
+    let api_key = match choice.provider {
+        GeminiProvider::GoogleAiStudio => state.next_google_key(),
+        GeminiProvider::OpenRouter => state.next_openrouter_key(),
     };
     let Some(api_key) = api_key else {
-        return Err("Configure a chave de API do Google (Gemini) em Ajustes.".to_string());
+        return Err(
+            "Configure uma chave para o provedor selecionado em Provedores e APIs.".to_string(),
+        );
     };
     let glossary_block = {
         let vocab = state.vocabulary.read().clone();
@@ -423,11 +471,15 @@ pub async fn run_precise(
         file_name.to_string()
     };
     let mime_g = mime_for_ext(ext);
-    let transport = crate::gemini::select_gemini_audio_transport(
-        audio.len(),
-        duration_ms.or_else(|| crate::gemini::estimate_wav_duration_ms(&audio)),
-        mime_g,
-    )?;
+    let transport = if choice.provider == GeminiProvider::OpenRouter {
+        GeminiAudioTransport::Inline
+    } else {
+        crate::gemini::select_gemini_audio_transport(
+            audio.len(),
+            duration_ms.or_else(|| crate::gemini::estimate_wav_duration_ms(&audio)),
+            mime_g,
+        )?
+    };
 
     log::info!(
         "modes: Precise → Whisper ∥ prep, transport={:?}",
@@ -478,6 +530,14 @@ pub async fn run_precise(
     let mut stages = vec![
         format!("whisper_parallel:{}ms", whisper_ms),
         format!("transport:{}", transport.as_str()),
+        format!(
+            "model_api:{}",
+            if choice.provider == GeminiProvider::OpenRouter {
+                "automatic"
+            } else {
+                "google-generate-content"
+            }
+        ),
     ];
     let mut meta = ModePipelineResult {
         whisper_ms: Some(whisper_ms),
@@ -491,8 +551,22 @@ pub async fn run_precise(
             stages.push(format!("base64:{}ms", base64_ms));
             let w_trim = w.trim().to_string();
             if w_trim.is_empty() {
-                let pure =
-                    transcribe_inline(&api_key, &audio, mime_g, Some((b64, base64_ms))).await;
+                let pure = if choice.provider == GeminiProvider::OpenRouter {
+                    openrouter_audio_result(
+                        &audio,
+                        ext,
+                        transcription_prompt(),
+                        &model_id,
+                        &api_key,
+                        duration_ms,
+                        GeminiOperation::Transcribe,
+                        TRANSCRIBE_PROMPT_VERSION,
+                    )
+                    .await
+                } else {
+                    transcribe_inline(&api_key, &model_id, &audio, mime_g, Some((b64, base64_ms)))
+                        .await
+                };
                 return finish_precise_pure(
                     pure,
                     t0,
@@ -504,17 +578,33 @@ pub async fn run_precise(
                     &vocab_snapshot,
                 );
             }
-            let refined = refine_precise(
-                &api_key,
-                &audio,
-                ext,
-                &display,
-                &w_trim,
-                &glossary_block,
-                duration_ms,
-                Some((b64, base64_ms)),
-            )
-            .await;
+            let refined = if choice.provider == GeminiProvider::OpenRouter {
+                let prompt = precise_refinement_prompt(&w_trim, &glossary_block);
+                openrouter_audio_result(
+                    &audio,
+                    ext,
+                    &prompt,
+                    &model_id,
+                    &api_key,
+                    duration_ms,
+                    GeminiOperation::Refine,
+                    PRECISE_PROMPT_VERSION,
+                )
+                .await
+            } else {
+                refine_precise(
+                    &api_key,
+                    &model_id,
+                    &audio,
+                    ext,
+                    &display,
+                    &w_trim,
+                    &glossary_block,
+                    duration_ms,
+                    Some((b64, base64_ms)),
+                )
+                .await
+            };
             finish_precise_refine(
                 refined,
                 t0,
@@ -542,7 +632,9 @@ pub async fn run_precise(
             if w_trim.is_empty() {
                 stages.push("whisper_empty".into());
                 let file_ref = guard.file_ref();
-                let pure = transcribe_with_file(&api_key, &file_ref).await;
+                let pure =
+                    transcribe_with_file(&api_key, &model_id, &file_ref, duration_ms, audio.len())
+                        .await;
                 spawn_cleanup(guard);
                 return finish_precise_pure(
                     pure,
@@ -556,8 +648,16 @@ pub async fn run_precise(
                 );
             }
             let file_ref = guard.file_ref();
-            let refined =
-                refine_precise_with_file(&api_key, &file_ref, &w_trim, &glossary_block).await;
+            let refined = refine_precise_with_file(
+                &api_key,
+                &model_id,
+                &file_ref,
+                &w_trim,
+                &glossary_block,
+                duration_ms,
+                audio.len(),
+            )
+            .await;
             spawn_cleanup(guard);
             finish_precise_refine(
                 refined,
@@ -606,7 +706,21 @@ pub async fn run_precise(
         (Err(w_err), PrepOutcome::Inline { b64, base64_ms }) => {
             meta.base64_ms = Some(base64_ms);
             stages.push(format!("whisper_failed:{}", w_err));
-            let pure = transcribe_inline(&api_key, &audio, mime_g, Some((b64, base64_ms))).await;
+            let pure = if choice.provider == GeminiProvider::OpenRouter {
+                openrouter_audio_result(
+                    &audio,
+                    ext,
+                    transcription_prompt(),
+                    &model_id,
+                    &api_key,
+                    duration_ms,
+                    GeminiOperation::Transcribe,
+                    TRANSCRIBE_PROMPT_VERSION,
+                )
+                .await
+            } else {
+                transcribe_inline(&api_key, &model_id, &audio, mime_g, Some((b64, base64_ms))).await
+            };
             finish_precise_pure(
                 pure,
                 t0,
@@ -632,7 +746,9 @@ pub async fn run_precise(
             meta.upload_ms = Some(wall_ms);
             stages.push(format!("whisper_failed:{}", w_err));
             let file_ref = guard.file_ref();
-            let pure = transcribe_with_file(&api_key, &file_ref).await;
+            let pure =
+                transcribe_with_file(&api_key, &model_id, &file_ref, duration_ms, audio.len())
+                    .await;
             spawn_cleanup(guard);
             finish_precise_pure(
                 pure,
@@ -796,9 +912,11 @@ pub async fn run_ultra_precise(
     duration_ms: Option<u64>,
 ) -> Result<ModePipelineResult, String> {
     let t0 = std::time::Instant::now();
-    let api_key = {
-        let guard = state.api_keys.read();
-        guard.google.clone().filter(|k| !k.trim().is_empty())
+    let choice = state.gemini_pipelines.read().ultra_precise.clone();
+    let model_id = choice.resolved_model_id()?;
+    let api_key = match choice.provider {
+        GeminiProvider::GoogleAiStudio => state.next_google_key(),
+        GeminiProvider::OpenRouter => state.next_openrouter_key(),
     };
     let glossary_block = {
         let vocab = state.vocabulary.read().clone();
@@ -811,11 +929,15 @@ pub async fn run_ultra_precise(
         file_name.to_string()
     };
     let mime_g = mime_for_ext(ext);
-    let transport = crate::gemini::select_gemini_audio_transport(
-        audio.len(),
-        duration_ms.or_else(|| crate::gemini::estimate_wav_duration_ms(&audio)),
-        mime_g,
-    )?;
+    let transport = if choice.provider == GeminiProvider::OpenRouter {
+        GeminiAudioTransport::Inline
+    } else {
+        crate::gemini::select_gemini_audio_transport(
+            audio.len(),
+            duration_ms.or_else(|| crate::gemini::estimate_wav_duration_ms(&audio)),
+            mime_g,
+        )?
+    };
 
     log::info!(
         "modes: UltraPrecise → Whisper→sanitizer ∥ prep ({})",
@@ -897,6 +1019,14 @@ pub async fn run_ultra_precise(
         format!("whisper:{}ms", whisper_ms),
         format!("sanitizer:{}ms", sanitizer_ms),
         format!("transport:{}", transport.as_str()),
+        format!(
+            "model_api:{}",
+            if choice.provider == GeminiProvider::OpenRouter {
+                "automatic"
+            } else {
+                "google-generate-content"
+            }
+        ),
     ];
     if sanitize.used_raw_fallback {
         stages.push("sanitizer_raw_fallback".into());
@@ -928,19 +1058,40 @@ pub async fn run_ultra_precise(
             (Some(key), PrepOutcome::Inline { b64, base64_ms }) => {
                 meta.base64_ms = Some(base64_ms);
                 stages.push(format!("base64:{}ms", base64_ms));
-                let refined = refine_ultraprecise(
-                    key,
-                    &audio,
-                    ext,
-                    &display,
-                    &whisper_text,
-                    &sanitized_text,
-                    &glossary_block,
-                    &content_note,
-                    duration_ms,
-                    Some((b64, base64_ms)),
-                )
-                .await;
+                let refined = if choice.provider == GeminiProvider::OpenRouter {
+                    let prompt = ultraprecise_refinement_prompt(
+                        &whisper_text,
+                        &sanitized_text,
+                        &glossary_block,
+                        &content_note,
+                    );
+                    openrouter_audio_result(
+                        &audio,
+                        ext,
+                        &prompt,
+                        &model_id,
+                        key,
+                        duration_ms,
+                        GeminiOperation::Refine,
+                        ULTRAPRECISE_PROMPT_VERSION,
+                    )
+                    .await
+                } else {
+                    refine_ultraprecise(
+                        key,
+                        &model_id,
+                        &audio,
+                        ext,
+                        &display,
+                        &whisper_text,
+                        &sanitized_text,
+                        &glossary_block,
+                        &content_note,
+                        duration_ms,
+                        Some((b64, base64_ms)),
+                    )
+                    .await
+                };
                 match refined {
                     Ok(r) if !r.text.trim().is_empty() => {
                         apply_timing_from_gemini(&mut meta, &r);
@@ -994,11 +1145,14 @@ pub async fn run_ultra_precise(
                 let file_ref = guard.file_ref();
                 let refined = crate::gemini::refine_ultraprecise_with_file(
                     key,
+                    &model_id,
                     &file_ref,
                     &whisper_text,
                     &sanitized_text,
                     &glossary_block,
                     &content_note,
+                    duration_ms,
+                    audio.len(),
                 )
                 .await;
                 spawn_cleanup(guard);
@@ -1293,7 +1447,6 @@ pub fn should_use_product_mode(state: &AppState) -> bool {
             | TranscriptionMode::FastAccurate
             | TranscriptionMode::Precise
             | TranscriptionMode::UltraPrecise
-            | TranscriptionMode::Chirp3Experimental
     )
 }
 
@@ -1317,9 +1470,7 @@ pub async fn run_product_mode_with_duration(
 ) -> Result<ModePipelineResult, String> {
     let mode = *state.transcription_mode.read();
     let mut result = match mode {
-        TranscriptionMode::UltraFast => {
-            run_ultra_fast(state, audio, file_name, mime, duration_ms).await?
-        }
+        TranscriptionMode::UltraFast => run_ultra_fast(state, audio, ext, duration_ms).await?,
         TranscriptionMode::FastAccurate => {
             run_fast_accurate(state, audio, ext, file_name, mime, duration_ms).await?
         }
@@ -1328,9 +1479,6 @@ pub async fn run_product_mode_with_duration(
         }
         TranscriptionMode::UltraPrecise => {
             run_ultra_precise(state, audio, ext, file_name, mime, duration_ms).await?
-        }
-        TranscriptionMode::Chirp3Experimental => {
-            run_chirp3_experimental(state, audio, ext, duration_ms).await?
         }
     };
     // Global strict pass (may double-apply with in-mode; safe / idempotent).

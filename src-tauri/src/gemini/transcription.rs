@@ -3,8 +3,8 @@
 use base64::{engine::general_purpose, Engine as _};
 
 use super::client::{
-    build_file_request, build_inline_request, generate_content_with_model, mime_for_ext,
-    FAST_ACCURATE_MODEL,
+    adaptive_generate_timeout, build_file_request, build_inline_request,
+    generate_content_with_model, mime_for_ext,
 };
 use super::files::{spawn_cleanup, upload_and_wait};
 use super::prompts::{fast_accurate_transcription_prompt, TRANSCRIBE_PROMPT_VERSION};
@@ -27,6 +27,7 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
         .duration_ms
         .or_else(|| estimate_wav_duration_ms(&req.audio_bytes));
     let transport = select_gemini_audio_transport(req.audio_bytes.len(), duration, mime)?;
+    let generate_timeout = adaptive_generate_timeout(duration, req.audio_bytes.len());
     let prompt = fast_accurate_transcription_prompt(&req.glossary_block, &req.content_note);
 
     let (text, timing, remote) = match transport {
@@ -36,7 +37,8 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
             let base64_ms = tb.elapsed().as_millis() as u64;
             let body = build_inline_request(&prompt, mime, &b64).for_fast_accurate();
             let (text, generate_ms) =
-                generate_content_with_model(&req.api_key, FAST_ACCURATE_MODEL, &body).await?;
+                generate_content_with_model(&req.api_key, &req.model, &body, generate_timeout)
+                    .await?;
             (
                 text,
                 GeminiStageTiming {
@@ -53,7 +55,9 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
             let name = guard.name().to_string();
             let body =
                 build_file_request(&prompt, guard.mime_type(), guard.uri()).for_fast_accurate();
-            let gen = generate_content_with_model(&req.api_key, FAST_ACCURATE_MODEL, &body).await;
+            let gen =
+                generate_content_with_model(&req.api_key, &req.model, &body, generate_timeout)
+                    .await;
             spawn_cleanup(guard);
             let (text, generate_ms) = gen?;
             (
@@ -74,7 +78,7 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
     Ok(GeminiGenerateResult {
         operation: GeminiOperation::Transcribe,
         text,
-        model: FAST_ACCURATE_MODEL.to_string(),
+        model: req.model,
         prompt_version: TRANSCRIBE_PROMPT_VERSION.to_string(),
         latency_ms: t0.elapsed().as_millis() as u64,
         remote_file_name: remote,

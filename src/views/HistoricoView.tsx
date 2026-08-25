@@ -14,12 +14,18 @@ import {
   Pencil,
   Check,
   Info,
+  FolderOpen,
 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { PronunciationEvaluation } from "../components/PronunciationEvaluation";
-import { evaluatePronunciation, getDevMode, type SanitizerDebug } from "../lib/tauri";
+import {
+  evaluatePronunciation,
+  getDevMode,
+  revealHistoryAudio,
+  type SanitizerDebug,
+} from "../lib/tauri";
 
 interface HistoryEntry {
   id: string;
@@ -138,6 +144,31 @@ function productModeLabel(mode: string | null | undefined): string | null {
   return mode;
 }
 
+function formatHistoryForClipboard(items: HistoryEntry[]): string {
+  return items
+    .filter((item) => !item.is_error && item.text.trim())
+    .map((item, index) => {
+      const model = item.model?.trim() || item.engine?.trim() || "Não informado";
+      const pipeline = productModeLabel(item.mode) || "Legado";
+      const stages = item.stages
+        ?.split(",")
+        .map((stage) => stage.trim())
+        .filter(Boolean)
+        .join(" → ");
+
+      return [
+        `=== Transcrição ${index + 1} ===`,
+        `Data: ${item.date}`,
+        `Modelo: ${model}`,
+        `Pipeline: ${pipeline}`,
+        ...(stages ? [`Etapas: ${stages}`] : []),
+        "",
+        item.text.trim(),
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
 /** Synthetic debug when entry has mode metadata but no persisted request (pre-fix). */
 function pipelineDebugFromEntry(h: HistoryEntry): SanitizerDebug {
   const parts: string[] = [];
@@ -200,6 +231,8 @@ export function HistoricoView() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedAll, setCopiedAll] = useState(false);
+  const [copyAllError, setCopyAllError] = useState("");
 
   const refresh = async () => {
     try {
@@ -291,6 +324,34 @@ export function HistoricoView() {
     }
   };
 
+  const handleRevealAudio = async (id: string) => {
+    setErrors((current) => ({ ...current, [id]: "" }));
+    try {
+      await revealHistoryAudio(id);
+    } catch (error) {
+      setErrors((current) => ({
+        ...current,
+        [id]: typeof error === "string" ? error : String(error),
+      }));
+    }
+  };
+
+  const handleCopyAll = async () => {
+    const text = formatHistoryForClipboard(items);
+    if (!text) return;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyAllError("");
+      setCopiedAll(true);
+      window.setTimeout(() => setCopiedAll(false), 1500);
+    } catch (e) {
+      console.error("failed to copy all transcriptions:", e);
+      setCopiedAll(false);
+      setCopyAllError("Não foi possível copiar todas as transcrições.");
+    }
+  };
+
   const handleDelete = async (id: string) => {
     if (!window.confirm("Excluir esta transcrição? O áudio salvo também será removido.")) {
       return;
@@ -337,6 +398,7 @@ export function HistoricoView() {
         (h.error_message && h.error_message.toLowerCase().includes(query.trim().toLowerCase()))
       )
     : items;
+  const copyableCount = items.filter((item) => !item.is_error && item.text.trim()).length;
 
   return (
     <div className="space-y-6">
@@ -350,7 +412,7 @@ export function HistoricoView() {
       </header>
 
       {/* Barra de pesquisa */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
           <Input
@@ -361,6 +423,20 @@ export function HistoricoView() {
           />
         </div>
         <Button
+          variant="secondary"
+          className="gap-2"
+          disabled={copyableCount === 0}
+          onClick={handleCopyAll}
+          aria-label={`Copiar todas as ${copyableCount} transcrições`}
+        >
+          {copiedAll ? (
+            <Check className="h-4 w-4 text-emerald-400" />
+          ) : (
+            <Copy className="h-4 w-4" />
+          )}
+          {copiedAll ? "Todas copiadas" : "Copiar todas"}
+        </Button>
+        <Button
           variant="danger"
           className="gap-2"
           disabled={items.length === 0}
@@ -369,6 +445,11 @@ export function HistoricoView() {
           <Trash2 className="h-4 w-4" />
           Limpar Tudo
         </Button>
+        {copyAllError ? (
+          <p className="basis-full text-right text-xs text-red-400" role="alert">
+            {copyAllError}
+          </p>
+        ) : null}
       </div>
 
       {/* Lista de cards / estado vazio */}
@@ -518,6 +599,20 @@ export function HistoricoView() {
                     >
                       <Info className="h-3.5 w-3.5 text-coral-400" />
                       {detailsOpen[h.id] ? "Ocultar detalhes" : "Detalhes"}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      className="gap-1.5 px-2.5 py-1.5 text-xs"
+                      disabled={!hasAudio}
+                      onClick={() => handleRevealAudio(h.id)}
+                      title={
+                        hasAudio
+                          ? "Mostrar o arquivo de áudio no Explorer"
+                          : "Este item antigo não possui áudio salvo"
+                      }
+                    >
+                      <FolderOpen className="h-3.5 w-3.5 text-coral-400" />
+                      Mostrar áudio
                     </Button>
                     {devMode && resolveDebugInfo(h) && (
                       <Button

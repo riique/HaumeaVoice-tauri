@@ -24,8 +24,7 @@ export type TranscriptionMode =
   | "ultra-fast"
   | "fast-accurate"
   | "precise"
-  | "ultra-precise"
-  | "chirp-3-experimental";
+  | "ultra-precise";
 
 export interface EngineConfigPayload {
   engine: TranscriptionEngine;
@@ -48,14 +47,29 @@ export interface EngineConfigSnapshot {
 export type ContentType =
   | "auto"
   | "programming"
-  | "general-speech"
   | "study";
+export type GeminiModel = "flash-lite35" | "flash36";
+export type GeminiProvider = "google-ai-studio" | "open-router";
+export type OpenRouterWhisperModel = "large-v3-turbo" | "large-v3";
+export interface GeminiPipelineChoice {
+  model: GeminiModel;
+  provider: GeminiProvider;
+  use_custom_model: boolean;
+  custom_model: string;
+}
+export interface GeminiPipelineConfig {
+  ultra_fast_whisper: OpenRouterWhisperModel;
+  fast_accurate: GeminiPipelineChoice;
+  precise: GeminiPipelineChoice;
+  ultra_precise: GeminiPipelineChoice;
+}
 
 export interface ModeConfigPayload {
   modes_enabled: boolean;
   mode: TranscriptionMode;
   gemini_fallback_to_whisper: boolean;
   content_type: ContentType;
+  gemini_pipelines: GeminiPipelineConfig;
 }
 
 export interface ModeConfigSnapshot {
@@ -63,6 +77,7 @@ export interface ModeConfigSnapshot {
   mode: TranscriptionMode;
   gemini_fallback_to_whisper: boolean;
   content_type: ContentType;
+  gemini_pipelines: GeminiPipelineConfig;
   mode_label: string;
   mode_description: string;
 }
@@ -78,10 +93,10 @@ export async function updateModeConfig(
 }
 
 export interface ApiKeysPayload {
-  groq?: string | null;
-  google?: string | null;
-  deepgram?: string | null;
-  openrouter?: string | null;
+  groq: string[];
+  google: string[];
+  deepgram: string[];
+  openrouter: string[];
 }
 
 export async function updateEngineConfig(
@@ -234,6 +249,32 @@ export interface HistoryEntry {
 /** Returns the full persisted transcription history, newest first. */
 export async function getHistory(): Promise<HistoryEntry[]> {
   return invoke<HistoryEntry[]>("get_history");
+}
+
+export interface AudioStorageConfig {
+  custom_directory?: string | null;
+  effective_directory: string;
+  default_directory: string;
+}
+
+export async function getAudioStorageConfig(): Promise<AudioStorageConfig> {
+  return invoke<AudioStorageConfig>("get_audio_storage_config");
+}
+
+export async function setAudioStorageDirectory(
+  path: string | null,
+): Promise<AudioStorageConfig> {
+  return invoke<AudioStorageConfig>("set_audio_storage_directory", { path });
+}
+
+/** Opens Explorer with the saved audio file selected. */
+export async function revealHistoryAudio(id: string): Promise<void> {
+  await invoke<void>("reveal_history_audio", { id });
+}
+
+/** Regenerates a persisted transcription from its saved audio. */
+export async function retryTranscription(id: string): Promise<string> {
+  return invoke<string>("retry_transcription", { id });
 }
 
 /** Structured vocabulary category (Phase 06). */

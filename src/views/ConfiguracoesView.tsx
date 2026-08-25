@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   Plus,
   X,
@@ -16,6 +17,9 @@ import {
   AlertCircle,
   CheckCircle2,
   FlaskConical,
+  FolderOpen,
+  HardDrive,
+  RotateCcw,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -34,6 +38,8 @@ import {
   setDevMode,
   getSanitizerEnabled,
   setSanitizerEnabled,
+  getAudioStorageConfig,
+  setAudioStorageDirectory,
   getModeConfig,
   updateModeConfig,
   getApiKeys,
@@ -42,6 +48,11 @@ import {
   type SanitizerModel,
   type TranscriptionMode,
   type ContentType,
+  type GeminiModel,
+  type GeminiProvider,
+  type GeminiPipelineChoice,
+  type GeminiPipelineConfig,
+  type OpenRouterWhisperModel,
   type VocabularyTerm,
   type VocabularyCategory,
 } from "../lib/tauri";
@@ -76,7 +87,7 @@ const MODE_CARDS: {
   {
     id: "ultra-fast",
     title: "Ultrarrápido",
-    engine: "Whisper",
+    engine: "OpenRouter STT · Groq",
     blurb: "Menor latência",
     Icon: Zap,
   },
@@ -101,31 +112,18 @@ const MODE_CARDS: {
     blurb: "Para conteúdo importante",
     Icon: Gem,
   },
-  {
-    id: "chirp-3-experimental",
-    title: "Chirp 3",
-    engine: "OpenRouter · google/chirp-3",
-    blurb: "STT dedicado para avaliar velocidade e precisão",
-    badge: "Experimental",
-    Icon: FlaskConical,
-  },
 ];
 
 const CONTENT_TYPES: { id: ContentType; label: string; hint: string }[] = [
   {
     id: "auto",
     label: "Automático",
-    hint: "Detecta pelo texto (código, estudo ou fala comum)",
+    hint: "Detecta programação ou estudo; caso contrário mantém o prompt neutro",
   },
   {
     id: "programming",
     label: "Programação",
     hint: "Preserva literais, comandos e caminhos",
-  },
-  {
-    id: "general-speech",
-    label: "Texto comum",
-    hint: "Fluidez conservadora no dia a dia",
   },
   {
     id: "study",
@@ -194,6 +192,10 @@ function GeralTab() {
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
+  const [audioDirectory, setAudioDirectory] = useState("");
+  const [defaultAudioDirectory, setDefaultAudioDirectory] = useState("");
+  const [customAudioDirectory, setCustomAudioDirectory] = useState(false);
+  const [audioDirectoryStatus, setAudioDirectoryStatus] = useState("");
 
   useEffect(() => {
     invoke<boolean>("get_autostart")
@@ -208,6 +210,13 @@ function GeralTab() {
     getInputDevice()
       .then(setSelectedDevice)
       .catch((e) => console.error("getInputDevice failed:", e));
+    getAudioStorageConfig()
+      .then((config) => {
+        setAudioDirectory(config.effective_directory);
+        setDefaultAudioDirectory(config.default_directory);
+        setCustomAudioDirectory(Boolean(config.custom_directory));
+      })
+      .catch((e) => console.error("getAudioStorageConfig failed:", e));
   }, []);
 
   useEffect(() => {
@@ -340,6 +349,87 @@ function GeralTab() {
           </div>
         )}
       </Card>
+
+      <Card className="p-7 space-y-5">
+        <div className="flex items-center gap-2.5">
+          <HardDrive className="h-5 w-5 text-coral-400" aria-hidden />
+          <h3 className="text-sm font-semibold text-zinc-100">
+            Pasta dos áudios transcritos
+          </h3>
+        </div>
+        <p className="text-xs leading-relaxed text-zinc-500">
+          Define onde as próximas gravações e cópias de áudios enviados serão
+          salvas. Arquivos existentes continuam no local atual e permanecem
+          acessíveis pelo Histórico.
+        </p>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <Input
+            name="audio-storage-directory"
+            value={audioDirectory}
+            readOnly
+            className="min-w-0 flex-1 font-mono text-xs"
+            aria-label="Pasta atual dos áudios transcritos"
+          />
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="primary"
+              className="gap-2 text-xs"
+              onClick={async () => {
+                setAudioDirectoryStatus("");
+                const selected = await open({
+                  directory: true,
+                  multiple: false,
+                  title: "Escolher pasta para os áudios transcritos",
+                });
+                if (typeof selected !== "string") return;
+                try {
+                  const config = await setAudioStorageDirectory(selected);
+                  setAudioDirectory(config.effective_directory);
+                  setDefaultAudioDirectory(config.default_directory);
+                  setCustomAudioDirectory(Boolean(config.custom_directory));
+                  setAudioDirectoryStatus("Pasta atualizada");
+                } catch (error) {
+                  setAudioDirectoryStatus(String(error));
+                }
+              }}
+            >
+              <FolderOpen className="h-4 w-4" aria-hidden />
+              Escolher pasta
+            </Button>
+            {customAudioDirectory && (
+              <Button
+                variant="secondary"
+                className="gap-2 text-xs"
+                title={defaultAudioDirectory}
+                onClick={async () => {
+                  try {
+                    const config = await setAudioStorageDirectory(null);
+                    setAudioDirectory(config.effective_directory);
+                    setDefaultAudioDirectory(config.default_directory);
+                    setCustomAudioDirectory(false);
+                    setAudioDirectoryStatus("Pasta padrão restaurada");
+                  } catch (error) {
+                    setAudioDirectoryStatus(String(error));
+                  }
+                }}
+              >
+                <RotateCcw className="h-4 w-4" aria-hidden />
+                Usar padrão
+              </Button>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <span className="text-zinc-500">
+            {customAudioDirectory ? "Local personalizado" : "Local padrão do aplicativo"}
+          </span>
+          {audioDirectoryStatus && (
+            <span className="text-coral-300" role="status">
+              {audioDirectoryStatus}
+            </span>
+          )}
+        </div>
+      </Card>
     </div>
   );
 }
@@ -360,18 +450,41 @@ function PipelinesTab() {
   const [reasoning, setReasoning] = useState(false);
   const [effort, setEffort] = useState("medium");
   const [status, setStatus] = useState("");
+  const [geminiPipelines, setGeminiPipelines] = useState<GeminiPipelineConfig>({
+    ultra_fast_whisper: "large-v3-turbo",
+    fast_accurate: {
+      model: "flash-lite35",
+      provider: "google-ai-studio",
+      use_custom_model: false,
+      custom_model: "",
+    },
+    precise: {
+      model: "flash-lite35",
+      provider: "google-ai-studio",
+      use_custom_model: false,
+      custom_model: "",
+    },
+    ultra_precise: {
+      model: "flash-lite35",
+      provider: "google-ai-studio",
+      use_custom_model: false,
+      custom_model: "",
+    },
+  });
 
   const persistMode = (p: {
     modes_enabled?: boolean;
     mode?: TranscriptionMode;
     gemini_fallback_to_whisper?: boolean;
     content_type?: ContentType;
+    gemini_pipelines?: GeminiPipelineConfig;
   }) => {
     const payload = {
       modes_enabled: p.modes_enabled ?? modesEnabled,
       mode: p.mode ?? mode,
       gemini_fallback_to_whisper: p.gemini_fallback_to_whisper ?? geminiFallback,
       content_type: p.content_type ?? contentType,
+      gemini_pipelines: p.gemini_pipelines ?? geminiPipelines,
     };
     updateModeConfig(payload)
       .then(() => setStatus("Pipeline salva"))
@@ -385,6 +498,7 @@ function PipelinesTab() {
         setMode(m.mode);
         setGeminiFallback(m.gemini_fallback_to_whisper);
         setContentType(m.content_type || "auto");
+        setGeminiPipelines(m.gemini_pipelines);
       })
       .catch(console.error);
     getEngineConfig()
@@ -407,6 +521,19 @@ function PipelinesTab() {
     setMode(id);
     setModesEnabled(true);
     persistMode({ mode: id, modes_enabled: true });
+  };
+
+  const updateGeminiRoute = (
+    key: "fast_accurate" | "precise" | "ultra_precise",
+    patch: Partial<GeminiPipelineChoice>,
+    shouldPersist = true,
+  ) => {
+    const next = {
+      ...geminiPipelines,
+      [key]: { ...geminiPipelines[key], ...patch },
+    };
+    setGeminiPipelines(next);
+    if (shouldPersist) persistMode({ gemini_pipelines: next });
   };
 
   return (
@@ -454,21 +581,32 @@ function PipelinesTab() {
           {MODE_CARDS.map((card) => {
             const active = modesEnabled && mode === card.id;
             const Icon = card.Icon;
+            const routeKey =
+              card.id === "fast-accurate"
+                ? "fast_accurate"
+                : card.id === "precise"
+                  ? "precise"
+                  : card.id === "ultra-precise"
+                    ? "ultra_precise"
+                    : null;
             return (
-              <button
+              <div
                 key={card.id}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                onClick={() => selectMode(card.id)}
                 className={
-                  "text-left rounded-2xl border p-5 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40 " +
+                  "overflow-hidden rounded-2xl border transition-[border-color,background-color,box-shadow] duration-200 " +
                   (active
                     ? "border-coral-500/60 bg-coral-500/10 shadow-[0_0_24px_-10px_rgba(225,77,42,0.45)]"
                     : "border-zinc-800/70 bg-zinc-900/40 hover:border-zinc-700")
                 }
               >
-                <div className="flex items-start justify-between gap-3">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => selectMode(card.id)}
+                  className="w-full p-5 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-coral-500/40"
+                >
+                  <div className="flex items-start justify-between gap-3">
                   <div
                     className={
                       "flex h-10 w-10 items-center justify-center rounded-xl " +
@@ -491,17 +629,121 @@ function PipelinesTab() {
                       </span>
                     )}
                   </div>
-                </div>
-                <div className="mt-4 text-base font-semibold text-zinc-100">
-                  {card.title}
-                </div>
-                <div className="mt-1 text-xs font-medium text-coral-400/80">
-                  {card.engine}
-                </div>
-                <p className="mt-2 text-sm text-zinc-500 leading-relaxed">
-                  {card.blurb}
-                </p>
-              </button>
+                  </div>
+                  <div className="mt-4 text-base font-semibold text-zinc-100">{card.title}</div>
+                  <div className="mt-1 text-xs font-medium text-coral-400/80">{card.engine}</div>
+                  <p className="mt-2 text-sm text-zinc-500 leading-relaxed">{card.blurb}</p>
+                </button>
+                {routeKey && (
+                  <div className="grid gap-3 border-t border-zinc-800/70 px-5 py-4 sm:grid-cols-2">
+                    <label className="space-y-1.5 text-xs text-zinc-400">
+                      <span>Modelo</span>
+                      <select
+                        name={`${routeKey}-gemini-model`}
+                        value={geminiPipelines[routeKey].use_custom_model ? "custom" : geminiPipelines[routeKey].model}
+                        onChange={(e) => {
+                          if (e.target.value === "custom") {
+                            updateGeminiRoute(
+                              routeKey,
+                              { use_custom_model: true },
+                              Boolean(geminiPipelines[routeKey].custom_model.trim()),
+                            );
+                          } else {
+                            updateGeminiRoute(routeKey, {
+                              model: e.target.value as GeminiModel,
+                              use_custom_model: false,
+                            });
+                          }
+                        }}
+                        className="h-10 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40"
+                      >
+                        <option value="flash-lite35">Gemini 3.5 Flash-Lite</option>
+                        <option value="flash36">Gemini 3.6 Flash</option>
+                        <option value="custom">ID customizado…</option>
+                      </select>
+                    </label>
+                    <label className="space-y-1.5 text-xs text-zinc-400">
+                      <span>Provedor</span>
+                      <select
+                        name={`${routeKey}-gemini-provider`}
+                        value={geminiPipelines[routeKey].provider}
+                        onChange={(e) => {
+                          const provider = e.target.value as GeminiProvider;
+                          updateGeminiRoute(routeKey, { provider });
+                        }}
+                        className="h-10 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40"
+                      >
+                        <option value="google-ai-studio">Google AI Studio</option>
+                        <option value="open-router">OpenRouter</option>
+                      </select>
+                    </label>
+                    {geminiPipelines[routeKey].use_custom_model && (
+                      <label className="space-y-1.5 text-xs text-zinc-400 sm:col-span-2">
+                        <span>ID do modelo customizado</span>
+                        <Input
+                          name={`${routeKey}-custom-model`}
+                          value={geminiPipelines[routeKey].custom_model}
+                          placeholder={
+                            geminiPipelines[routeKey].provider === "open-router"
+                              ? "ex.: google/chirp-3 ou google/gemini-3.7-flash"
+                              : "ex.: gemini-3.7-flash"
+                          }
+                          onChange={(e) =>
+                            updateGeminiRoute(
+                              routeKey,
+                              { custom_model: e.target.value },
+                              false,
+                            )
+                          }
+                          onBlur={(e) => {
+                            if (e.currentTarget.value.trim()) {
+                              updateGeminiRoute(routeKey, {
+                                custom_model: e.currentTarget.value.trim(),
+                                use_custom_model: true,
+                              });
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                    {geminiPipelines[routeKey].provider === "open-router" ? (
+                      <p className="text-[11px] leading-relaxed text-zinc-500 sm:col-span-2">
+                        A rota é automática: modelos dedicados como Chirp, Whisper e Transcribe usam Speech-to-Text; modelos com áudio usam Chat Completions.
+                      </p>
+                    ) : (
+                      <p className="text-[11px] leading-relaxed text-zinc-500 sm:col-span-2">
+                        O Google AI Studio usa modelos multimodais com áudio via Gemini API. Modelos STT dedicados do Google Cloud exigem outra API e outra credencial.
+                      </p>
+                    )}
+                  </div>
+                )}
+                {card.id === "ultra-fast" && (
+                  <div className="border-t border-zinc-800/70 px-5 py-4">
+                    <label className="space-y-1.5 text-xs text-zinc-400">
+                      <span>Modelo Whisper via OpenRouter</span>
+                      <select
+                        name="ultra-fast-whisper-model"
+                        value={geminiPipelines.ultra_fast_whisper}
+                        onChange={(e) => {
+                          const next = {
+                            ...geminiPipelines,
+                            ultra_fast_whisper: e.target.value as OpenRouterWhisperModel,
+                          };
+                          setGeminiPipelines(next);
+                          persistMode({ gemini_pipelines: next });
+                        }}
+                        className="mt-1.5 h-10 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40"
+                      >
+                        <option value="large-v3-turbo">openai/whisper-large-v3-turbo</option>
+                        <option value="large-v3">openai/whisper-large-v3</option>
+                      </select>
+                    </label>
+                    <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                      Usa somente o endpoint de transcrição do OpenRouter, com o provedor Groq fixo e sem fallback para outro provedor.
+                    </p>
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
@@ -531,7 +773,7 @@ function PipelinesTab() {
                   persistMode({ content_type: ct.id });
                 }}
                 className={
-                  "rounded-xl border px-4 py-3 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40 " +
+                  "rounded-xl border px-4 py-3 text-left transition-[border-color,background-color] focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40 " +
                   (on
                     ? "border-coral-500/50 bg-coral-500/10"
                     : "border-zinc-800 bg-zinc-900/30 hover:border-zinc-700")
@@ -563,18 +805,6 @@ function PipelinesTab() {
             }}
           />
         </Card>
-      )}
-
-      {mode === "chirp-3-experimental" && modesEnabled && (
-        <div className="flex gap-3 rounded-xl border border-amber-800/40 bg-amber-950/15 px-4 py-3 text-xs leading-5 text-amber-200/90">
-          <FlaskConical className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <p>
-            Usa o endpoint dedicado de transcrição do OpenRouter com idioma
-            português. Não aplica Gemini, sanitizer ou fallback: o Histórico
-            registra somente o resultado real do Chirp 3. Requer saldo e chave
-            OpenRouter configurada.
-          </p>
-        </div>
       )}
 
       {(mode === "ultra-precise" || !modesEnabled) && (
@@ -788,17 +1018,12 @@ type KeyId = "groq" | "google" | "deepgram" | "openrouter";
 
 function ProvedoresTab() {
   const [keys, setKeys] = useState({
-    groq: "",
-    google: "",
-    deepgram: "",
-    openrouter: "",
+    groq: [] as string[],
+    google: [] as string[],
+    deepgram: [] as string[],
+    openrouter: [] as string[],
   });
-  const [visible, setVisible] = useState<Record<KeyId, boolean>>({
-    groq: false,
-    google: false,
-    deepgram: false,
-    openrouter: false,
-  });
+  const [visible, setVisible] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState<KeyId | null>(null);
   const [saved, setSaved] = useState<KeyId | null>(null);
   const [error, setError] = useState("");
@@ -807,10 +1032,10 @@ function ProvedoresTab() {
     getApiKeys()
       .then((k) =>
         setKeys({
-          groq: k.groq ?? "",
-          google: k.google ?? "",
-          deepgram: k.deepgram ?? "",
-          openrouter: k.openrouter ?? "",
+          groq: k.groq ?? [],
+          google: k.google ?? [],
+          deepgram: k.deepgram ?? [],
+          openrouter: k.openrouter ?? [],
         }),
       )
       .catch(console.error);
@@ -828,7 +1053,7 @@ function ProvedoresTab() {
       name: "Groq",
       placeholder: "gsk_…",
       help: "Whisper, validador e fallbacks.",
-      requiredFor: "Ultrarrápido, Preciso, Ultrapreciso",
+      requiredFor: "Preciso, Ultrapreciso e fallbacks",
     },
     {
       id: "google",
@@ -848,15 +1073,15 @@ function ProvedoresTab() {
       id: "openrouter",
       name: "OpenRouter",
       placeholder: "sk-or-v1-…",
-      help: "Acesso ao Google Chirp 3 pelo endpoint dedicado de transcrição.",
-      requiredFor: "Chirp 3 · Experimental",
+      help: "Executa o Whisper do Ultrarrápido e os modelos customizados selecionados nos pipelines.",
+      requiredFor: "Ultrarrápido e rotas OpenRouter dos demais pipelines",
     },
   ];
 
   const statusFor = (id: KeyId) => {
-    const v = keys[id].trim();
-    if (!v) return { label: "Sem chave", tone: "text-zinc-500" };
-    return { label: "Configurada", tone: "text-emerald-400" };
+    const count = keys[id].filter((key) => key.trim()).length;
+    if (!count) return { label: "Sem chaves", tone: "text-zinc-500" };
+    return { label: `${count} ${count === 1 ? "chave" : "chaves"}`, tone: "text-emerald-400" };
   };
 
   const save = async (id: KeyId) => {
@@ -917,34 +1142,57 @@ function ProvedoresTab() {
                 </span>
               </div>
               <p className="text-xs text-zinc-500">{p.help}</p>
-              <div className="relative">
-                <Input
-                  type={visible[p.id] ? "text" : "password"}
-                  placeholder={p.placeholder}
-                  value={keys[p.id]}
-                  onChange={(e) =>
-                    setKeys((k) => ({ ...k, [p.id]: e.target.value }))
-                  }
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="pr-10 text-xs font-mono"
-                  aria-label={`Chave ${p.name}`}
-                />
+              <div className="space-y-2">
+                {keys[p.id].map((key, index) => {
+                  const visibilityKey = `${p.id}-${index}`;
+                  return (
+                    <div key={visibilityKey} className="flex gap-2">
+                      <div className="relative flex-1">
+                        <Input
+                          name={`${p.id}-api-key-${index + 1}`}
+                          type={visible[visibilityKey] ? "text" : "password"}
+                          placeholder={p.placeholder}
+                          value={key}
+                          onChange={(e) =>
+                            setKeys((current) => ({
+                              ...current,
+                              [p.id]: current[p.id].map((item, i) => i === index ? e.target.value : item),
+                            }))
+                          }
+                          autoComplete="off"
+                          spellCheck={false}
+                          className="pr-10 text-xs font-mono"
+                          aria-label={`Chave ${index + 1} de ${p.name}`}
+                        />
+                        <button
+                          type="button"
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+                          onClick={() => setVisible((v) => ({ ...v, [visibilityKey]: !v[visibilityKey] }))}
+                          aria-label={visible[visibilityKey] ? "Ocultar chave" : "Mostrar chave"}
+                        >
+                          {visible[visibilityKey] ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setKeys((current) => ({
+                          ...current,
+                          [p.id]: current[p.id].filter((_, i) => i !== index),
+                        }))}
+                        className="flex h-10 w-10 items-center justify-center rounded-xl text-zinc-500 hover:bg-zinc-800 hover:text-red-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40"
+                        aria-label={`Remover chave ${index + 1} de ${p.name}`}
+                      >
+                        <X className="h-4 w-4" aria-hidden />
+                      </button>
+                    </div>
+                  );
+                })}
                 <button
                   type="button"
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
-                  onClick={() =>
-                    setVisible((v) => ({ ...v, [p.id]: !v[p.id] }))
-                  }
-                  aria-label={
-                    visible[p.id] ? "Ocultar chave" : "Mostrar chave"
-                  }
+                  onClick={() => setKeys((current) => ({ ...current, [p.id]: [...current[p.id], ""] }))}
+                  className="inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-coral-400 hover:bg-coral-500/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-500/40"
                 >
-                  {visible[p.id] ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
+                  <Plus className="h-3.5 w-3.5" aria-hidden /> Adicionar chave
                 </button>
               </div>
               <Button
@@ -958,7 +1206,7 @@ function ProvedoresTab() {
                   ? "Salvando…"
                   : saved === p.id
                     ? "Salvo"
-                    : "Salvar chave"}
+                    : "Salvar chaves"}
               </Button>
             </Card>
           );

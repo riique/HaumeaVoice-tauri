@@ -1,7 +1,10 @@
 use cpal::Stream;
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 /// Sanitizer model selected manually by the user from the UI.
 /// Each variant maps to a cloud-hosted LLM used for semantic validation
@@ -102,14 +105,88 @@ impl DeepgramMode {
 /// directory (see the `secrets` module) so they survive an app restart.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiKeys {
-    #[serde(default)]
-    pub groq: Option<String>,
-    #[serde(default)]
-    pub google: Option<String>,
-    #[serde(default)]
-    pub deepgram: Option<String>,
-    #[serde(default)]
-    pub openrouter: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_key_list")]
+    pub groq: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_key_list")]
+    pub google: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_key_list")]
+    pub deepgram: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_key_list")]
+    pub openrouter: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredKeyList {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_key_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let stored = Option::<StoredKeyList>::deserialize(deserializer)?;
+    Ok(match stored {
+        Some(StoredKeyList::One(key)) => vec![key],
+        Some(StoredKeyList::Many(keys)) => keys,
+        None => Vec::new(),
+    })
+}
+
+fn normalized_keys(keys: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in keys {
+        let key = key.trim().to_string();
+        if !key.is_empty() && !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
+}
+
+impl ApiKeys {
+    pub fn normalized(self) -> Self {
+        Self {
+            groq: normalized_keys(self.groq),
+            google: normalized_keys(self.google),
+            deepgram: normalized_keys(self.deepgram),
+            openrouter: normalized_keys(self.openrouter),
+        }
+    }
+}
+
+#[cfg(test)]
+mod api_keys_tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use super::{ApiKeys, AppState};
+
+    #[test]
+    fn migrates_legacy_single_keys_to_lists() {
+        let keys: ApiKeys =
+            serde_json::from_str(r#"{"groq":"g-one","google":"a-one","deepgram":null}"#).unwrap();
+        assert_eq!(keys.groq, vec!["g-one"]);
+        assert_eq!(keys.google, vec!["a-one"]);
+        assert!(keys.deepgram.is_empty());
+    }
+
+    #[test]
+    fn normalizes_lists_without_losing_order() {
+        let keys: ApiKeys =
+            serde_json::from_str(r#"{"google":[" first ","second","first",""]}"#).unwrap();
+        assert_eq!(keys.normalized().google, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn rotates_provider_keys_in_stable_order() {
+        let keys = vec!["one".into(), "two".into()];
+        let cursor = AtomicUsize::new(0);
+
+        assert_eq!(AppState::next_key(&keys, &cursor).as_deref(), Some("one"));
+        assert_eq!(AppState::next_key(&keys, &cursor).as_deref(), Some("two"));
+        assert_eq!(AppState::next_key(&keys, &cursor).as_deref(), Some("one"));
+    }
 }
 
 /// Payload received from the frontend when the user changes the active
@@ -159,13 +236,13 @@ impl Default for ShortcutConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeysPayload {
     #[serde(default)]
-    pub groq: Option<String>,
+    pub groq: Vec<String>,
     #[serde(default)]
-    pub google: Option<String>,
+    pub google: Vec<String>,
     #[serde(default)]
-    pub deepgram: Option<String>,
+    pub deepgram: Vec<String>,
     #[serde(default)]
-    pub openrouter: Option<String>,
+    pub openrouter: Vec<String>,
 }
 
 /// Global application state guarded by locks for safe concurrent
@@ -240,6 +317,11 @@ pub struct AppState {
     pub gemini_fallback_to_whisper: RwLock<bool>,
     /// Content-type hint for sanitizer / UltraPrecise prompts (`Auto` = heuristic).
     pub content_type: RwLock<crate::pipeline_contract::ContentType>,
+    pub gemini_pipelines: RwLock<crate::pipeline_contract::GeminiPipelineConfig>,
+    groq_key_cursor: AtomicUsize,
+    google_key_cursor: AtomicUsize,
+    deepgram_key_cursor: AtomicUsize,
+    openrouter_key_cursor: AtomicUsize,
 }
 
 impl AppState {
@@ -270,7 +352,39 @@ impl AppState {
             transcription_mode: RwLock::new(crate::pipeline_contract::TranscriptionMode::UltraFast),
             gemini_fallback_to_whisper: RwLock::new(true),
             content_type: RwLock::new(crate::pipeline_contract::ContentType::Auto),
+            gemini_pipelines: RwLock::new(crate::pipeline_contract::GeminiPipelineConfig::default()),
+            groq_key_cursor: AtomicUsize::new(0),
+            google_key_cursor: AtomicUsize::new(0),
+            deepgram_key_cursor: AtomicUsize::new(0),
+            openrouter_key_cursor: AtomicUsize::new(0),
         }
+    }
+
+    fn next_key(keys: &[String], cursor: &AtomicUsize) -> Option<String> {
+        if keys.is_empty() {
+            return None;
+        }
+        let index = cursor.fetch_add(1, Ordering::Relaxed) % keys.len();
+        Some(keys[index].clone())
+    }
+
+    pub fn next_groq_key(&self) -> Option<String> {
+        Self::next_key(&self.api_keys.read().groq, &self.groq_key_cursor)
+    }
+
+    pub fn next_google_key(&self) -> Option<String> {
+        Self::next_key(&self.api_keys.read().google, &self.google_key_cursor)
+    }
+
+    pub fn next_deepgram_key(&self) -> Option<String> {
+        Self::next_key(&self.api_keys.read().deepgram, &self.deepgram_key_cursor)
+    }
+
+    pub fn next_openrouter_key(&self) -> Option<String> {
+        Self::next_key(
+            &self.api_keys.read().openrouter,
+            &self.openrouter_key_cursor,
+        )
     }
 
     /// Convenience helper used by the panic shortcut and the toggle

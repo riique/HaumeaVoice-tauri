@@ -8,17 +8,17 @@
 use crate::models::{
     DeepgramMode, HistoryEntry, SanitizerDebug, SanitizerModel, TranscriptionEngine,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // ─── Modes & content ────────────────────────────────────────────────────────
 
 /// Product-facing transcription mode (future selector).
 ///
 /// Wire ids are stable kebab-case for settings.json / IPC.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TranscriptionMode {
-    /// Whisper only.
+    /// Whisper through OpenRouter's dedicated STT endpoint.
     #[default]
     UltraFast,
     /// Gemini with audio.
@@ -27,9 +27,25 @@ pub enum TranscriptionMode {
     Precise,
     /// Whisper + sanitizer + Gemini with audio.
     UltraPrecise,
-    /// Google Chirp 3 through OpenRouter's dedicated STT endpoint.
-    #[serde(rename = "chirp-3-experimental")]
-    Chirp3Experimental,
+}
+
+impl<'de> Deserialize<'de> for TranscriptionMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "ultra-fast" => Ok(Self::UltraFast),
+            "fast-accurate" | "chirp-3-experimental" => Ok(Self::FastAccurate),
+            "precise" => Ok(Self::Precise),
+            "ultra-precise" => Ok(Self::UltraPrecise),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["ultra-fast", "fast-accurate", "precise", "ultra-precise"],
+            )),
+        }
+    }
 }
 
 impl TranscriptionMode {
@@ -39,7 +55,6 @@ impl TranscriptionMode {
             Self::FastAccurate => "fast-accurate",
             Self::Precise => "precise",
             Self::UltraPrecise => "ultra-precise",
-            Self::Chirp3Experimental => "chirp-3-experimental",
         }
     }
 
@@ -50,7 +65,6 @@ impl TranscriptionMode {
             Self::FastAccurate => "Rápido e preciso",
             Self::Precise => "Preciso",
             Self::UltraPrecise => "Ultrapreciso",
-            Self::Chirp3Experimental => "Chirp 3",
         }
     }
 
@@ -88,14 +102,31 @@ impl TranscriptionMode {
 }
 
 /// Optional content hint for future prompt routing (not applied yet).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ContentType {
     #[default]
     Auto,
     Programming,
-    GeneralSpeech,
     Study,
+}
+
+impl<'de> Deserialize<'de> for ContentType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "auto" | "general-speech" => Ok(Self::Auto),
+            "programming" => Ok(Self::Programming),
+            "study" => Ok(Self::Study),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["auto", "programming", "study"],
+            )),
+        }
+    }
 }
 
 impl ContentType {
@@ -103,10 +134,111 @@ impl ContentType {
         match self {
             Self::Auto => "auto",
             Self::Programming => "programming",
-            Self::GeneralSpeech => "general-speech",
             Self::Study => "study",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeminiModel {
+    #[default]
+    FlashLite35,
+    Flash36,
+}
+
+impl GeminiModel {
+    pub fn google_id(self) -> &'static str {
+        match self {
+            Self::FlashLite35 => "gemini-3.5-flash-lite",
+            Self::Flash36 => "gemini-3.6-flash",
+        }
+    }
+
+    pub fn openrouter_id(self) -> &'static str {
+        match self {
+            Self::FlashLite35 => "google/gemini-3.5-flash-lite",
+            Self::Flash36 => "google/gemini-3.6-flash",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeminiProvider {
+    #[default]
+    GoogleAiStudio,
+    OpenRouter,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeminiPipelineChoice {
+    #[serde(default)]
+    pub model: GeminiModel,
+    #[serde(default)]
+    pub provider: GeminiProvider,
+    #[serde(default)]
+    pub use_custom_model: bool,
+    /// When non-empty, replaces the selected preset with the provider model id
+    /// exactly as entered in settings (apart from an optional Google `models/`
+    /// prefix, which is normalized by [`resolved_model_id`]).
+    #[serde(default)]
+    pub custom_model: String,
+}
+
+impl GeminiPipelineChoice {
+    pub fn resolved_model_id(&self) -> Result<String, String> {
+        let custom = self.custom_model.trim();
+        let model = if !self.use_custom_model {
+            match self.provider {
+                GeminiProvider::GoogleAiStudio => self.model.google_id().to_string(),
+                GeminiProvider::OpenRouter => self.model.openrouter_id().to_string(),
+            }
+        } else if self.provider == GeminiProvider::GoogleAiStudio {
+            custom.strip_prefix("models/").unwrap_or(custom).to_string()
+        } else {
+            custom.to_string()
+        };
+
+        if model.is_empty()
+            || model.chars().any(char::is_whitespace)
+            || model.contains('?')
+            || model.contains('#')
+        {
+            return Err("Informe um ID de modelo válido, sem espaços, '?' ou '#'.".to_string());
+        }
+        Ok(model)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenRouterWhisperModel {
+    #[default]
+    LargeV3Turbo,
+    LargeV3,
+}
+
+impl OpenRouterWhisperModel {
+    pub fn openrouter_id(self) -> &'static str {
+        match self {
+            Self::LargeV3Turbo => "openai/whisper-large-v3-turbo",
+            Self::LargeV3 => "openai/whisper-large-v3",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeminiPipelineConfig {
+    /// The UltraFast pipeline always uses OpenRouter's dedicated STT endpoint.
+    #[serde(default)]
+    pub ultra_fast_whisper: OpenRouterWhisperModel,
+    #[serde(default)]
+    pub fast_accurate: GeminiPipelineChoice,
+    #[serde(default)]
+    pub precise: GeminiPipelineChoice,
+    #[serde(default)]
+    pub ultra_precise: GeminiPipelineChoice,
 }
 
 // ─── Stage identity ─────────────────────────────────────────────────────────
@@ -917,9 +1049,7 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
     let run_sanitizer = match req.mode {
         TranscriptionMode::UltraPrecise => true,
         TranscriptionMode::UltraFast => req.sanitizer_enabled,
-        TranscriptionMode::FastAccurate
-        | TranscriptionMode::Precise
-        | TranscriptionMode::Chirp3Experimental => false,
+        TranscriptionMode::FastAccurate | TranscriptionMode::Precise => false,
     };
 
     if run_sanitizer {
@@ -1080,13 +1210,24 @@ mod tests {
         for ct in [
             ContentType::Auto,
             ContentType::Programming,
-            ContentType::GeneralSpeech,
             ContentType::Study,
         ] {
             let s = serde_json::to_string(&ct).unwrap();
             let back: ContentType = serde_json::from_str(&s).unwrap();
             assert_eq!(back, ct);
         }
+    }
+
+    #[test]
+    fn removed_options_migrate_safely() {
+        assert_eq!(
+            serde_json::from_str::<TranscriptionMode>(r#""chirp-3-experimental""#).unwrap(),
+            TranscriptionMode::FastAccurate
+        );
+        assert_eq!(
+            serde_json::from_str::<ContentType>(r#""general-speech""#).unwrap(),
+            ContentType::Auto
+        );
     }
 
     #[test]
@@ -1488,6 +1629,45 @@ mod tests {
         assert_eq!(
             TranscriptionMode::UltraPrecise.display_name_pt(),
             "Ultrapreciso"
+        );
+    }
+
+    #[test]
+    fn pipeline_choice_resolves_presets_and_custom_ids() {
+        let preset = GeminiPipelineChoice::default();
+        assert_eq!(preset.resolved_model_id().unwrap(), "gemini-3.5-flash-lite");
+
+        let custom_google = GeminiPipelineChoice {
+            use_custom_model: true,
+            custom_model: " models/gemini-custom-audio ".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            custom_google.resolved_model_id().unwrap(),
+            "gemini-custom-audio"
+        );
+
+        let custom_openrouter = GeminiPipelineChoice {
+            provider: GeminiProvider::OpenRouter,
+            use_custom_model: true,
+            custom_model: "vendor/custom-audio-model".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            custom_openrouter.resolved_model_id().unwrap(),
+            "vendor/custom-audio-model"
+        );
+    }
+
+    #[test]
+    fn whisper_presets_resolve_to_openrouter_model_ids() {
+        assert_eq!(
+            OpenRouterWhisperModel::LargeV3Turbo.openrouter_id(),
+            "openai/whisper-large-v3-turbo"
+        );
+        assert_eq!(
+            OpenRouterWhisperModel::LargeV3.openrouter_id(),
+            "openai/whisper-large-v3"
         );
     }
 }

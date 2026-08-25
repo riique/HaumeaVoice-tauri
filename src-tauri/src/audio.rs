@@ -337,10 +337,7 @@ fn maybe_start_deepgram_live(state: &Arc<AppState>) {
         return;
     }
 
-    let api_key = {
-        let guard = state.api_keys.read();
-        guard.deepgram.clone().filter(|k| !k.trim().is_empty())
-    };
+    let api_key = state.next_deepgram_key();
     let Some(api_key) = api_key else {
         log::warn!(
             "audio: streaming_final selected but Deepgram API key missing; live session skipped"

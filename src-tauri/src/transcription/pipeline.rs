@@ -17,10 +17,7 @@ pub async fn run_sanitize(
     deepgram_text: &str,
     dual_mode: bool,
 ) -> SanitizeOutcome {
-    let sanitizer_key = {
-        let guard = state.api_keys.read();
-        guard.groq.clone().filter(|k| !k.trim().is_empty())
-    };
+    let sanitizer_key = state.next_groq_key();
     let (
         model_id,
         supports_reasoning,

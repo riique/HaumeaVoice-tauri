@@ -29,7 +29,7 @@ Deepgram permanece **experimental** no legado avançado. Chaves continuam em pla
 | 🎯 Preciso | Whisper ∥ upload → refine | Não | Whisper / Gemini puro |
 | 💎 Ultrapreciso | Whisper ∥ upload → sanitizer → Gemini | Sim (JSON) | Sanitizado / Whisper |
 
-**Tipo de conteúdo:** Automático | Programação | Texto comum | Estudo  
+**Tipo de conteúdo:** Automático | Programação | Estudo
 
 **Legado:** motor manual + dual Whisper/Deepgram + validador — disponível com “modos” desligados.
 
@@ -41,7 +41,7 @@ Deepgram permanece **experimental** no legado avançado. Chaves continuam em pla
 |---------|--------|-----------|----------------|
 | Gravação mic + clipboard + paste | OK | `audio.rs`, atalhos | Drivers WASAPI / foco |
 | Upload arquivo | OK | `transcribe_file_path` | Arquivos >50 MB rejeitados |
-| Ultrarrápido | OK | `modes::run_ultra_fast` | Depende chave Groq |
+| Ultrarrápido | OK | `modes::run_ultra_fast` + OpenRouter STT, Whisper/Groq fixo | Depende chave OpenRouter e disponibilidade Groq |
 | Rápido e preciso | OK | `run_fast_accurate` + Files API | Cota/modelo Gemini |
 | Preciso | OK | `run_precise` paralelo | Latência = max(whisper,upload)+refine |
 | Ultrapreciso | OK | `run_ultra_precise` | Mais etapas = mais pontos de falha |

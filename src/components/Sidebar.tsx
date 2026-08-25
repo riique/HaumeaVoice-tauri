@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   Home,
   Mic,
@@ -23,6 +25,12 @@ export function Sidebar({
   current: ViewKey;
   onSelect: (v: ViewKey) => void;
 }) {
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => setVersion(""));
+  }, []);
+
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-800/50 bg-zinc-900">
       <div className="px-7 pt-9 pb-12">
@@ -66,7 +74,9 @@ export function Sidebar({
         })}
       </nav>
 
-      <div className="px-7 py-7 text-[11px] text-zinc-600">v1.0.7</div>
+      {version && (
+        <div className="px-7 py-7 text-[11px] text-zinc-600">v{version}</div>
+      )}
     </aside>
   );
 }

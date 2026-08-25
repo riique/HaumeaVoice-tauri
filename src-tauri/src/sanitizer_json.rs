@@ -155,18 +155,28 @@ pub fn content_type_instruction(ct: crate::pipeline_contract::ContentType) -> &'
     match ct {
         ContentType::Programming => {
             "\n\n--- TIPO DE CONTEÚDO: PROGRAMAÇÃO ---\n\
-Preserve literais, comandos, caminhos, identificadores e Markdown técnico. \
-Não “corrija” código para prosa. Não traduza nomes de API."
-        }
-        ContentType::GeneralSpeech => {
-            "\n\n--- TIPO DE CONTEÚDO: TEXTO COMUM ---\n\
-Priorize fluidez e pontuação natural, com correções conservadoras. \
-Não invente formalidade artificial."
+* Preserve com máxima atenção código, comandos, flags, argumentos, nomes de funções, classes, variáveis, APIs, bibliotecas, arquivos, extensões, caminhos, URLs, versões e identificadores.\n\
+* Não traduza nomes técnicos, APIs, comandos ou termos em inglês.\n\
+* Não transforme código, comandos ou identificadores em prosa.\n\
+* Não corrija código ou comandos para fazê-los funcionar; transcreva o que foi falado.\n\
+* Use crases de Markdown para envolver literais técnicos curtos quando eles estiverem claramente identificados, como comandos, caminhos, nomes de arquivos, trechos de código e identificadores.\n\
+* Exemplo: “Execute npm run build e faça deploy” → “Execute `npm run build` e faça deploy.”\n\
+* Exemplo: “Abra o arquivo package ponto json” → “Abra o arquivo `package.json`.”\n\
+* Exemplo: “Use a variável user underscore id” → “Use a variável `user_id`.”\n\
+* Use blocos de código com três crases somente quando o falante ditar claramente um trecho de código estruturado ou solicitar explicitamente um bloco de código.\n\
+* Não invente crases, barras, pontos, hífens, underscores, capitalização ou outros caracteres quando eles não forem determinados pelo áudio, pelo glossário ou pelo contexto sem ambiguidade.\n\
+* Preserve Markdown técnico quando ele for explicitamente ditado. Quando a formatação estiver incerta, prefira texto simples."
         }
         ContentType::Study => {
             "\n\n--- TIPO DE CONTEÚDO: ESTUDO ---\n\
-Preserve terminologia e a estrutura explicativa. \
-Corrija apenas erros claros de grafia/transcrição."
+* Preserve terminologia acadêmica, científica e técnica, bem como nomes próprios, conceitos, definições, fórmulas, símbolos, unidades, grandezas e nomenclaturas.\n\
+* Preserve a estrutura explicativa e a ordem do raciocínio do falante.\n\
+* Não resuma, simplifique, formalize ou reorganize a explicação.\n\
+* Não corrija erros conceituais, científicos, matemáticos ou factuais do falante.\n\
+* Corrija apenas erros claros de grafia, capitalização, pontuação ou reconhecimento acústico, quando a forma correta estiver suficientemente sustentada pelo áudio ou pelo glossário.\n\
+* Preserve números, índices, expoentes, letras gregas, equações e notações quando forem identificáveis sem ambiguidade.\n\
+* Não transforme automaticamente palavras em símbolos ou fórmulas apenas porque isso seria convencional no assunto.\n\
+* Quando houver dúvida entre a forma falada e uma notação mais formal, preserve a forma falada."
         }
         ContentType::Auto => "",
     }
@@ -200,7 +210,7 @@ pub fn resolve_content_type(
 /// - weighted lexicon hits (PT/EN + ASR spoken-code phrases)
 /// - structural density (paths, extensions, camelCase, code punctuation)
 /// - study/academic markers
-/// - general-speech anchors that dampen false programming hits
+/// - everyday-speech anchors that keep neutral content unbiased
 ///
 /// Empty / tiny text → GeneralSpeech.
 pub fn detect_content_type(text: &str) -> crate::pipeline_contract::ContentType {
@@ -217,7 +227,7 @@ pub fn detect_content_type_scored(text: &str) -> ContentTypeScores {
             programming: 0.0,
             study: 0.0,
             general: 1.0,
-            resolved: ContentType::GeneralSpeech,
+            resolved: ContentType::Auto,
         };
     }
 
@@ -888,7 +898,7 @@ fn decide_content_type(
     if (study - max).abs() < f32::EPSILON && study >= 1.6 {
         return ContentType::Study;
     }
-    ContentType::GeneralSpeech
+    ContentType::Auto
 }
 
 #[cfg(test)]
@@ -983,7 +993,7 @@ mod tests {
     #[test]
     fn detect_general_chat() {
         let t = "Oi, tudo bem? Bom dia, não esquece de comprar pão no mercado depois do almoço";
-        assert_eq!(detect_content_type(t), ContentType::GeneralSpeech);
+        assert_eq!(detect_content_type(t), ContentType::Auto);
     }
 
     #[test]
@@ -991,13 +1001,13 @@ mod tests {
         // Everyday message should stay general even if a weak tech word appears in isolation
         // when general signals dominate.
         let t = "Oi amor, te ligo depois do jantar, beijo e boa noite, saudades";
-        assert_eq!(detect_content_type(t), ContentType::GeneralSpeech);
+        assert_eq!(detect_content_type(t), ContentType::Auto);
     }
 
     #[test]
     fn detect_empty_is_general() {
-        assert_eq!(detect_content_type("oi"), ContentType::GeneralSpeech);
-        assert_eq!(detect_content_type(""), ContentType::GeneralSpeech);
+        assert_eq!(detect_content_type("oi"), ContentType::Auto);
+        assert_eq!(detect_content_type(""), ContentType::Auto);
     }
 
     #[test]

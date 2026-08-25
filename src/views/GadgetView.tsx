@@ -1,12 +1,14 @@
 ﻿import { useCallback, useEffect, useRef, useState } from "react";
-import { Mic } from "lucide-react";
+import { AlertCircle, Loader2, Mic, RefreshCw } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getCompactMode,
   getRecordingElapsed,
   getRecordingState,
+  retryTranscription,
   setGadgetHitRect,
+  type HistoryEntry,
 } from "../lib/tauri";
 
 /** Number of bars rendered in the live waveform. */
@@ -44,6 +46,12 @@ export function GadgetApp() {
   const [transcribing, setTranscribing] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [failure, setFailure] = useState<{
+    id: string;
+    message: string;
+    canRetry: boolean;
+  } | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const tickRef = useRef<number | null>(null);
   const pillRef = useRef<HTMLDivElement>(null);
   // Skip identical hit-rect IPCs (ResizeObserver + stateKey can re-fire with
@@ -111,6 +119,8 @@ export function GadgetApp() {
 
     const unlisteners: Array<Promise<() => void>> = [
       listen("recording-started", () => {
+        setFailure(null);
+        setRetrying(false);
         setRecording(true);
         setElapsed(0);
         setAudioLevel(0);
@@ -134,6 +144,19 @@ export function GadgetApp() {
       }),
       listen<boolean>("transcribing", (e) => {
         setTranscribing(!!e.payload);
+      }),
+      listen<HistoryEntry>("transcription-saved", (e) => {
+        const entry = e.payload;
+        if (entry.is_error) {
+          setFailure({
+            id: entry.id,
+            message: entry.error_message || "Não foi possível transcrever o áudio.",
+            canRetry: Boolean(entry.audio_path),
+          });
+        } else {
+          setFailure(null);
+          setRetrying(false);
+        }
       }),
       listen<boolean>("compact-mode-changed", (e) => setCompact(!!e.payload)),
     ];
@@ -179,10 +202,35 @@ export function GadgetApp() {
     }
   };
 
+  const handleRetry = async () => {
+    if (!failure?.canRetry || retrying) return;
+    setRetrying(true);
+    try {
+      await retryTranscription(failure.id);
+      setFailure(null);
+    } catch (error) {
+      setFailure((current) =>
+        current
+          ? {
+              ...current,
+              message:
+                typeof error === "string"
+                  ? error
+                  : "A regeneração da transcrição falhou.",
+            }
+          : current,
+      );
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   const stateKey = transcribing
     ? "loading"
     : recording
       ? "rec"
+      : failure
+        ? "error"
       : compact
         ? "idle-compact"
         : "idle-full";
@@ -220,6 +268,13 @@ export function GadgetApp() {
           <TranscribingPill />
         ) : recording ? (
           <RecordingPill elapsed={elapsed} level={audioLevel} />
+        ) : failure ? (
+          <TranscriptionErrorPill
+            message={failure.message}
+            canRetry={failure.canRetry}
+            retrying={retrying}
+            onRetry={handleRetry}
+          />
         ) : compact ? (
           <CompactOrb />
         ) : (
@@ -387,6 +442,53 @@ function TranscribingPill() {
       <div className="text-[11px] font-semibold tracking-tight text-zinc-100 pointer-events-none">
         Processando...
       </div>
+    </div>
+  );
+}
+
+function TranscriptionErrorPill({
+  message,
+  canRetry,
+  retrying,
+  onRetry,
+}: {
+  message: string;
+  canRetry: boolean;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      className="flex max-w-[272px] items-center gap-2 rounded-full border border-red-500/35 bg-zinc-900/95 py-1.5 pl-3 pr-2 shadow-gadget backdrop-blur-xl"
+      title={message}
+      role="alert"
+    >
+      <AlertCircle className="h-4 w-4 shrink-0 text-red-400" aria-hidden />
+      <span className="min-w-0 truncate text-[10px] font-semibold text-zinc-100">
+        Erro na transcrição
+      </span>
+      {canRetry ? (
+        <button
+          type="button"
+          disabled={retrying}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRetry();
+          }}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-red-500/30 bg-red-500/15 px-2 py-1 text-[9px] font-semibold text-red-200 transition-colors hover:bg-red-500/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 disabled:cursor-wait disabled:opacity-60"
+          aria-label="Regenerar transcrição"
+        >
+          {retrying ? (
+            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+          ) : (
+            <RefreshCw className="h-3 w-3" aria-hidden />
+          )}
+          {retrying ? "Tentando…" : "Regenerar"}
+        </button>
+      ) : (
+        <span className="shrink-0 text-[9px] text-zinc-500">Áudio indisponível</span>
+      )}
     </div>
   );
 }

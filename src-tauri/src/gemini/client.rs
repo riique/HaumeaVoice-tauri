@@ -5,8 +5,6 @@ use std::{sync::OnceLock, time::Duration};
 
 /// Multimodal model used for refinement and pronunciation.
 pub const GEMINI_MODEL: &str = "gemini-3.5-flash-lite";
-/// Low-latency multimodal model used only by FastAccurate direct STT.
-pub const FAST_ACCURATE_MODEL: &str = "gemini-3.5-flash-lite";
 /// Higher-capability model used for pronunciation evaluation (CEFR rubric).
 pub const PRONUNCIATION_MODEL: &str = "gemini-3.5-flash";
 
@@ -18,7 +16,8 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub const TIMEOUT_UPLOAD: Duration = Duration::from_secs(60);
 pub const TIMEOUT_POLL: Duration = Duration::from_secs(15);
-pub const TIMEOUT_GENERATE: Duration = Duration::from_secs(120);
+pub const TIMEOUT_GENERATE_MIN: Duration = Duration::from_secs(10);
+pub const TIMEOUT_GENERATE_MAX: Duration = Duration::from_secs(20);
 pub const TIMEOUT_DELETE: Duration = Duration::from_secs(15);
 /// Max wall time waiting for Files API PROCESSING → ACTIVE.
 pub const TIMEOUT_FILE_READY: Duration = Duration::from_secs(90);
@@ -64,6 +63,21 @@ pub fn require_api_key(api_key: &str) -> Result<(), String> {
         return Err("a chave de API do Google não está configurada".to_string());
     }
     Ok(())
+}
+
+/// Adaptive wall timeout for a complete Gemini `generateContent` response.
+///
+/// Known duration adds one second per complete 30 seconds of audio. When the
+/// duration is unavailable (for example, some compressed uploads), payload
+/// size adds one second per complete MiB. Both paths are clamped to 10–20s.
+pub fn adaptive_generate_timeout(duration_ms: Option<u64>, audio_bytes: usize) -> Duration {
+    let scale = match duration_ms {
+        Some(ms) => ms / 30_000,
+        None => audio_bytes as u64 / 1_048_576,
+    };
+    Duration::from_secs(
+        (TIMEOUT_GENERATE_MIN.as_secs() + scale).min(TIMEOUT_GENERATE_MAX.as_secs()),
+    )
 }
 
 /* --------------------------- generateContent shapes --------------------------- */
@@ -228,35 +242,38 @@ pub fn generate_url(model: &str, api_key: &str) -> String {
 
 /// POST generateContent with a per-request timeout override.
 /// Returns `(text, generate_wall_ms)`.
-pub async fn generate_content(
-    api_key: &str,
-    body: &GenerateContentRequest,
-) -> Result<(String, u64), String> {
-    generate_content_with_model(api_key, GEMINI_MODEL, body).await
-}
-
 pub async fn generate_content_with_model(
     api_key: &str,
     model: &str,
     body: &GenerateContentRequest,
+    timeout: Duration,
 ) -> Result<(String, u64), String> {
     require_api_key(api_key)?;
     let client = http_client()?;
     let url = generate_url(model, api_key);
     let t0 = std::time::Instant::now();
 
-    let response = tokio::time::timeout(TIMEOUT_GENERATE, client.post(url).json(body).send())
-        .await
-        .map_err(|_| {
-            format!(
-                "timeout ao gerar conteúdo no Gemini ({}s)",
-                TIMEOUT_GENERATE.as_secs()
-            )
-        })?
-        .map_err(|e| format!("falha na requisição ao Gemini: {}", e))?;
+    let request = async {
+        let response = client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("falha na requisição ao Gemini: {}", e))?;
+        let status = response.status().as_u16();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| format!("falha ao ler a resposta do Gemini: {}", e))?;
+        Ok::<_, String>((status, body_text))
+    };
 
-    let status = response.status().as_u16();
-    let body_text = response.text().await.unwrap_or_default();
+    let (status, body_text) = tokio::time::timeout(timeout, request).await.map_err(|_| {
+        format!(
+            "timeout ao aguardar resposta completa do Gemini ({}s)",
+            timeout.as_secs()
+        )
+    })??;
     let generate_ms = t0.elapsed().as_millis() as u64;
     if status != 200 {
         return Err(format!("Gemini retornou status {}: {}", status, body_text));
@@ -338,11 +355,28 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_generate_timeout_is_clamped_and_scales_with_audio() {
+        assert_eq!(adaptive_generate_timeout(Some(0), 0), TIMEOUT_GENERATE_MIN);
+        assert_eq!(adaptive_generate_timeout(Some(1), 0), TIMEOUT_GENERATE_MIN);
+        assert_eq!(
+            adaptive_generate_timeout(Some(120_000), 0),
+            Duration::from_secs(14)
+        );
+        assert_eq!(
+            adaptive_generate_timeout(Some(900_000), 0),
+            TIMEOUT_GENERATE_MAX
+        );
+        assert_eq!(
+            adaptive_generate_timeout(None, 5 * 1_048_576),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
     fn fast_accurate_uses_explicit_minimal_thinking_without_temperature() {
         let request = build_inline_request("transcreva", "audio/wav", "AA==").for_fast_accurate();
         let json = serde_json::to_value(request).unwrap();
 
-        assert_eq!(FAST_ACCURATE_MODEL, "gemini-3.5-flash-lite");
         assert_eq!(
             json.pointer("/generationConfig/thinkingConfig/thinkingLevel"),
             Some(&serde_json::Value::String("minimal".into()))

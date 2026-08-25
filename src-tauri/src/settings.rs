@@ -76,6 +76,12 @@ struct Settings {
     gemini_fallback_to_whisper: bool,
     #[serde(default)]
     content_type: crate::pipeline_contract::ContentType,
+    #[serde(default)]
+    gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
+    /// Optional absolute directory for future source-audio files. Existing
+    /// history entries keep their own absolute paths when this changes.
+    #[serde(default)]
+    audio_directory: Option<String>,
 }
 
 fn default_gemini_fallback() -> bool {
@@ -495,15 +501,33 @@ pub fn save_mode_config_batch(
     mode: crate::pipeline_contract::TranscriptionMode,
     gemini_fallback_to_whisper: bool,
     content_type: crate::pipeline_contract::ContentType,
+    gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
 ) {
     let mut s = read();
     s.modes_enabled = modes_enabled;
     s.transcription_mode = Some(mode);
     s.gemini_fallback_to_whisper = gemini_fallback_to_whisper;
     s.content_type = content_type;
+    s.gemini_pipelines = gemini_pipelines;
     write(&s);
 }
 
 pub fn load_content_type() -> crate::pipeline_contract::ContentType {
     read().content_type
+}
+
+pub fn load_gemini_pipelines() -> crate::pipeline_contract::GeminiPipelineConfig {
+    read().gemini_pipelines.clone()
+}
+
+pub fn load_audio_directory() -> Option<String> {
+    read()
+        .audio_directory
+        .filter(|path| !path.trim().is_empty())
+}
+
+pub fn save_audio_directory(path: Option<String>) {
+    let mut s = read();
+    s.audio_directory = path.filter(|value| !value.trim().is_empty());
+    write(&s);
 }

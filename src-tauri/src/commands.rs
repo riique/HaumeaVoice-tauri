@@ -129,6 +129,8 @@ pub struct ModeConfigPayload {
     pub gemini_fallback_to_whisper: bool,
     #[serde(default)]
     pub content_type: crate::pipeline_contract::ContentType,
+    #[serde(default)]
+    pub gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
 }
 
 fn default_true_fallback() -> bool {
@@ -141,6 +143,7 @@ pub struct ModeConfigSnapshot {
     pub mode: TranscriptionMode,
     pub gemini_fallback_to_whisper: bool,
     pub content_type: crate::pipeline_contract::ContentType,
+    pub gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
     /// Human labels for UI (copywriting).
     pub mode_label: String,
     pub mode_description: String,
@@ -148,14 +151,14 @@ pub struct ModeConfigSnapshot {
 
 fn mode_copy(mode: TranscriptionMode) -> (&'static str, &'static str) {
     match mode {
-        TranscriptionMode::UltraFast => ("Ultrarrápido", "Menor latência com Whisper"),
+        TranscriptionMode::UltraFast => (
+            "Ultrarrápido",
+            "Whisper via OpenRouter STT com provedor Groq fixo",
+        ),
         TranscriptionMode::FastAccurate => ("Rápido e preciso", "Transcrição direta com Gemini"),
         TranscriptionMode::Precise => ("Preciso", "Whisper e Gemini em paralelo"),
         TranscriptionMode::UltraPrecise => {
             ("Ultrapreciso", "Whisper, validador e Gemini em sequência")
-        }
-        TranscriptionMode::Chirp3Experimental => {
-            ("Chirp 3", "Transcrição experimental via OpenRouter")
         }
     }
 }
@@ -169,6 +172,7 @@ pub fn get_mode_config(state: State<'_, SharedState>) -> ModeConfigSnapshot {
         mode,
         gemini_fallback_to_whisper: *state.gemini_fallback_to_whisper.read(),
         content_type: *state.content_type.read(),
+        gemini_pipelines: state.gemini_pipelines.read().clone(),
         mode_label: label.to_string(),
         mode_description: desc.to_string(),
     }
@@ -179,6 +183,16 @@ pub async fn update_mode_config(
     state: State<'_, SharedState>,
     payload: ModeConfigPayload,
 ) -> Result<ModeConfigSnapshot, CommandError> {
+    for choice in [
+        &payload.gemini_pipelines.fast_accurate,
+        &payload.gemini_pipelines.precise,
+        &payload.gemini_pipelines.ultra_precise,
+    ] {
+        choice
+            .resolved_model_id()
+            .map_err(CommandError::InvalidPayload)?;
+    }
+
     log::info!(
         "update_mode_config: enabled={} mode={:?} gemini_fallback={}",
         payload.modes_enabled,
@@ -192,11 +206,13 @@ pub async fn update_mode_config(
         *shared.transcription_mode.write() = payload.mode;
         *shared.gemini_fallback_to_whisper.write() = payload.gemini_fallback_to_whisper;
         *shared.content_type.write() = payload.content_type;
+        *shared.gemini_pipelines.write() = payload.gemini_pipelines.clone();
         crate::settings::save_mode_config_batch(
             payload.modes_enabled,
             payload.mode,
             payload.gemini_fallback_to_whisper,
             payload.content_type,
+            payload.gemini_pipelines.clone(),
         );
         let (label, desc) = mode_copy(payload.mode);
         Ok(ModeConfigSnapshot {
@@ -204,6 +220,7 @@ pub async fn update_mode_config(
             mode: payload.mode,
             gemini_fallback_to_whisper: payload.gemini_fallback_to_whisper,
             content_type: payload.content_type,
+            gemini_pipelines: payload.gemini_pipelines,
             mode_label: label.to_string(),
             mode_description: desc.to_string(),
         })
@@ -258,47 +275,34 @@ pub async fn save_api_keys(
 ) -> Result<(), CommandError> {
     log::info!(
         "save_api_keys: groq={} google={} deepgram={} openrouter={}",
-        payload.groq.as_ref().map(|k| k.len()).unwrap_or(0),
-        payload.google.as_ref().map(|k| k.len()).unwrap_or(0),
-        payload.deepgram.as_ref().map(|k| k.len()).unwrap_or(0),
-        payload.openrouter.as_ref().map(|k| k.len()).unwrap_or(0),
+        payload.groq.len(),
+        payload.google.len(),
+        payload.deepgram.len(),
+        payload.openrouter.len(),
     );
 
     // Treat provider credentials as opaque. Do not reject valid keys based on
     // guessed prefixes or shapes (Deepgram keys, for example, are not UUIDs).
-    if let Some(ref k) = payload.groq {
-        validate_api_key("groq", k.trim()).map_err(CommandError::InvalidPayload)?;
-    }
-    if let Some(ref k) = payload.google {
-        validate_api_key("google", k.trim()).map_err(CommandError::InvalidPayload)?;
-    }
-    if let Some(ref k) = payload.deepgram {
-        validate_api_key("deepgram", k.trim()).map_err(CommandError::InvalidPayload)?;
-    }
-    if let Some(ref k) = payload.openrouter {
-        validate_api_key("openrouter", k.trim()).map_err(CommandError::InvalidPayload)?;
+    for (provider, keys) in [
+        ("groq", &payload.groq),
+        ("google", &payload.google),
+        ("deepgram", &payload.deepgram),
+        ("openrouter", &payload.openrouter),
+    ] {
+        for key in keys {
+            validate_api_key(provider, key.trim()).map_err(CommandError::InvalidPayload)?;
+        }
     }
 
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let keys = crate::models::ApiKeys {
-            groq: payload
-                .groq
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-            google: payload
-                .google
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-            deepgram: payload
-                .deepgram
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-            openrouter: payload
-                .openrouter
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-        };
+            groq: payload.groq,
+            google: payload.google,
+            deepgram: payload.deepgram,
+            openrouter: payload.openrouter,
+        }
+        .normalized();
 
         {
             let mut guard = shared.api_keys.write();
@@ -368,11 +372,7 @@ pub async fn evaluate_pronunciation(
         CommandError::Internal("este item não possui áudio salvo para avaliar".to_string())
     })?;
 
-    let google_key = {
-        let guard = state.api_keys.read();
-        guard.google.clone().filter(|k| !k.trim().is_empty())
-    }
-    .ok_or_else(|| {
+    let google_key = state.next_google_key().ok_or_else(|| {
         CommandError::Internal("configure a chave de API do Google (Gemini) em Ajustes".to_string())
     })?;
 
@@ -437,6 +437,92 @@ pub async fn get_history() -> Vec<crate::models::HistoryEntry> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioStorageConfig {
+    pub custom_directory: Option<String>,
+    pub effective_directory: String,
+    pub default_directory: String,
+}
+
+fn audio_storage_snapshot() -> Result<AudioStorageConfig, CommandError> {
+    let default = crate::audio_store::default_directory().ok_or_else(|| {
+        CommandError::Internal("armazenamento de áudio ainda não inicializado".to_string())
+    })?;
+    let effective = crate::audio_store::effective_directory().unwrap_or_else(|| default.clone());
+    Ok(AudioStorageConfig {
+        custom_directory: crate::settings::load_audio_directory(),
+        effective_directory: effective.to_string_lossy().into_owned(),
+        default_directory: default.to_string_lossy().into_owned(),
+    })
+}
+
+#[tauri::command]
+pub fn get_audio_storage_config() -> Result<AudioStorageConfig, CommandError> {
+    audio_storage_snapshot()
+}
+
+/// Changes only the destination for future audio files. Existing history
+/// entries retain their absolute paths and are neither moved nor deleted.
+#[tauri::command]
+pub async fn set_audio_storage_directory(
+    path: Option<String>,
+) -> Result<AudioStorageConfig, CommandError> {
+    tokio::task::spawn_blocking(move || {
+        let saved = match path.filter(|value| !value.trim().is_empty()) {
+            Some(path) => Some(
+                crate::audio_store::prepare_custom_directory(&path)
+                    .map_err(CommandError::InvalidPayload)?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            None => None,
+        };
+        crate::settings::save_audio_directory(saved);
+        audio_storage_snapshot()
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))?
+}
+
+/// Opens Windows Explorer with the persisted source audio selected. Resolving
+/// by history id keeps arbitrary paths out of the frontend IPC surface.
+#[tauri::command]
+pub async fn reveal_history_audio(id: String) -> Result<(), CommandError> {
+    tokio::task::spawn_blocking(move || {
+        let entry = crate::history::get(&id)
+            .ok_or_else(|| CommandError::Internal("histórico não encontrado".to_string()))?;
+        let path = entry.audio_path.ok_or_else(|| {
+            CommandError::Internal("este item não possui áudio salvo".to_string())
+        })?;
+        let canonical = std::fs::canonicalize(&path).map_err(|e| {
+            CommandError::Internal(format!("não foi possível localizar o áudio salvo: {e}"))
+        })?;
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{}", canonical.display()))
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| {
+                    CommandError::Internal(format!("não foi possível abrir o Explorer: {e}"))
+                })?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = canonical;
+            Err(CommandError::Internal(
+                "mostrar o arquivo está disponível apenas no Windows".to_string(),
+            ))
+        }
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))?
+}
+
 /// `clear_history`
 ///
 /// Wipes the persisted transcription history. Used by the "Limpar Tudo"
@@ -445,7 +531,6 @@ pub async fn get_history() -> Vec<crate::models::HistoryEntry> {
 pub async fn clear_history() {
     tokio::task::spawn_blocking(|| {
         crate::history::clear();
-        crate::audio_store::clear();
     })
     .await
     .unwrap_or_default();

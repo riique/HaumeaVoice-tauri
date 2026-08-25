@@ -63,32 +63,6 @@ pub fn push(entry: HistoryEntry) {
     };
     entries.insert(0, entry);
 
-    // Prune the history to prevent the JSON file from growing without bound.
-    // Audio files for entries beyond the retention window are deleted; the
-    // entries themselves are also truncated so the history card list stays
-    // responsive.
-    const MAX_AUDIO_ENTRIES: usize = 10;
-    const MAX_HISTORY_ENTRIES: usize = 200;
-
-    // Delete audio files for entries beyond the audio retention window.
-    for entry in entries.iter_mut().skip(MAX_AUDIO_ENTRIES) {
-        if let Some(path_str) = entry.audio_path.take() {
-            let p = std::path::Path::new(&path_str);
-            if p.exists() {
-                if let Err(e) = std::fs::remove_file(p) {
-                    log::warn!("history: failed to delete old audio file {:?}: {}", p, e);
-                } else {
-                    log::info!("history: deleted old audio file {:?}", p);
-                }
-            }
-        }
-    }
-
-    // Truncate the history list to the maximum number of entries.
-    if entries.len() > MAX_HISTORY_ENTRIES {
-        entries.truncate(MAX_HISTORY_ENTRIES);
-    }
-
     if let Err(e) = fs::create_dir_all(file.parent().unwrap_or(file.as_path())) {
         log::error!("history: could not create data dir: {}", e);
         return;
@@ -159,6 +133,21 @@ pub fn clear() {
     let Some(file) = path() else {
         return;
     };
+    let entries: Vec<HistoryEntry> = match fs::read_to_string(file) {
+        Ok(contents) if !contents.trim().is_empty() => {
+            serde_json::from_str(&contents).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    for entry in entries {
+        if let Some(path) = entry.audio_path {
+            if let Err(error) = fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("history: failed to delete audio file {:?}: {}", path, error);
+                }
+            }
+        }
+    }
     let _ = fs::write(file, "[]");
 }
 

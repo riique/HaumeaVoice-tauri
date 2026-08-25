@@ -44,9 +44,9 @@ pub fn load() -> ApiKeys {
         return ApiKeys::default();
     };
     match fs::read_to_string(file) {
-        Ok(contents) if !contents.trim().is_empty() => {
-            serde_json::from_str(&contents).unwrap_or_default()
-        }
+        Ok(contents) if !contents.trim().is_empty() => serde_json::from_str::<ApiKeys>(&contents)
+            .unwrap_or_default()
+            .normalized(),
         _ => ApiKeys::default(),
     }
 }

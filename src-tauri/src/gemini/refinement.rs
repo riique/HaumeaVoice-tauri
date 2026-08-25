@@ -3,7 +3,7 @@
 use base64::{engine::general_purpose, Engine as _};
 
 use super::client::{
-    build_file_request, build_inline_request, generate_content, mime_for_ext, GEMINI_MODEL,
+    adaptive_generate_timeout, build_file_request, build_inline_request, mime_for_ext, GEMINI_MODEL,
 };
 use super::files::{spawn_cleanup, upload_and_wait};
 use super::prompts::{
@@ -42,6 +42,7 @@ pub async fn refine_with_audio(req: RefineRequest) -> Result<GeminiGenerateResul
 
     let mut out = generate_with_transport(
         &req.api_key,
+        GEMINI_MODEL,
         &req.audio_bytes,
         mime,
         &display,
@@ -49,6 +50,7 @@ pub async fn refine_with_audio(req: RefineRequest) -> Result<GeminiGenerateResul
         transport,
         GeminiOperation::Refine,
         REFINE_PROMPT_VERSION,
+        duration,
         None,
     )
     .await?;
@@ -59,6 +61,7 @@ pub async fn refine_with_audio(req: RefineRequest) -> Result<GeminiGenerateResul
 /// Precise-mode refine: hybrid. Prefer precomputed base64 for parallel prep.
 pub async fn refine_precise(
     api_key: &str,
+    model: &str,
     audio: &[u8],
     ext: &str,
     display_name: &str,
@@ -70,10 +73,10 @@ pub async fn refine_precise(
     let mime = mime_for_ext(ext);
     let duration = duration_ms.or_else(|| estimate_wav_duration_ms(audio));
     let transport = select_gemini_audio_transport(audio.len(), duration, mime)?;
-    let content_note = crate::sanitizer_json::detect_content_type(whisper_hypothesis).as_str();
-    let prompt = precise_refinement_prompt(whisper_hypothesis, glossary_block, content_note);
+    let prompt = precise_refinement_prompt(whisper_hypothesis, glossary_block);
     generate_with_transport(
         api_key,
+        model,
         audio,
         mime,
         display_name,
@@ -81,6 +84,7 @@ pub async fn refine_precise(
         transport,
         GeminiOperation::Refine,
         PRECISE_PROMPT_VERSION,
+        duration,
         precomputed_b64,
     )
     .await
@@ -89,18 +93,22 @@ pub async fn refine_precise(
 /// Precise-mode refine using an **already uploaded** remote file (caller owns cleanup).
 pub async fn refine_precise_with_file(
     api_key: &str,
+    model: &str,
     file: &GeminiFileRef,
     whisper_hypothesis: &str,
     glossary_block: &str,
+    duration_ms: Option<u64>,
+    audio_bytes: usize,
 ) -> Result<GeminiGenerateResult, String> {
-    let content_note = crate::sanitizer_json::detect_content_type(whisper_hypothesis).as_str();
-    let prompt = precise_refinement_prompt(whisper_hypothesis, glossary_block, content_note);
+    let prompt = precise_refinement_prompt(whisper_hypothesis, glossary_block);
     generate_with_remote_file(
         api_key,
+        model,
         file,
         &prompt,
         GeminiOperation::Refine,
         PRECISE_PROMPT_VERSION,
+        adaptive_generate_timeout(duration_ms, audio_bytes),
     )
     .await
 }
@@ -108,14 +116,19 @@ pub async fn refine_precise_with_file(
 /// Pure STT against an already-uploaded file (Whisper failed path in Precise mode).
 pub async fn transcribe_with_file(
     api_key: &str,
+    model: &str,
     file: &GeminiFileRef,
+    duration_ms: Option<u64>,
+    audio_bytes: usize,
 ) -> Result<GeminiGenerateResult, String> {
     generate_with_remote_file(
         api_key,
+        model,
         file,
         transcription_prompt(),
         GeminiOperation::Transcribe,
         TRANSCRIBE_PROMPT_VERSION,
+        adaptive_generate_timeout(duration_ms, audio_bytes),
     )
     .await
 }
@@ -123,6 +136,7 @@ pub async fn transcribe_with_file(
 /// Pure STT inline (Whisper failed + short audio).
 pub async fn transcribe_inline(
     api_key: &str,
+    model: &str,
     audio: &[u8],
     mime: &str,
     precomputed_b64: Option<(String, u64)>,
@@ -132,11 +146,14 @@ pub async fn transcribe_inline(
         None => encode_audio_base64(audio),
     };
     let body = build_inline_request(transcription_prompt(), mime, &b64);
-    let (text, generate_ms) = generate_content(api_key, &body).await?;
+    let duration = estimate_wav_duration_ms(audio);
+    let timeout = adaptive_generate_timeout(duration, audio.len());
+    let (text, generate_ms) =
+        super::client::generate_content_with_model(api_key, model, &body, timeout).await?;
     Ok(GeminiGenerateResult {
         operation: GeminiOperation::Transcribe,
         text,
-        model: GEMINI_MODEL.to_string(),
+        model: model.to_string(),
         prompt_version: TRANSCRIBE_PROMPT_VERSION.to_string(),
         latency_ms: generate_ms + base64_ms,
         remote_file_name: None,
@@ -152,6 +169,7 @@ pub async fn transcribe_inline(
 /// UltraPrecise refine (hybrid).
 pub async fn refine_ultraprecise(
     api_key: &str,
+    model: &str,
     audio: &[u8],
     ext: &str,
     display_name: &str,
@@ -169,6 +187,7 @@ pub async fn refine_ultraprecise(
         ultraprecise_refinement_prompt(whisper_raw, sanitized, glossary_block, content_note);
     generate_with_transport(
         api_key,
+        model,
         audio,
         mime,
         display_name,
@@ -176,6 +195,7 @@ pub async fn refine_ultraprecise(
         transport,
         GeminiOperation::Refine,
         ULTRAPRECISE_PROMPT_VERSION,
+        duration,
         precomputed_b64,
     )
     .await
@@ -184,20 +204,25 @@ pub async fn refine_ultraprecise(
 /// UltraPrecise refine using an already-uploaded remote file (caller owns cleanup).
 pub async fn refine_ultraprecise_with_file(
     api_key: &str,
+    model: &str,
     file: &GeminiFileRef,
     whisper_raw: &str,
     sanitized: &str,
     glossary_block: &str,
     content_note: &str,
+    duration_ms: Option<u64>,
+    audio_bytes: usize,
 ) -> Result<GeminiGenerateResult, String> {
     let prompt =
         ultraprecise_refinement_prompt(whisper_raw, sanitized, glossary_block, content_note);
     generate_with_remote_file(
         api_key,
+        model,
         file,
         &prompt,
         GeminiOperation::Refine,
         ULTRAPRECISE_PROMPT_VERSION,
+        adaptive_generate_timeout(duration_ms, audio_bytes),
     )
     .await
 }
@@ -205,6 +230,7 @@ pub async fn refine_ultraprecise_with_file(
 #[allow(clippy::too_many_arguments)]
 async fn generate_with_transport(
     api_key: &str,
+    model: &str,
     audio: &[u8],
     mime: &str,
     display_name: &str,
@@ -212,9 +238,11 @@ async fn generate_with_transport(
     transport: GeminiAudioTransport,
     operation: GeminiOperation,
     prompt_version: &str,
+    duration_ms: Option<u64>,
     precomputed_b64: Option<(String, u64)>,
 ) -> Result<GeminiGenerateResult, String> {
     let t0 = std::time::Instant::now();
+    let generate_timeout = adaptive_generate_timeout(duration_ms, audio.len());
     match transport {
         GeminiAudioTransport::Inline => {
             let (b64, base64_ms) = match precomputed_b64 {
@@ -222,11 +250,13 @@ async fn generate_with_transport(
                 None => encode_audio_base64(audio),
             };
             let body = build_inline_request(prompt, mime, &b64);
-            let (text, generate_ms) = generate_content(api_key, &body).await?;
+            let (text, generate_ms) =
+                super::client::generate_content_with_model(api_key, model, &body, generate_timeout)
+                    .await?;
             Ok(GeminiGenerateResult {
                 operation,
                 text,
-                model: GEMINI_MODEL.to_string(),
+                model: model.to_string(),
                 prompt_version: prompt_version.to_string(),
                 latency_ms: t0.elapsed().as_millis() as u64,
                 remote_file_name: None,
@@ -242,13 +272,15 @@ async fn generate_with_transport(
             let (guard, up) = upload_and_wait(api_key, audio, mime, display_name).await?;
             let name = guard.name().to_string();
             let body = build_file_request(prompt, guard.mime_type(), guard.uri());
-            let gen = generate_content(api_key, &body).await;
+            let gen =
+                super::client::generate_content_with_model(api_key, model, &body, generate_timeout)
+                    .await;
             spawn_cleanup(guard);
             let (text, generate_ms) = gen?;
             Ok(GeminiGenerateResult {
                 operation,
                 text,
-                model: GEMINI_MODEL.to_string(),
+                model: model.to_string(),
                 prompt_version: prompt_version.to_string(),
                 latency_ms: t0.elapsed().as_millis() as u64,
                 remote_file_name: Some(name),
@@ -268,17 +300,20 @@ async fn generate_with_transport(
 
 async fn generate_with_remote_file(
     api_key: &str,
+    model: &str,
     file: &GeminiFileRef,
     prompt: &str,
     operation: GeminiOperation,
     prompt_version: &str,
+    generate_timeout: std::time::Duration,
 ) -> Result<GeminiGenerateResult, String> {
     let body = build_file_request(prompt, &file.mime_type, &file.uri);
-    let (text, generate_ms) = generate_content(api_key, &body).await?;
+    let (text, generate_ms) =
+        super::client::generate_content_with_model(api_key, model, &body, generate_timeout).await?;
     Ok(GeminiGenerateResult {
         operation,
         text,
-        model: GEMINI_MODEL.to_string(),
+        model: model.to_string(),
         prompt_version: prompt_version.to_string(),
         latency_ms: generate_ms,
         remote_file_name: Some(file.name.clone()),
