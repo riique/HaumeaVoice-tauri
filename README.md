@@ -48,6 +48,7 @@ Hint opcional para o prompt de refinamento:
 - **Vocabulário estruturado** — canônico + aliases + categoria + flag *strict* (substitui a lista simples de palavras)
 - **Histórico observável** — modo, modelos, estágios, textos intermediários, fallback, latências; copiar / editar / excluir / detalhes / retranscrever / pronúncia
 - **Áudio configurável** — escolha a pasta para novas gravações transcritas e abra cada arquivo diretamente pelo Histórico
+- **Normalização sensível a ruído** — ganho adaptativo limitado, pausas sem amplificação de room tone, limiter em -3 dBFS e original preservado como `.original.wav`
 - **UI de Configurações** — cards de pipeline, tipo de conteúdo e painel avançado (legado)
 - **Roteamento customizado** — presets ou ID livre por pipeline; OpenRouter separa Chat Completions multimodal de Speech-to-Text dedicado
 - **Whisper no Ultrarrápido** — escolha entre `openai/whisper-large-v3-turbo` e `openai/whisper-large-v3`, sempre pelo provedor Groq no OpenRouter

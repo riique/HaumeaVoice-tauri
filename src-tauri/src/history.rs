@@ -141,11 +141,7 @@ pub fn clear() {
     };
     for entry in entries {
         if let Some(path) = entry.audio_path {
-            if let Err(error) = fs::remove_file(&path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    log::warn!("history: failed to delete audio file {:?}: {}", path, error);
-                }
-            }
+            crate::audio_store::remove_with_original(&path);
         }
     }
     let _ = fs::write(file, "[]");
@@ -166,7 +162,7 @@ pub fn delete_entry(id: &str) -> bool {
     let before = entries.len();
     if let Some(pos) = entries.iter().position(|e| e.id == id) {
         if let Some(p) = entries[pos].audio_path.take() {
-            let _ = fs::remove_file(p);
+            crate::audio_store::remove_with_original(&p);
         }
         entries.remove(pos);
     }

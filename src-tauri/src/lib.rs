@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod audio_processing;
 pub mod audio_store;
 pub mod commands;
 pub mod deepgram;

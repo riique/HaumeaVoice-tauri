@@ -86,6 +86,59 @@ pub fn save(id: &str, ext: &str, bytes: &[u8]) -> Option<String> {
     }
 }
 
+/// Preserves the unprocessed microphone WAV beside the canonical processed
+/// audio as `{id}.original.{ext}`. The history entry continues to reference the
+/// canonical file used for transcription; this sidecar is a rollback/debugging
+/// source and is removed together with the history audio.
+pub fn save_original(id: &str, ext: &str, bytes: &[u8]) -> Option<String> {
+    let _guard = lock().lock();
+    let dir = effective_directory()?;
+    if let Err(e) = fs::create_dir_all(&dir) {
+        log::error!("audio_store: could not create audio dir: {}", e);
+        return None;
+    }
+    let safe_ext = sanitize_ext(ext);
+    let file = dir.join(format!("{}.original.{}", id, safe_ext));
+    match fs::write(&file, bytes) {
+        Ok(()) => {
+            log::info!(
+                "audio_store: preserved {} original bytes at {:?}",
+                bytes.len(),
+                file
+            );
+            Some(file.to_string_lossy().into_owned())
+        }
+        Err(e) => {
+            log::error!("audio_store: failed to preserve original audio: {}", e);
+            None
+        }
+    }
+}
+
+/// Removes the canonical history audio and its optional `.original` sidecar.
+pub fn remove_with_original(path: &str) {
+    let _guard = lock().lock();
+    let canonical = PathBuf::from(path);
+    remove_file_if_present(&canonical);
+    if let Some(original) = original_sidecar_path(&canonical) {
+        remove_file_if_present(&original);
+    }
+}
+
+fn remove_file_if_present(path: &PathBuf) {
+    if let Err(error) = fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("audio_store: failed to delete {:?}: {}", path, error);
+        }
+    }
+}
+
+fn original_sidecar_path(canonical: &std::path::Path) -> Option<PathBuf> {
+    let stem = canonical.file_stem()?.to_string_lossy();
+    let extension = canonical.extension()?.to_string_lossy();
+    Some(canonical.with_file_name(format!("{}.original.{}", stem, extension)))
+}
+
 /// Reads the audio bytes previously persisted at `path`. Returns an error
 /// string (rather than panicking) so the evaluation command can surface a
 /// readable diagnostic to the UI.
@@ -154,5 +207,14 @@ mod tests {
     #[test]
     fn custom_directory_must_be_absolute() {
         assert!(prepare_custom_directory("relative/audio").is_err());
+    }
+
+    #[test]
+    fn original_sidecar_is_derived_next_to_canonical_audio() {
+        let canonical = PathBuf::from(r"C:\audio\123.wav");
+        assert_eq!(
+            original_sidecar_path(&canonical),
+            Some(PathBuf::from(r"C:\audio\123.original.wav"))
+        );
     }
 }

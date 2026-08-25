@@ -398,12 +398,38 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
     let raw_count = raw_samples.len();
     let duration_ms = (raw_count as u64 * 1000) / capture_rate as u64;
 
-    let samples = if capture_rate == TARGET_SAMPLE_RATE {
+    let resampled_samples = if capture_rate == TARGET_SAMPLE_RATE {
         raw_samples
     } else {
         resample(&raw_samples, capture_rate, TARGET_SAMPLE_RATE)
     };
 
+    let (samples, processing) =
+        crate::audio_processing::enhance_microphone_audio(&resampled_samples, TARGET_SAMPLE_RATE);
+    if processing.applied {
+        log::info!(
+            "audio: noise-aware gain applied ({:+.1} dB, active {:.1}->{:.1} dBFS, peak {:.1}->{:.1} dBFS, noise floor {:.1} dBFS, active {:.1}%)",
+            processing.gain_db,
+            processing.active_rms_before_dbfs,
+            processing.active_rms_after_dbfs,
+            processing.peak_before_dbfs,
+            processing.peak_after_dbfs,
+            processing.noise_floor_dbfs,
+            processing.active_frame_percent,
+        );
+    } else {
+        log::info!(
+            "audio: noise-aware gain skipped (noise floor {:.1} dBFS, speech threshold {:.1} dBFS, active {:.1}%, peak {:.1} dBFS)",
+            processing.noise_floor_dbfs,
+            processing.speech_threshold_dbfs,
+            processing.active_frame_percent,
+            processing.peak_before_dbfs,
+        );
+    }
+
+    let original_wav = processing
+        .applied
+        .then(|| create_wav_buffer(&resampled_samples));
     let wav = create_wav_buffer(&samples);
     log::info!(
         "audio: WAV buffer generated in RAM ({} samples @ {} Hz -> {} samples @ {} Hz, {} KB)",
@@ -418,6 +444,11 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
     let start_time = std::time::Instant::now();
     let id = chrono_like_id();
     let audio_path = crate::audio_store::save(&id, "wav", &wav);
+    if audio_path.is_some() {
+        if let Some(original_wav) = original_wav.as_ref() {
+            let _ = crate::audio_store::save_original(&id, "wav", original_wav);
+        }
+    }
 
     // Product modes (UltraFast / FastAccurate) — abort unused Deepgram live session.
     if crate::transcription::should_use_product_mode(state) {
