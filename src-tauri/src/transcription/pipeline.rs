@@ -3,12 +3,166 @@
 use std::sync::Arc;
 
 use crate::models::{AppState, HistoryEntry, TranscriptionEngine};
+use crate::pipeline_contract::TranscriptionMode;
+use crate::pipeline_run::{
+    epoch_ms, AttemptStatus, AudioTransport, PipelineError, PipelineErrorKind, PipelineRun,
+    ProviderAttempt, StageKind, StageRecord, TranscriptVersions, UsageRecord,
+    PIPELINE_RUN_SCHEMA_VERSION,
+};
 use crate::transcription::fallback::{coalesce_empty_final, pick_raw_acoustic};
 use crate::transcription::telemetry::{
     acoustic_word_count, compute_realtime_factor, est_throughput, est_total_tokens,
     history_deepgram_mode, history_engine_label, log_latency,
 };
 use crate::transcription::types::SanitizeOutcome;
+
+fn provider_identity(engine: TranscriptionEngine) -> (&'static str, &'static str, AudioTransport) {
+    match engine {
+        TranscriptionEngine::GroqWhisper => {
+            ("groq", "whisper-large-v3-turbo", AudioTransport::Multipart)
+        }
+        TranscriptionEngine::DeepgramNova3 => ("deepgram", "nova-3", AudioTransport::RawBinary),
+        TranscriptionEngine::GeminiMultimodal => (
+            "google-ai-studio",
+            "gemini-audio",
+            AudioTransport::InlineBase64,
+        ),
+    }
+}
+
+fn legacy_success_run(
+    state: &AppState,
+    history_id: &str,
+    engine: TranscriptionEngine,
+    whisper_text: &str,
+    deepgram_text: &str,
+    final_text: &str,
+    transcription_latency_ms: u64,
+    dual_mode: bool,
+    deepgram_ran: bool,
+    sanitize: &SanitizeOutcome,
+) -> PipelineRun {
+    let mode = TranscriptionMode::from_legacy(engine, dual_mode);
+    let now = epoch_ms();
+    let mut run = PipelineRun::success(
+        format!("{history_id}-run-{now}"),
+        mode,
+        final_text.to_string(),
+    );
+    run.session_id = format!("{history_id}-session");
+    run.started_at_ms =
+        now.saturating_sub(transcription_latency_ms.saturating_add(sanitize.sanitizer_latency_ms));
+    run.transcript = TranscriptVersions {
+        raw: Some(if !whisper_text.trim().is_empty() {
+            whisper_text.to_string()
+        } else {
+            deepgram_text.to_string()
+        }),
+        refined: Some(final_text.to_string()),
+        formatted: Some(final_text.to_string()),
+        delivered: Some(final_text.to_string()),
+        user_corrected: None,
+    };
+    run.fallback.used = sanitize.used_raw_fallback;
+    run.fallback.reason = sanitize
+        .used_raw_fallback
+        .then(|| "sanitizer_raw_fallback".to_string());
+    run.timings.provider_ms = Some(transcription_latency_ms);
+    run.timings.refinement_ms = Some(sanitize.sanitizer_latency_ms);
+    run.timings.sanitizer_ms = Some(sanitize.sanitizer_latency_ms);
+    run.timings.total_ms = transcription_latency_ms.saturating_add(sanitize.sanitizer_latency_ms);
+    run.debug_info = sanitize.debug_info.clone();
+    if let Some(session) = state.recording_session.lock().clone() {
+        run.session_id = session.id;
+        run.started_at_ms = session.started_at_ms;
+        run.context = session.context.persisted_metadata();
+        run.profile_id = Some(session.profile.profile_id);
+        run.formatting_level = session.formatting_level;
+        run.destination = session.destination;
+        run.delivery.destination = session.destination;
+    }
+
+    let (provider, model, transport) = provider_identity(engine);
+    run.add_attempt(ProviderAttempt {
+        id: format!("{}-attempt-1", run.id),
+        provider: provider.into(),
+        model: model.into(),
+        transport,
+        started_at_ms: run.started_at_ms,
+        duration_ms: Some(transcription_latency_ms),
+        status: AttemptStatus::Success,
+        usage: UsageRecord {
+            audio_seconds: None,
+            total_tokens: None,
+            ..UsageRecord::default()
+        },
+        ..ProviderAttempt::default()
+    });
+    if deepgram_ran && engine != TranscriptionEngine::DeepgramNova3 {
+        run.add_attempt(ProviderAttempt {
+            id: format!("{}-attempt-2", run.id),
+            provider: "deepgram".into(),
+            model: "nova-3".into(),
+            transport: if state.deepgram_mode.read().as_str() == "streaming_final" {
+                AudioTransport::WebSocketStream
+            } else {
+                AudioTransport::RawBinary
+            },
+            started_at_ms: run.started_at_ms,
+            duration_ms: Some(transcription_latency_ms),
+            status: AttemptStatus::Success,
+            ..ProviderAttempt::default()
+        });
+    }
+    run.add_stage(StageRecord::completed(
+        StageKind::Recognition,
+        transcription_latency_ms,
+    ));
+    run.add_stage(StageRecord::completed(
+        StageKind::SemanticRefinement,
+        sanitize.sanitizer_latency_ms,
+    ));
+    run.finish_success();
+    run
+}
+
+fn legacy_failed_run(
+    history_id: &str,
+    engine: TranscriptionEngine,
+    dual_mode: bool,
+    error_msg: &str,
+) -> PipelineRun {
+    let now = epoch_ms();
+    let mode = TranscriptionMode::from_legacy(engine, dual_mode);
+    let error = PipelineError {
+        kind: PipelineErrorKind::Provider,
+        code: "recognition_failed".into(),
+        message: error_msg.to_string(),
+        retryable: true,
+    };
+    let mut run = PipelineRun::hard_error(
+        format!("{history_id}-run-{now}"),
+        mode,
+        error_msg.to_string(),
+    );
+    run.session_id = format!("{history_id}-session");
+    run.started_at_ms = now;
+    run.error = Some(error.clone());
+    let (provider, model, transport) = provider_identity(engine);
+    run.add_attempt(ProviderAttempt {
+        id: format!("{}-attempt-1", run.id),
+        provider: provider.into(),
+        model: model.into(),
+        transport,
+        started_at_ms: now,
+        duration_ms: Some(0),
+        status: AttemptStatus::Failed,
+        error: Some(error.clone()),
+        ..ProviderAttempt::default()
+    });
+    run.add_stage(StageRecord::failed(StageKind::Recognition, 0, error));
+    run
+}
 
 /// Runs the Groq sanitizer (or pick_raw) exactly as the pre-extraction path.
 pub async fn run_sanitize(
@@ -50,6 +204,15 @@ pub async fn run_sanitize(
     };
 
     let raw_words = acoustic_word_count(whisper_text, deepgram_text);
+    let context_preferences = state.context_preferences.read().clone();
+    let context_block = state
+        .recording_session
+        .lock()
+        .as_ref()
+        .filter(|session| session.profile.allow_context_to_cloud)
+        .and_then(|session| {
+            crate::context::package_untrusted_context(&session.context, &context_preferences)
+        });
     let mut debug_info = None;
     let mut warnings: Vec<String> = Vec::new();
     let mut used_raw_fallback = false;
@@ -71,6 +234,7 @@ pub async fn run_sanitize(
                     deepgram_text,
                     model_id,
                     &system_prompt_to_use,
+                    context_block.as_deref(),
                     &glossary_block,
                     &key,
                     reasoning_enabled,
@@ -187,8 +351,21 @@ pub fn build_success_entry(
         dual_mode,
         log_context,
     );
+    let pipeline_run = legacy_success_run(
+        state,
+        &id,
+        engine,
+        whisper_text,
+        deepgram_text,
+        &final_text,
+        transcription_latency_ms,
+        dual_mode,
+        deepgram_ran,
+        sanitize,
+    );
 
     HistoryEntry {
+        schema_version: PIPELINE_RUN_SCHEMA_VERSION,
         id,
         date,
         words,
@@ -249,6 +426,7 @@ pub fn build_success_entry(
         clipboard_ms: None,
         total_pipeline_ms: Some(total_latency_ms),
         gemini_transport: None,
+        pipeline_runs: vec![pipeline_run],
     }
 }
 
@@ -265,7 +443,9 @@ pub fn build_failed_entry(
 ) -> HistoryEntry {
     let dual_mode = *state.dual_engine.read();
     let deepgram_attempted = dual_mode || engine == TranscriptionEngine::DeepgramNova3;
+    let pipeline_run = legacy_failed_run(&id, engine, dual_mode, &error_msg);
     HistoryEntry {
+        schema_version: PIPELINE_RUN_SCHEMA_VERSION,
         id,
         date,
         words: 0,
@@ -310,6 +490,7 @@ pub fn build_failed_entry(
         clipboard_ms: None,
         total_pipeline_ms: None,
         gemini_transport: None,
+        pipeline_runs: vec![pipeline_run],
     }
 }
 
@@ -322,7 +503,10 @@ pub fn update_failed_entry(
     let dual = *state.dual_engine.read();
     let eng = state.active_engine();
     let deepgram_attempted = dual || eng == TranscriptionEngine::DeepgramNova3;
+    let mut pipeline_runs = entry.pipeline_runs.clone();
+    pipeline_runs.push(legacy_failed_run(&entry.id, eng, dual, &error_msg));
     HistoryEntry {
+        schema_version: PIPELINE_RUN_SCHEMA_VERSION,
         id: entry.id.clone(),
         date: entry.date.clone(),
         words: 0,
@@ -367,6 +551,7 @@ pub fn update_failed_entry(
         clipboard_ms: None,
         total_pipeline_ms: None,
         gemini_transport: None,
+        pipeline_runs,
     }
 }
 

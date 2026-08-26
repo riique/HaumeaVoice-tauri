@@ -1,10 +1,14 @@
-//! OpenRouter multimodal Gemini client using Chat Completions `input_audio`.
+//! OpenRouter audio client. Chat audio uses Base64 `input_audio`; the dedicated
+//! OpenAI-compatible STT endpoint uses multipart/form-data.
 
+use crate::pipeline_run::AudioTransport;
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderMap, HeaderValue, REFERER};
+use reqwest::multipart;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -14,6 +18,22 @@ const STT_MODELS_URL: &str = "https://openrouter.ai/api/v1/models?output_modalit
 const APP_REFERER: &str = "https://haumea.fun/haumea-voice";
 const APP_TITLE: &str = "Haumea Voice";
 static STT_MODEL_IDS: tokio::sync::OnceCell<HashSet<String>> = tokio::sync::OnceCell::const_new();
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http_client() -> Result<&'static reqwest::Client, String> {
+    if let Some(client) = HTTP_CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(60))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let _ = HTTP_CLIENT.set(client);
+    HTTP_CLIENT
+        .get()
+        .ok_or_else(|| "OpenRouter HTTP client unavailable".into())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenRouterAudioRoute {
@@ -92,17 +112,6 @@ struct ResponseMessage {
 }
 
 #[derive(Debug, Serialize)]
-struct TranscriptionRequest<'a> {
-    model: &'a str,
-    input_audio: InputAudio<'a>,
-    /// Portuguese is the product's primary language. Providers may still
-    /// preserve code-switching and technical identifiers in the transcript.
-    language: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<ProviderPreferences<'a>>,
-}
-
-#[derive(Debug, Serialize)]
 struct ProviderPreferences<'a> {
     only: [&'a str; 1],
     allow_fallbacks: bool,
@@ -116,10 +125,18 @@ struct TranscriptionResponse {
     usage: Option<ApiUsage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ApiUsage {
     #[serde(default)]
     total_tokens: Option<usize>,
+    #[serde(default, alias = "prompt_tokens")]
+    input_tokens: Option<usize>,
+    #[serde(default, alias = "completion_tokens")]
+    output_tokens: Option<usize>,
+    #[serde(default)]
+    seconds: Option<f64>,
+    #[serde(default)]
+    cost: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,8 +155,17 @@ pub struct OpenRouterGenerateResult {
     pub text: String,
     pub base64_ms: u64,
     pub request_ms: u64,
+    pub ttfb_ms: Option<u64>,
     pub generation_id: Option<String>,
     pub reported_total_tokens: Option<usize>,
+    pub reported_input_tokens: Option<usize>,
+    pub reported_output_tokens: Option<usize>,
+    pub reported_audio_seconds: Option<f64>,
+    /// OpenRouter returns this value in the response usage object; when
+    /// present it is an actual provider-reported charge, never an estimate.
+    pub reported_cost_usd: Option<f64>,
+    pub transport: AudioTransport,
+    pub bytes_sent: u64,
 }
 
 fn model_looks_dedicated_stt(model: &str) -> bool {
@@ -160,7 +186,7 @@ fn whisper_provider_preferences(model: &str) -> Option<ProviderPreferences<'stat
 async fn fetch_stt_model_ids() -> Result<HashSet<String>, String> {
     let response = tokio::time::timeout(
         Duration::from_secs(10),
-        reqwest::Client::new().get(STT_MODELS_URL).send(),
+        http_client()?.get(STT_MODELS_URL).send(),
     )
     .await
     .map_err(|_| "timeout ao consultar o catálogo de modelos STT".to_string())?
@@ -219,7 +245,6 @@ pub async fn generate_with_audio(
     if api_key.trim().is_empty() {
         return Err("Configure uma chave do OpenRouter em Provedores e APIs.".into());
     }
-
     let format = audio_format(ext)?;
     let encode_started = Instant::now();
     let encoded = general_purpose::STANDARD.encode(audio);
@@ -249,7 +274,7 @@ pub async fn generate_with_audio(
 
     let started = Instant::now();
     let exchange = async {
-        let response = reqwest::Client::new()
+        let response = http_client()?
             .post(CHAT_COMPLETIONS_URL)
             .bearer_auth(api_key.trim())
             .headers(app_attribution_headers())
@@ -257,6 +282,7 @@ pub async fn generate_with_audio(
             .send()
             .await
             .map_err(|e| format!("OpenRouter Gemini: falha de rede: {e}"))?;
+        let ttfb_ms = started.elapsed().as_millis() as u64;
         let status = response.status();
         let generation_id = response
             .headers()
@@ -267,16 +293,16 @@ pub async fn generate_with_audio(
             .text()
             .await
             .map_err(|e| format!("OpenRouter Gemini: falha ao ler a resposta: {e}"))?;
-        Ok::<_, String>((status, generation_id, response_body))
+        Ok::<_, String>((status, generation_id, response_body, ttfb_ms))
     };
-    let (status, generation_id, response_body) = tokio::time::timeout(timeout, exchange)
+    let (status, generation_id, response_body, ttfb_ms) = tokio::time::timeout(timeout, exchange)
         .await
         .map_err(|_| {
-        format!(
-            "OpenRouter Gemini: timeout após {} segundos.",
-            timeout.as_secs()
-        )
-    })??;
+            format!(
+                "OpenRouter Gemini: timeout após {} segundos.",
+                timeout.as_secs()
+            )
+        })??;
     let request_ms = started.elapsed().as_millis() as u64;
     if !status.is_success() {
         return Err(format!(
@@ -287,7 +313,7 @@ pub async fn generate_with_audio(
     }
     let parsed: ChatResponse = serde_json::from_str(&response_body)
         .map_err(|e| format!("OpenRouter Gemini: resposta inválida: {e}"))?;
-    let reported_total_tokens = parsed.usage.and_then(|usage| usage.total_tokens);
+    let usage = parsed.usage.unwrap_or_default();
     let text = parsed
         .choices
         .into_iter()
@@ -301,8 +327,15 @@ pub async fn generate_with_audio(
         text,
         base64_ms,
         request_ms,
+        ttfb_ms: Some(ttfb_ms),
         generation_id,
-        reported_total_tokens,
+        reported_total_tokens: usage.total_tokens,
+        reported_input_tokens: usage.input_tokens,
+        reported_output_tokens: usage.output_tokens,
+        reported_audio_seconds: usage.seconds,
+        reported_cost_usd: usage.cost,
+        transport: AudioTransport::InlineBase64,
+        bytes_sent: encoded.len() as u64,
     })
 }
 
@@ -322,33 +355,51 @@ pub async fn transcribe_audio(
     if api_key.trim().is_empty() {
         return Err("Configure uma chave do OpenRouter em Provedores e APIs.".into());
     }
+    let capabilities =
+        crate::pipeline_run::transport_capabilities("openrouter", "audio/transcriptions");
+    if capabilities
+        .best_supported(&[AudioTransport::Multipart], audio.len() as u64)
+        .is_none()
+    {
+        return Err("OpenRouter STT: áudio excede o limite multipart de 25 MB.".into());
+    }
 
     let format = audio_format(ext)?;
-    let encode_started = Instant::now();
-    let encoded = general_purpose::STANDARD.encode(audio);
-    let base64_ms = encode_started.elapsed().as_millis() as u64;
-    let body = TranscriptionRequest {
-        model,
-        input_audio: InputAudio {
-            data: &encoded,
-            format,
-        },
-        language: "pt",
-        // Product rule: every Whisper model sent through OpenRouter is pinned
-        // to Groq, with no provider fallback.
-        provider: whisper_provider_preferences(model),
+    let filename = format!("audio.{format}");
+    let mime = match format {
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "ogg" => "audio/ogg",
+        _ => "application/octet-stream",
     };
+    let part = multipart::Part::bytes(audio.to_vec())
+        .file_name(filename)
+        .mime_str(mime)
+        .map_err(|error| format!("OpenRouter STT: MIME inválido: {error}"))?;
+    let mut form = multipart::Form::new()
+        .text("model", model.to_string())
+        .text("language", "pt")
+        .part("file", part);
+    if let Some(provider) = whisper_provider_preferences(model) {
+        form = form.text(
+            "provider",
+            serde_json::to_string(&provider).map_err(|error| error.to_string())?,
+        );
+    }
 
     let started = Instant::now();
     let exchange = async {
-        let response = reqwest::Client::new()
+        let response = http_client()?
             .post(TRANSCRIPTIONS_URL)
             .bearer_auth(api_key.trim())
             .headers(app_attribution_headers())
-            .json(&body)
+            .multipart(form)
             .send()
             .await
             .map_err(|e| format!("OpenRouter STT: falha de rede: {e}"))?;
+        let ttfb_ms = started.elapsed().as_millis() as u64;
         let status = response.status();
         let generation_id = response
             .headers()
@@ -359,16 +410,16 @@ pub async fn transcribe_audio(
             .text()
             .await
             .map_err(|e| format!("OpenRouter STT: falha ao ler a resposta: {e}"))?;
-        Ok::<_, String>((status, generation_id, response_body))
+        Ok::<_, String>((status, generation_id, response_body, ttfb_ms))
     };
-    let (status, generation_id, response_body) = tokio::time::timeout(timeout, exchange)
+    let (status, generation_id, response_body, ttfb_ms) = tokio::time::timeout(timeout, exchange)
         .await
         .map_err(|_| {
-        format!(
-            "OpenRouter STT: timeout após {} segundos.",
-            timeout.as_secs()
-        )
-    })??;
+            format!(
+                "OpenRouter STT: timeout após {} segundos.",
+                timeout.as_secs()
+            )
+        })??;
     let request_ms = started.elapsed().as_millis() as u64;
     if !status.is_success() {
         return Err(format!(
@@ -384,12 +435,20 @@ pub async fn transcribe_audio(
     if text.is_empty() {
         return Err("OpenRouter STT não retornou texto.".into());
     }
+    let usage = parsed.usage.unwrap_or_default();
     Ok(OpenRouterGenerateResult {
         text,
-        base64_ms,
+        base64_ms: 0,
         request_ms,
+        ttfb_ms: Some(ttfb_ms),
         generation_id,
-        reported_total_tokens: parsed.usage.and_then(|usage| usage.total_tokens),
+        reported_total_tokens: usage.total_tokens,
+        reported_input_tokens: usage.input_tokens,
+        reported_output_tokens: usage.output_tokens,
+        reported_audio_seconds: usage.seconds,
+        reported_cost_usd: usage.cost,
+        transport: AudioTransport::Multipart,
+        bytes_sent: audio.len() as u64,
     })
 }
 
@@ -464,19 +523,11 @@ mod tests {
 
     #[test]
     fn request_matches_openrouter_transcription_contract() {
-        let body = TranscriptionRequest {
-            model: "google/chirp-3",
-            input_audio: InputAudio {
-                data: "UklGRg==",
-                format: "wav",
-            },
-            language: "pt",
-            provider: None,
-        };
-        let json = serde_json::to_value(body).unwrap();
-        assert_eq!(json["model"], "google/chirp-3");
-        assert_eq!(json["input_audio"]["format"], "wav");
-        assert_eq!(json["language"], "pt");
+        let capabilities =
+            crate::pipeline_run::transport_capabilities("openrouter", "audio/transcriptions");
+        assert!(capabilities.multipart);
+        assert!(!capabilities.inline_base64);
+        assert_eq!(capabilities.max_multipart_bytes, Some(25 * 1024 * 1024));
     }
 
     #[test]
@@ -507,17 +558,10 @@ mod tests {
 
     #[test]
     fn whisper_transcription_is_pinned_to_groq_without_fallback() {
-        let body = TranscriptionRequest {
-            model: "openai/whisper-large-v3",
-            input_audio: InputAudio {
-                data: "UklGRg==",
-                format: "wav",
-            },
-            language: "pt",
-            provider: whisper_provider_preferences("openai/whisper-large-v3"),
-        };
-        let value = serde_json::to_value(body).expect("serialize transcription request");
-        assert_eq!(value["provider"]["only"][0], "groq");
-        assert_eq!(value["provider"]["allow_fallbacks"], false);
+        let value =
+            serde_json::to_value(whisper_provider_preferences("openai/whisper-large-v3").unwrap())
+                .expect("serialize provider preferences");
+        assert_eq!(value["only"][0], "groq");
+        assert_eq!(value["allow_fallbacks"], false);
     }
 }

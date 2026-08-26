@@ -58,6 +58,10 @@ pub struct GeminiGenerateResult {
     pub transport: Option<GeminiAudioTransport>,
     #[serde(default)]
     pub timing: GeminiStageTiming,
+    /// Provider-reported usage. Cost remains `unknown` unless the provider
+    /// explicitly returns an actual charge.
+    #[serde(default)]
+    pub usage: crate::pipeline_run::UsageRecord,
 }
 
 /// Input for audio-only transcription.
@@ -76,6 +80,9 @@ pub struct TranscribeRequest {
     pub glossary_block: String,
     /// Enables prompt-only `@file.ext` mentions in clear coding contexts.
     pub file_tagging_enabled: bool,
+    /// Explicitly authorized, delimited context. Always treated as untrusted
+    /// data by the prompt and omitted unless both privacy opt-ins are active.
+    pub untrusted_context: Option<String>,
 }
 
 /// Input for audio + draft text refinement.

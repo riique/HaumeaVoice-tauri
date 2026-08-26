@@ -92,6 +92,16 @@ struct Settings {
     /// history entries keep their own absolute paths when this changes.
     #[serde(default)]
     audio_directory: Option<String>,
+    #[serde(default)]
+    context_preferences: crate::context::ContextPreferences,
+    #[serde(default)]
+    output_profiles: Vec<crate::output_policy::OutputProfile>,
+    #[serde(default)]
+    output_profiles_initialized: bool,
+    #[serde(default)]
+    formatting_level: crate::output_policy::FormattingLevel,
+    #[serde(default)]
+    dictation_destination: crate::output_policy::DictationDestination,
 }
 
 fn default_gemini_fallback() -> bool {
@@ -569,4 +579,50 @@ pub fn save_audio_directory(path: Option<String>) {
     let mut s = read();
     s.audio_directory = path.filter(|value| !value.trim().is_empty());
     write(&s);
+}
+
+pub fn load_context_preferences() -> crate::context::ContextPreferences {
+    read().context_preferences
+}
+
+pub fn save_context_preferences(value: crate::context::ContextPreferences) {
+    let mut settings = read();
+    settings.context_preferences = value;
+    write(&settings);
+}
+
+pub fn load_output_profiles() -> Vec<crate::output_policy::OutputProfile> {
+    let settings = read();
+    if settings.output_profiles_initialized {
+        settings.output_profiles
+    } else {
+        crate::output_policy::default_output_profiles()
+    }
+}
+
+pub fn save_output_profiles(value: Vec<crate::output_policy::OutputProfile>) {
+    let mut settings = read();
+    settings.output_profiles = value;
+    settings.output_profiles_initialized = true;
+    write(&settings);
+}
+
+pub fn load_formatting_level() -> crate::output_policy::FormattingLevel {
+    read().formatting_level
+}
+
+pub fn save_formatting_level(value: crate::output_policy::FormattingLevel) {
+    let mut settings = read();
+    settings.formatting_level = value;
+    write(&settings);
+}
+
+pub fn load_dictation_destination() -> crate::output_policy::DictationDestination {
+    read().dictation_destination
+}
+
+pub fn save_dictation_destination(value: crate::output_policy::DictationDestination) {
+    let mut settings = read();
+    settings.dictation_destination = value;
+    write(&settings);
 }

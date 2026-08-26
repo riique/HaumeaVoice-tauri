@@ -382,6 +382,19 @@ pub struct AppState {
     /// Adds plain `@file.ext` mentions when Gemini recognizes an explicit file reference.
     pub file_tagging_enabled: RwLock<bool>,
     pub gemini_pipelines: RwLock<crate::pipeline_contract::GeminiPipelineConfig>,
+    /// Privacy policy and source toggles used to capture a best-effort context
+    /// snapshot at the exact start of each recording.
+    pub context_preferences: RwLock<crate::context::ContextPreferences>,
+    /// Immutable session snapshot consumed by the transcription and delivery
+    /// stages after recording stops.
+    pub recording_session: Mutex<Option<crate::pipeline_run::RecordingSession>>,
+    pub output_profiles: RwLock<Vec<crate::output_policy::OutputProfile>>,
+    pub formatting_level: RwLock<crate::output_policy::FormattingLevel>,
+    pub dictation_destination: RwLock<crate::output_policy::DictationDestination>,
+    pub temporary_profile_override: RwLock<Option<String>>,
+    /// Failure journal handed from provider orchestration to history when a
+    /// top-level Result must remain backward-compatible with `String` errors.
+    pub pending_failed_pipeline_run: Mutex<Option<crate::pipeline_run::PipelineRun>>,
     groq_key_cursor: AtomicUsize,
     google_key_cursor: AtomicUsize,
     deepgram_key_cursor: AtomicUsize,
@@ -421,6 +434,15 @@ impl AppState {
             gemini_fallback_to_whisper: RwLock::new(true),
             file_tagging_enabled: RwLock::new(true),
             gemini_pipelines: RwLock::new(crate::pipeline_contract::GeminiPipelineConfig::default()),
+            context_preferences: RwLock::new(crate::context::ContextPreferences::default()),
+            recording_session: Mutex::new(None),
+            output_profiles: RwLock::new(Vec::new()),
+            formatting_level: RwLock::new(crate::output_policy::FormattingLevel::default()),
+            dictation_destination: RwLock::new(
+                crate::output_policy::DictationDestination::default(),
+            ),
+            temporary_profile_override: RwLock::new(None),
+            pending_failed_pipeline_run: Mutex::new(None),
             groq_key_cursor: AtomicUsize::new(0),
             google_key_cursor: AtomicUsize::new(0),
             deepgram_key_cursor: AtomicUsize::new(0),
@@ -586,6 +608,8 @@ pub mod event_names {
     /// Emitted after a transcription has been produced and persisted to
     /// the history file. Payload is the full [`HistoryEntry`] snapshot.
     pub const TRANSCRIPTION_SAVED: &str = "transcription-saved";
+    /// Low-volume structured progress for the gadget and Pipeline Inspector.
+    pub const PIPELINE_PROGRESS: &str = "pipeline-progress";
     /// Emitted on every poll tick while recording with a normalised loudness
     /// level (`f32` in 0.0..=1.0) so the gadget can animate its live waveform.
     pub const AUDIO_LEVEL: &str = "audio-level";
@@ -599,7 +623,7 @@ pub mod event_names {
 /// response for a single transcription. Captured on every sanitization so the
 /// Histórico can expose exactly what was sent — model, parameters, the reasoning
 /// level actually applied and the raw JSON body — when developer mode is on.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SanitizerDebug {
     /// Endpoint the request was POSTed to.
     pub endpoint: String,
@@ -640,6 +664,10 @@ pub struct SanitizerDebug {
 /// app data directory and also sent to the frontend over events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
+    /// Persisted history schema. Legacy entries deserialize as `0` and are
+    /// upgraded in memory without deleting their original projection fields.
+    #[serde(default)]
+    pub schema_version: u32,
     /// Stable unique id (UTC milliseconds at creation time as a string).
     pub id: String,
     /// Human-readable timestamp, e.g. "2026-06-20 14:32".
@@ -761,4 +789,8 @@ pub struct HistoryEntry {
     /// `inline` | `files_api`
     #[serde(default)]
     pub gemini_transport: Option<String>,
+    /// Every execution associated with this dictation. Retries and forced
+    /// fallback runs append here instead of erasing the prior evidence.
+    #[serde(default)]
+    pub pipeline_runs: Vec<crate::pipeline_run::PipelineRun>,
 }

@@ -223,6 +223,7 @@ pub async fn call_sanitizer_api(
     deepgram_text: &str,
     model: &str,
     system_prompt: &str,
+    untrusted_context: Option<&str>,
     // Pre-formatted glossary lines (may be empty). Prefer structured vocabulary.
     glossary_block: &str,
     api_key: &str,
@@ -249,10 +250,14 @@ na dúvida, mantenha o original e NÃO force termos onde não pertencem.\n{}",
         ));
     }
 
-    let user_message_content = format!(
+    let mut user_message_content = format!(
         "[WHISPER_RAW]: {}\n[DEEPGRAM_RAW]: {}",
         whisper_text, deepgram_text
     );
+    if let Some(context) = untrusted_context.filter(|value| !value.trim().is_empty()) {
+        user_message_content.push_str("\n\n");
+        user_message_content.push_str(context);
+    }
 
     // Reasoning is only really applied when the user enabled it *and* the model
     // can honour the native parameter. This is the single source of truth the

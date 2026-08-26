@@ -13,6 +13,7 @@ import {
   Pencil,
   Play,
   RefreshCw,
+  RotateCcw,
   Search,
   Sparkles,
   Trash2,
@@ -28,7 +29,10 @@ import {
   readHistoryAudio,
   revealHistoryAudio,
   retryTranscription,
+  retryTranscriptionWithFallback,
+  undoAiEdit,
   type HistoryEntry,
+  type PipelineRun,
 } from "../lib/tauri";
 
 function productModeLabel(mode: string | null | undefined): string | null {
@@ -96,48 +100,151 @@ function formatHistoryForClipboard(items: HistoryEntry[]): string {
     .join("\n\n");
 }
 
-function TechnicalDetails({ entry }: { entry: HistoryEntry }) {
-  const fields = [
-    ["Pipeline", productModeLabel(entry.mode)],
-    ["Modelo", entry.model || entry.engine],
-    ["Etapas", entry.stages?.split(",").join(" → ")],
-    ["Conteúdo", entry.content_type],
-    ["Duração", formatDuration(entry.duration_ms)],
-    ["Pipeline total", entry.total_pipeline_ms != null ? `${(entry.total_pipeline_ms / 1000).toFixed(2)} s` : null],
-    ["Whisper", entry.whisper_ms != null ? `${(entry.whisper_ms / 1000).toFixed(2)} s` : null],
-    ["Sanitizador", entry.sanitizer_ms != null ? `${(entry.sanitizer_ms / 1000).toFixed(2)} s` : null],
-    ["Gemini", entry.gemini_generate_ms != null ? `${(entry.gemini_generate_ms / 1000).toFixed(2)} s` : null],
-    ["RTF", entry.realtime_factor != null ? `${entry.realtime_factor.toFixed(2)}×` : null],
-    ["Tokens", entry.total_tokens?.toString()],
-    ["Transporte", entry.gemini_transport],
-  ].filter((field): field is [string, string] => Boolean(field[1]));
+function milliseconds(value: number | null | undefined): string {
+  if (value == null) return "Desconhecido";
+  return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(2)} s`;
+}
+
+function costLabel(run: PipelineRun): string {
+  const cost = run.usage?.cost;
+  if (!cost || cost.kind === "unknown" || cost.amount_usd == null) return "Desconhecido";
+  const origin = cost.kind === "actual" ? "real" : "estimado";
+  return `$${cost.amount_usd.toFixed(6)} (${origin})`;
+}
+
+function transcriptRows(run: PipelineRun): Array<[string, string]> {
+  const labels: Array<[keyof PipelineRun["transcript"], string]> = [
+    ["raw", "RAW"],
+    ["refined", "REFINED"],
+    ["formatted", "FORMATTED"],
+    ["delivered", "DELIVERED"],
+    ["user_corrected", "USER CORRECTED"],
+  ];
+  return labels.flatMap(([key, label]) => {
+    const value = run.transcript?.[key];
+    return value == null ? [] : [[label, value] as [string, string]];
+  });
+}
+
+function redactTechnicalText(value: unknown): string {
+  const serialized = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return serialized
+    .replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]")
+    .replace(/("(?:api[_-]?key|authorization|token)"\s*:\s*")[^"]+("?)/gi, "$1[REDACTED]$2")
+    .replace(/\b(?:sk|gsk|AIza)[-_A-Za-z0-9]{16,}\b/g, "[REDACTED]");
+}
+
+function PipelineInspector({ entry, devMode }: { entry: HistoryEntry; devMode: boolean }) {
+  const runs = entry.pipeline_runs ?? [];
+  if (!runs.length) {
+    return (
+      <div className="mt-4 rounded-[9px] bg-[#f2f2ed] p-4 text-[11px] text-[#555650]">
+        Esta entrada ainda usa o formato histórico legado. Ela será migrada automaticamente na próxima gravação do histórico.
+      </div>
+    );
+  }
 
   return (
-    <div className="mt-4 rounded-[9px] bg-[#f2f2ed] p-4">
-      <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
-        {fields.map(([label, value]) => (
-          <div key={label} className="min-w-0">
-            <div className="meta-label">{label}</div>
-            <div className="mt-1 truncate font-mono text-[11px] text-[#444540]" title={value}>{value}</div>
-          </div>
-        ))}
-      </div>
-      {entry.used_fallback && (
-        <p className="mt-4 rounded-[7px] bg-[#f7edd9] px-3 py-2 text-[11px] leading-4 text-[#795019]">
-          Fallback utilizado{entry.fallback_reason ? `: ${entry.fallback_reason}` : "."}
-        </p>
-      )}
-      {entry.warnings?.length ? (
-        <ul className="mt-3 space-y-1 text-[11px] text-[#795019]">{entry.warnings.map((warning) => <li key={warning}>• {warning}</li>)}</ul>
-      ) : null}
-      {entry.debug_info && (
-        <details className="mt-4">
-          <summary className="cursor-pointer text-[11px] font-medium text-[#555650]">Request / resposta técnica</summary>
-          <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-[8px] bg-[#252522] p-3 font-mono text-[10px] leading-4 text-[#e8e8e2]">
-            {entry.debug_info.request_json || entry.debug_info.user_message}
-          </pre>
-        </details>
-      )}
+    <div className="mt-4 space-y-4 rounded-[9px] bg-[#f2f2ed] p-4">
+      {runs.map((run, runIndex) => {
+        const versions = transcriptRows(run);
+        const raw = run.transcript?.raw ?? "";
+        const delivered = run.transcript?.delivered ?? "";
+        const finalAttempt = [...run.attempts].reverse().find((attempt) => attempt.status === "success");
+        return (
+          <section key={run.id} className={runIndex ? "border-t border-[#ddddD6] pt-4" : ""}>
+            <div className="flex items-center justify-between gap-3">
+              <h4 className="text-[11px] font-semibold text-[#343530]">Execução {runIndex + 1}</h4>
+              <span className="font-mono text-[10px] uppercase text-muted">{run.status}</span>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
+              {[
+                ["Total", milliseconds(run.timings?.total_ms)],
+                ["Provider final", finalAttempt?.provider || "Desconhecido"],
+                ["Modelo", finalAttempt?.model || entry.model || entry.engine],
+                ["Fallback", run.fallback?.used ? "Sim" : "Não"],
+                ["Tokens", run.usage?.total_tokens?.toString() || "Desconhecido"],
+                ["Custo", costLabel(run)],
+                ["Profile", run.profile_id || "Padrão"],
+                ["Saída", `${run.formatting_level} · ${run.destination}`],
+              ].map(([label, value]) => (
+                <div key={label} className="min-w-0">
+                  <div className="meta-label">{label}</div>
+                  <div className="mt-1 truncate font-mono text-[11px] text-[#444540]" title={value}>{value}</div>
+                </div>
+              ))}
+            </div>
+
+            {run.fallback?.used && (
+              <p className="mt-4 rounded-[7px] bg-[#f7edd9] px-3 py-2 text-[11px] leading-4 text-[#795019]">
+                Fallback utilizado{run.fallback.reason ? `: ${run.fallback.reason}` : "."}
+              </p>
+            )}
+
+            <details className="mt-4" open>
+              <summary className="cursor-pointer text-[11px] font-medium text-[#555650]">Versões da transcrição</summary>
+              <div className="mt-3 space-y-2">
+                {versions.map(([label, value]) => (
+                  <div key={label} className="rounded-[8px] border border-[#dddDd6] bg-white px-3 py-2">
+                    <div className="meta-label">{label}</div>
+                    <p className="mt-1 whitespace-pre-wrap text-[11px] leading-4 text-[#444540]">{value}</p>
+                  </div>
+                ))}
+              </div>
+              {raw && delivered && raw !== delivered && (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2" aria-label="Comparação entre transcrição bruta e entregue">
+                  <div className="rounded-[8px] bg-[#fff8ed] p-3"><div className="meta-label">Antes · RAW</div><p className="mt-1 whitespace-pre-wrap text-[11px] leading-4">{raw}</p></div>
+                  <div className="rounded-[8px] bg-[#eef7f0] p-3"><div className="meta-label">Depois · DELIVERED</div><p className="mt-1 whitespace-pre-wrap text-[11px] leading-4">{delivered}</p></div>
+                </div>
+              )}
+            </details>
+
+            {devMode && (
+              <>
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-[11px] font-medium text-[#555650]">Attempts ({run.attempts.length})</summary>
+                  <div className="mt-2 divide-y divide-[#dddDd6] border-y border-[#dddDd6]">
+                    {run.attempts.map((attempt) => (
+                      <div key={attempt.id} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 py-2 text-[11px]">
+                        <div><span className="font-medium">{attempt.provider}</span><span className="font-mono text-muted"> / {attempt.model}</span><div className="mt-0.5 text-muted">{attempt.transport}{attempt.usage?.bytes_sent != null ? ` · ${attempt.usage.bytes_sent} bytes` : ""}{attempt.usage?.total_tokens != null ? ` · ${attempt.usage.total_tokens} tokens` : ""}{attempt.error ? ` · ${attempt.error.message}` : ""}</div></div>
+                        <div className="text-right font-mono"><div>{attempt.status.toUpperCase()}</div><div className="text-muted">{milliseconds(attempt.duration_ms)}</div></div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-[11px] font-medium text-[#555650]">Timings detalhados</summary>
+                  <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 border-y border-[#dddDd6] py-2 sm:grid-cols-3">
+                    {Object.entries(run.timings ?? {}).filter(([, value]) => value != null).map(([name, value]) => (
+                      <div key={name} className="flex items-center justify-between gap-2 text-[10px]"><span>{name}</span><span className="font-mono text-muted">{milliseconds(Number(value))}</span></div>
+                    ))}
+                  </div>
+                </details>
+
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-[11px] font-medium text-[#555650]">Stages ({run.stages.length})</summary>
+                  <div className="mt-2 divide-y divide-[#dddDd6] border-y border-[#dddDd6]">
+                    {run.stages.map((stage) => (
+                      <div key={stage.id} className="flex items-center justify-between gap-3 py-2 text-[11px]"><span>{stage.stage.replace(/_/g, " ")}</span><span className="font-mono text-muted">{milliseconds(stage.duration_ms)}</span></div>
+                    ))}
+                  </div>
+                </details>
+
+                {(run.debug_info || run.attempts.some((attempt) => attempt.result.request_sanitized || attempt.result.response_sanitized)) && (
+                  <details className="mt-4">
+                    <summary className="cursor-pointer text-[11px] font-medium text-[#555650]">Request / resposta sanitizados</summary>
+                    <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-[8px] bg-[#252522] p-3 font-mono text-[10px] leading-4 text-[#e8e8e2]">
+                      {redactTechnicalText(run.attempts.map((attempt) => ({ provider: attempt.provider, request: attempt.result.request_sanitized, response: attempt.result.response_sanitized })))}
+                    </pre>
+                  </details>
+                )}
+              </>
+            )}
+          </section>
+        );
+      })}
     </div>
   );
 }
@@ -286,6 +393,21 @@ export function HistoricoView() {
     }
   };
 
+  const useFallback = async (id: string) => {
+    setBusyId(id); setMenuOpen(null);
+    try { await retryTranscriptionWithFallback(id); await refresh(); }
+    catch (error) { setErrors((current) => ({ ...current, [id]: String(error) })); }
+    finally { setBusyId(null); }
+  };
+
+  const undo = async (entry: HistoryEntry, version: "raw" | "refined") => {
+    setMenuOpen(null);
+    try {
+      const outcome = await undoAiEdit(entry.id, version);
+      if (outcome === "copied_to_clipboard") setCopiedId(entry.id);
+    } catch (error) { setErrors((current) => ({ ...current, [entry.id]: String(error) })); }
+  };
+
   const evaluate = async (entry: HistoryEntry) => {
     setMenuOpen(null);
     if (entry.evaluation) {
@@ -349,6 +471,7 @@ export function HistoricoView() {
             const isError = Boolean(entry.is_error);
             const hasAudio = Boolean(entry.audio_path);
             const isBusy = busyId === entry.id;
+            const latestRun = entry.pipeline_runs?.[entry.pipeline_runs.length - 1];
             return (
               <article key={entry.id} className={`relative px-2 py-5 ${menuOpen === entry.id ? "z-30" : "z-0"}`}>
                 <div className="grid grid-cols-[116px_minmax(0,1fr)_auto] gap-5 max-[860px]:grid-cols-[minmax(0,1fr)_auto]">
@@ -389,7 +512,10 @@ export function HistoricoView() {
                         <div className="menu-panel z-50 w-52" role="menu">
                           {hasAudio && <button className="menu-item" role="menuitem" onClick={() => { setMenuOpen(null); void revealHistoryAudio(entry.id).catch((error) => setErrors((current) => ({ ...current, [entry.id]: String(error) }))); }}><FolderOpen className="h-4 w-4" />Mostrar áudio</button>}
                           {hasAudio && !isError && <button className="menu-item" role="menuitem" onClick={() => void evaluate(entry)}><Sparkles className="h-4 w-4" />{entry.evaluation ? "Ver pronúncia" : "Avaliar pronúncia"}</button>}
-                          <button className="menu-item" role="menuitem" onClick={() => { setDetailsOpen((current) => ({ ...current, [entry.id]: !current[entry.id] })); setMenuOpen(null); }}><Braces className="h-4 w-4" />{detailsOpen[entry.id] ? "Ocultar detalhes" : "Detalhes"}</button>
+                          {hasAudio && <button className="menu-item" role="menuitem" onClick={() => void useFallback(entry.id)}><RefreshCw className="h-4 w-4" />Usar fallback</button>}
+                          {!isError && latestRun?.transcript.raw && <button className="menu-item" role="menuitem" onClick={() => void undo(entry, "raw")}><RotateCcw className="h-4 w-4" />Undo para RAW</button>}
+                          {!isError && latestRun?.transcript.refined && <button className="menu-item" role="menuitem" onClick={() => void undo(entry, "refined")}><RotateCcw className="h-4 w-4" />Undo para REFINED</button>}
+                          <button className="menu-item" role="menuitem" onClick={() => { setDetailsOpen((current) => ({ ...current, [entry.id]: !current[entry.id] })); setMenuOpen(null); }}><Braces className="h-4 w-4" />{detailsOpen[entry.id] ? "Fechar Inspector" : "Pipeline Inspector"}</button>
                           <button className="menu-item text-[#a72a21]" role="menuitem" onClick={() => void remove(entry.id)}><Trash2 className="h-4 w-4" />Excluir</button>
                         </div>
                       )}
@@ -397,7 +523,7 @@ export function HistoricoView() {
                   </div>
                 </div>
                 {errors[entry.id] && <p className="mt-3 rounded-[8px] bg-[#fff1ef] px-3 py-2 text-[11px] text-[#9f2720]" role="alert">{errors[entry.id]}</p>}
-                {detailsOpen[entry.id] && <TechnicalDetails entry={entry} />}
+                {detailsOpen[entry.id] && <PipelineInspector entry={entry} devMode={devMode} />}
                 {evaluationOpen[entry.id] && entry.evaluation && <div className="mt-5"><PronunciationEvaluation markdown={entry.evaluation} /></div>}
               </article>
             );

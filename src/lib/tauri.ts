@@ -197,8 +197,116 @@ export interface SanitizerDebug {
   error?: string | null;
 }
 
+export type AudioTransport =
+  | "inline_base64"
+  | "multipart"
+  | "raw_binary"
+  | "resumable_file"
+  | "url"
+  | "websocket_stream";
+
+export interface CostRecord {
+  kind: "actual" | "estimated" | "unknown";
+  amount_usd?: number | null;
+  source?: string | null;
+}
+
+export interface UsageRecord {
+  audio_seconds?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  bytes_sent?: number | null;
+  cost: CostRecord;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PipelineError {
+  kind: string;
+  code: string;
+  message: string;
+  retryable?: boolean;
+}
+
+export interface ProviderAttempt {
+  id: string;
+  provider: string;
+  model: string;
+  transport: AudioTransport;
+  started_at_ms?: number;
+  duration_ms?: number | null;
+  status: "pending" | "running" | "success" | "failed" | "skipped";
+  error?: PipelineError | null;
+  usage: UsageRecord;
+  result: {
+    generation_id?: string | null;
+    finish_reason?: string | null;
+    language?: string | null;
+    output_chars?: number | null;
+    request_sanitized?: unknown;
+    response_sanitized?: unknown;
+    extra?: Record<string, unknown>;
+  };
+}
+
+export interface StageRecord {
+  id: string;
+  stage: string;
+  started_at_ms?: number;
+  finished_at_ms?: number | null;
+  duration_ms?: number | null;
+  status: "pending" | "running" | "success" | "failed" | "skipped";
+  provider?: string | null;
+  model?: string | null;
+  transport?: AudioTransport | null;
+  metadata?: Record<string, unknown>;
+  error?: PipelineError | null;
+  usage: UsageRecord;
+}
+
+export interface TranscriptVersions {
+  raw?: string | null;
+  refined?: string | null;
+  formatted?: string | null;
+  delivered?: string | null;
+  user_corrected?: string | null;
+}
+
+export interface PipelineRun {
+  schema_version: number;
+  id: string;
+  session_id: string;
+  started_at_ms?: number;
+  finished_at_ms?: number | null;
+  status: "running" | "success" | "failed" | "partial";
+  mode: TranscriptionMode;
+  content_type: string;
+  context?: Record<string, unknown>;
+  profile_id?: string | null;
+  formatting_level: "literal" | "smart" | "aggressive";
+  destination: "focused_field" | "clipboard_only" | "scratchpad";
+  attempts: ProviderAttempt[];
+  stages: StageRecord[];
+  transcript: TranscriptVersions;
+  delivery: Record<string, unknown>;
+  fallback: {
+    used: boolean;
+    reason?: string | null;
+    from_provider?: string | null;
+    to_provider?: string | null;
+    forced?: boolean;
+  };
+  usage: UsageRecord;
+  timings: Record<string, number | null | undefined> & { total_ms: number };
+  warnings: Array<{ stage: string; code: string; message: string }>;
+  error?: PipelineError | null;
+  debug_info?: SanitizerDebug | null;
+  history_engine_label?: string;
+}
+
 /** A single persisted transcription, mirroring the Rust `HistoryEntry`. */
 export interface HistoryEntry {
+  schema_version?: number;
   id: string;
   date: string;
   words: number;
@@ -245,6 +353,23 @@ export interface HistoryEntry {
   clipboard_ms?: number | null;
   total_pipeline_ms?: number | null;
   gemini_transport?: string | null;
+  pipeline_runs?: PipelineRun[];
+}
+
+export interface PipelineProgressEvent {
+  kind:
+    | "audio_preparing"
+    | "recognizing"
+    | "provider_failed"
+    | "fallback_started"
+    | "refining"
+    | "formatting"
+    | "delivering"
+    | "complete";
+  run_id?: string | null;
+  provider?: string | null;
+  fallback_provider?: string | null;
+  message?: string | null;
 }
 
 /** Returns the full persisted transcription history, newest first. */
@@ -282,6 +407,51 @@ export async function readHistoryAudio(id: string): Promise<ArrayBuffer> {
 export async function retryTranscription(id: string): Promise<string> {
   return invoke<string>("retry_transcription", { id });
 }
+
+export async function retryTranscriptionWithFallback(id: string): Promise<string> {
+  return invoke<string>("retry_transcription_with_fallback", { id });
+}
+
+export async function undoAiEdit(id: string, version: "raw" | "refined"): Promise<"replaced_selection" | "copied_to_clipboard"> {
+  return invoke("undo_ai_edit", { id, version });
+}
+
+export type ContextSourceKind = "application" | "window_title" | "domain" | "selection" | "caret_context" | "clipboard";
+export type ContextPrivacy = "metadata_only" | "ephemeral_local" | "cloud_allowed";
+export interface ContextPreferences {
+  sources: Array<{ source: ContextSourceKind; enabled: boolean; privacy: ContextPrivacy }>;
+  persist_raw_context: boolean;
+  allow_context_to_cloud: boolean;
+  max_context_chars: number;
+}
+export interface OutputProfile {
+  id: string; name: string; enabled: boolean;
+  matcher: { processes: string[]; executables: string[]; window_titles: string[]; domains: string[] };
+  formatting_level?: "literal" | "smart" | "aggressive" | null;
+  content_type?: string | null;
+  style_instruction?: string | null;
+  allow_context_to_cloud?: boolean | null;
+}
+export interface OutputPolicyConfig {
+  formatting_level: "literal" | "smart" | "aggressive";
+  destination: "focused_field" | "clipboard_only" | "scratchpad";
+  profiles: OutputProfile[];
+  temporary_override?: string | null;
+}
+export interface VoiceSnippet { id: string; trigger: string; expansion: string; enabled: boolean; require_activation_phrase: boolean }
+export interface CorrectionEvent { id: string; before: string; after: string; count: number; timestamp_ms: number; status: string; context: { application?: string | null; domain?: string | null; profile_id?: string | null } }
+export interface ScratchpadNote { id: string; created_at_ms: number; text: string; pipeline_run_id?: string | null; profile_id?: string | null }
+
+export const getContextPreferences = () => invoke<ContextPreferences>("get_context_preferences");
+export const setContextPreferences = (preferences: ContextPreferences) => invoke<ContextPreferences>("set_context_preferences", { preferences });
+export const getOutputPolicyConfig = () => invoke<OutputPolicyConfig>("get_output_policy_config");
+export const setOutputPolicyConfig = (config: OutputPolicyConfig) => invoke<OutputPolicyConfig>("set_output_policy_config", { config });
+export const getSnippets = () => invoke<VoiceSnippet[]>("get_snippets");
+export const setSnippets = (snippets: VoiceSnippet[]) => invoke<VoiceSnippet[]>("set_snippets", { snippets });
+export const getVocabularySuggestions = () => invoke<CorrectionEvent[]>("get_vocabulary_suggestions");
+export const resolveVocabularySuggestion = (id: string, accepted: boolean) => invoke<void>("resolve_vocabulary_suggestion", { id, accepted });
+export const getScratchpadNotes = () => invoke<ScratchpadNote[]>("get_scratchpad_notes");
+export const deleteScratchpadNote = (id: string) => invoke<boolean>("delete_scratchpad_note", { id });
 
 /** Structured vocabulary category (Phase 06). */
 export type VocabularyCategory =

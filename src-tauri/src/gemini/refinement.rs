@@ -123,10 +123,15 @@ pub async fn transcribe_with_file(
     model: &str,
     file: &GeminiFileRef,
     file_tagging_enabled: bool,
+    untrusted_context: Option<&str>,
     duration_ms: Option<u64>,
     audio_bytes: usize,
 ) -> Result<GeminiGenerateResult, String> {
-    let prompt = transcription_prompt(file_tagging_enabled);
+    let mut prompt = transcription_prompt(file_tagging_enabled);
+    if let Some(context) = untrusted_context {
+        prompt.user_prompt.push_str("\n\n");
+        prompt.user_prompt.push_str(context);
+    }
     generate_with_remote_file(
         api_key,
         model,
@@ -146,31 +151,37 @@ pub async fn transcribe_inline(
     audio: &[u8],
     mime: &str,
     file_tagging_enabled: bool,
+    untrusted_context: Option<&str>,
     precomputed_b64: Option<(String, u64)>,
 ) -> Result<GeminiGenerateResult, String> {
     let (b64, base64_ms) = match precomputed_b64 {
         Some(p) => p,
         None => encode_audio_base64(audio),
     };
-    let prompt = transcription_prompt(file_tagging_enabled);
+    let mut prompt = transcription_prompt(file_tagging_enabled);
+    if let Some(context) = untrusted_context {
+        prompt.user_prompt.push_str("\n\n");
+        prompt.user_prompt.push_str(context);
+    }
     let body = build_inline_request(&prompt.system_instruction, &prompt.user_prompt, mime, &b64);
     let duration = estimate_wav_duration_ms(audio);
     let timeout = adaptive_generate_timeout(duration, audio.len());
-    let (text, generate_ms) =
+    let generated =
         super::client::generate_content_with_model(api_key, model, &body, timeout).await?;
     Ok(GeminiGenerateResult {
         operation: GeminiOperation::Transcribe,
-        text,
+        text: generated.text,
         model: model.to_string(),
         prompt_version: TRANSCRIBE_PROMPT_VERSION.to_string(),
-        latency_ms: generate_ms + base64_ms,
+        latency_ms: generated.duration_ms + base64_ms,
         remote_file_name: None,
         transport: Some(GeminiAudioTransport::Inline),
         timing: GeminiStageTiming {
             base64_ms: Some(base64_ms),
-            generate_ms: Some(generate_ms),
+            generate_ms: Some(generated.duration_ms),
             ..Default::default()
         },
+        usage: generated.usage,
     })
 }
 
@@ -267,12 +278,12 @@ async fn generate_with_transport(
             };
             let body =
                 build_inline_request(&prompt.system_instruction, &prompt.user_prompt, mime, &b64);
-            let (text, generate_ms) =
+            let generated =
                 super::client::generate_content_with_model(api_key, model, &body, generate_timeout)
                     .await?;
             Ok(GeminiGenerateResult {
                 operation,
-                text,
+                text: generated.text,
                 model: model.to_string(),
                 prompt_version: prompt_version.to_string(),
                 latency_ms: t0.elapsed().as_millis() as u64,
@@ -280,9 +291,10 @@ async fn generate_with_transport(
                 transport: Some(GeminiAudioTransport::Inline),
                 timing: GeminiStageTiming {
                     base64_ms: Some(base64_ms),
-                    generate_ms: Some(generate_ms),
+                    generate_ms: Some(generated.duration_ms),
                     ..Default::default()
                 },
+                usage: generated.usage,
             })
         }
         GeminiAudioTransport::FilesApi => {
@@ -298,10 +310,10 @@ async fn generate_with_transport(
                 super::client::generate_content_with_model(api_key, model, &body, generate_timeout)
                     .await;
             spawn_cleanup(guard);
-            let (text, generate_ms) = gen?;
+            let generated = gen?;
             Ok(GeminiGenerateResult {
                 operation,
-                text,
+                text: generated.text,
                 model: model.to_string(),
                 prompt_version: prompt_version.to_string(),
                 latency_ms: t0.elapsed().as_millis() as u64,
@@ -311,10 +323,11 @@ async fn generate_with_transport(
                     files_upload_ms: Some(up.upload_ms),
                     files_poll_ms: Some(up.poll_ms),
                     files_poll_count: Some(up.poll_count),
-                    generate_ms: Some(generate_ms),
+                    generate_ms: Some(generated.duration_ms),
                     delete_ms: None,
                     ..Default::default()
                 },
+                usage: generated.usage,
             })
         }
     }
@@ -335,19 +348,20 @@ async fn generate_with_remote_file(
         &file.mime_type,
         &file.uri,
     );
-    let (text, generate_ms) =
+    let generated =
         super::client::generate_content_with_model(api_key, model, &body, generate_timeout).await?;
     Ok(GeminiGenerateResult {
         operation,
-        text,
+        text: generated.text,
         model: model.to_string(),
         prompt_version: prompt_version.to_string(),
-        latency_ms: generate_ms,
+        latency_ms: generated.duration_ms,
         remote_file_name: Some(file.name.clone()),
         transport: Some(GeminiAudioTransport::FilesApi),
         timing: GeminiStageTiming {
-            generate_ms: Some(generate_ms),
+            generate_ms: Some(generated.duration_ms),
             ..Default::default()
         },
+        usage: generated.usage,
     })
 }

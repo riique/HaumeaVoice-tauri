@@ -72,6 +72,7 @@ pub fn mock_transcribe(
         remote_file_name: Some(name),
         transport: Some(super::transport::GeminiAudioTransport::FilesApi),
         timing: Default::default(),
+        usage: Default::default(),
     })
 }
 
@@ -100,6 +101,7 @@ pub fn mock_refine(
         remote_file_name: Some(name),
         transport: Some(super::transport::GeminiAudioTransport::FilesApi),
         timing: Default::default(),
+        usage: Default::default(),
     })
 }
 

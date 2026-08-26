@@ -2,19 +2,27 @@ pub mod audio;
 pub mod audio_processing;
 pub mod audio_store;
 pub mod commands;
+pub mod context;
 pub mod deepgram;
 pub mod gemini;
 pub mod groq;
 pub mod history;
+pub mod learning;
 pub mod mic_control;
 pub mod models;
+pub mod native_messaging;
 pub mod openrouter;
+pub mod output_policy;
 pub mod pipeline_contract;
+pub mod pipeline_run;
 pub mod sanitizer_json;
+pub mod scratchpad;
 pub mod secrets;
 pub mod settings;
 pub mod shortcuts;
+pub mod snippets;
 pub mod transcription;
+pub mod transformations;
 pub mod vocabulary;
 
 use models::{GadgetSessionAnchor, GadgetVisualState, SharedState, WidgetVisibilityMode};
@@ -980,6 +988,10 @@ pub fn run() {
 
                         // Lightweight UI preferences (gadget compact mode).
                         settings::init(dir.join("settings.json"));
+                        context::init(dir.clone());
+                        scratchpad::init(dir.clone());
+                        snippets::init(dir.clone());
+                        learning::init(dir.clone());
                         *state.compact_mode.write() = settings::load_compact();
                         *state.widget_visibility_mode.write() =
                             settings::load_widget_visibility_mode();
@@ -1004,6 +1016,11 @@ pub fn run() {
                             settings::load_gemini_fallback_to_whisper();
                         *state.file_tagging_enabled.write() = settings::load_file_tagging_enabled();
                         *state.gemini_pipelines.write() = settings::load_gemini_pipelines();
+                        *state.context_preferences.write() = settings::load_context_preferences();
+                        *state.output_profiles.write() = settings::load_output_profiles();
+                        *state.formatting_level.write() = settings::load_formatting_level();
+                        *state.dictation_destination.write() =
+                            settings::load_dictation_destination();
                     }
                     Err(e) => {
                         log::warn!("history: could not resolve app data dir: {}", e);
@@ -1094,10 +1111,22 @@ pub fn run() {
             commands::start_mic_test,
             commands::stop_mic_test,
             commands::retry_transcription,
+            commands::retry_transcription_with_fallback,
+            commands::undo_ai_edit,
             commands::get_autostart,
             commands::set_autostart,
             commands::get_dev_mode,
             commands::set_dev_mode,
+            commands::get_context_preferences,
+            commands::set_context_preferences,
+            commands::get_output_policy_config,
+            commands::set_output_policy_config,
+            commands::get_scratchpad_notes,
+            commands::delete_scratchpad_note,
+            commands::get_snippets,
+            commands::set_snippets,
+            commands::get_vocabulary_suggestions,
+            commands::resolve_vocabulary_suggestion,
             commands::get_sanitizer_enabled,
             commands::set_sanitizer_enabled,
         ])

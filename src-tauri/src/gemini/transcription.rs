@@ -28,9 +28,14 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
         .or_else(|| estimate_wav_duration_ms(&req.audio_bytes));
     let transport = select_gemini_audio_transport(req.audio_bytes.len(), duration, mime)?;
     let generate_timeout = adaptive_generate_timeout(duration, req.audio_bytes.len());
-    let prompt = fast_accurate_transcription_prompt(&req.glossary_block, req.file_tagging_enabled);
+    let mut prompt =
+        fast_accurate_transcription_prompt(&req.glossary_block, req.file_tagging_enabled);
+    if let Some(context) = req.untrusted_context.as_deref() {
+        prompt.user_prompt.push_str("\n\n");
+        prompt.user_prompt.push_str(context);
+    }
 
-    let (text, timing, remote) = match transport {
+    let (text, timing, remote, usage) = match transport {
         GeminiAudioTransport::Inline => {
             let tb = std::time::Instant::now();
             let b64 = general_purpose::STANDARD.encode(&req.audio_bytes);
@@ -38,17 +43,18 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
             let body =
                 build_inline_request(&prompt.system_instruction, &prompt.user_prompt, mime, &b64)
                     .for_fast_accurate();
-            let (text, generate_ms) =
+            let generated =
                 generate_content_with_model(&req.api_key, &req.model, &body, generate_timeout)
                     .await?;
             (
-                text,
+                generated.text,
                 GeminiStageTiming {
                     base64_ms: Some(base64_ms),
-                    generate_ms: Some(generate_ms),
+                    generate_ms: Some(generated.duration_ms),
                     ..Default::default()
                 },
                 None,
+                generated.usage,
             )
         }
         GeminiAudioTransport::FilesApi => {
@@ -66,18 +72,19 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
                 generate_content_with_model(&req.api_key, &req.model, &body, generate_timeout)
                     .await;
             spawn_cleanup(guard);
-            let (text, generate_ms) = gen?;
+            let generated = gen?;
             (
-                text,
+                generated.text,
                 GeminiStageTiming {
                     files_upload_ms: Some(up.upload_ms),
                     files_poll_ms: Some(up.poll_ms),
                     files_poll_count: Some(up.poll_count),
-                    generate_ms: Some(generate_ms),
+                    generate_ms: Some(generated.duration_ms),
                     delete_ms: None, // async off critical path
                     ..Default::default()
                 },
                 Some(name),
+                generated.usage,
             )
         }
     };
@@ -91,5 +98,6 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
         remote_file_name: remote,
         transport: Some(transport),
         timing,
+        usage,
     })
 }

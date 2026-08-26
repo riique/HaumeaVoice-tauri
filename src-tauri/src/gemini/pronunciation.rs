@@ -56,8 +56,10 @@ pub async fn evaluate_pronunciation(
         audio_bytes.len()
     );
 
-    let (feedback, _) =
-        generate_content_with_model(api_key, PRONUNCIATION_MODEL, &body, generate_timeout).await?;
+    let feedback =
+        generate_content_with_model(api_key, PRONUNCIATION_MODEL, &body, generate_timeout)
+            .await?
+            .text;
     if feedback.trim().is_empty() {
         return Err("o Gemini não retornou nenhum feedback".to_string());
     }

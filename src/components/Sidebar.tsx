@@ -7,6 +7,7 @@ import {
   Home,
   Keyboard,
   Settings,
+  NotebookPen,
   type LucideIcon,
 } from "lucide-react";
 import type { ViewKey } from "../views";
@@ -15,6 +16,7 @@ const NAV: { key: ViewKey; label: string; icon: LucideIcon }[] = [
   { key: "inicio", label: "Início", icon: Home },
   { key: "transcricao", label: "Transcrição", icon: FileAudio },
   { key: "historico", label: "Histórico", icon: History },
+  { key: "scratchpad", label: "Scratchpad", icon: NotebookPen },
   { key: "atalhos", label: "Atalhos", icon: Keyboard },
   { key: "configuracoes", label: "Configurações", icon: Settings },
 ];

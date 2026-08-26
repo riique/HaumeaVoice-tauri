@@ -185,6 +185,27 @@ pub struct GenerateContentResponse {
     pub candidates: Vec<Candidate>,
     #[serde(default)]
     pub error: Option<ApiErrorBody>,
+    #[serde(default, rename = "usageMetadata")]
+    pub usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GeminiUsageMetadata {
+    #[serde(default, rename = "promptTokenCount")]
+    pub prompt_token_count: Option<u64>,
+    #[serde(default, rename = "candidatesTokenCount")]
+    pub candidates_token_count: Option<u64>,
+    #[serde(default, rename = "totalTokenCount")]
+    pub total_token_count: Option<u64>,
+    #[serde(default, rename = "thoughtsTokenCount")]
+    pub thoughts_token_count: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct GenerateContentOutcome {
+    pub text: String,
+    pub duration_ms: u64,
+    pub usage: crate::pipeline_run::UsageRecord,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,7 +283,7 @@ pub async fn generate_content_with_model(
     model: &str,
     body: &GenerateContentRequest,
     timeout: Duration,
-) -> Result<(String, u64), String> {
+) -> Result<GenerateContentOutcome, String> {
     require_api_key(api_key)?;
     let client = http_client()?;
     let url = generate_url(model, api_key);
@@ -296,8 +317,30 @@ pub async fn generate_content_with_model(
 
     let parsed: GenerateContentResponse = serde_json::from_str(&body_text)
         .map_err(|e| format!("falha ao interpretar a resposta do Gemini: {}", e))?;
+    let usage = parsed
+        .usage_metadata
+        .as_ref()
+        .map(|metadata| {
+            let mut usage = crate::pipeline_run::UsageRecord {
+                input_tokens: metadata.prompt_token_count,
+                output_tokens: metadata.candidates_token_count,
+                total_tokens: metadata.total_token_count,
+                ..Default::default()
+            };
+            if let Some(thoughts) = metadata.thoughts_token_count {
+                usage
+                    .metadata
+                    .insert("thoughts_tokens".into(), thoughts.into());
+            }
+            usage
+        })
+        .unwrap_or_default();
     let text = extract_text(parsed)?;
-    Ok((text, generate_ms))
+    Ok(GenerateContentOutcome {
+        text,
+        duration_ms: generate_ms,
+        usage,
+    })
 }
 
 /// Build generateContent body with a real system instruction + user text + inline audio.

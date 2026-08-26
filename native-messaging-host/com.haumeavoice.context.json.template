@@ -1,0 +1,7 @@
+{
+  "name": "com.haumeavoice.context",
+  "description": "Haumea Voice limited browser context bridge",
+  "path": "__EXECUTABLE_PATH__",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://__EXTENSION_ID__/"]
+}

@@ -7,10 +7,12 @@ import {
   getShortcuts,
   getWidgetPreferences,
   retryTranscription,
+  retryTranscriptionWithFallback,
   setGadgetHitRect,
   setGadgetVisualState,
   toggleRecordingState,
   type HistoryEntry,
+  type PipelineProgressEvent,
   type WidgetPreferences,
   type WidgetVisibilityMode,
 } from "../lib/tauri";
@@ -38,6 +40,7 @@ export function GadgetApp() {
   const [shortcut, setShortcut] = useState("Ctrl + B");
   const [failure, setFailure] = useState<{ id: string; message: string; canRetry: boolean } | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const pillRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<GadgetState>("hidden");
   const modeRef = useRef<WidgetVisibilityMode>("auto");
@@ -71,6 +74,7 @@ export function GadgetApp() {
       listen("recording-initializing", () => {
         setFailure(null);
         setRetrying(false);
+        setProgressMessage(null);
         setAudioLevel(0);
         transition("appearing");
       }),
@@ -100,6 +104,7 @@ export function GadgetApp() {
         const entry = event.payload;
         if (entry.source && entry.source !== "mic") return;
         setRetrying(false);
+        setProgressMessage(null);
         if (entry.is_error) {
           setFailure({
             id: entry.id,
@@ -111,6 +116,15 @@ export function GadgetApp() {
           setFailure(null);
           transition("success");
         }
+      }),
+      listen<PipelineProgressEvent>("pipeline-progress", (event) => {
+        const progress = event.payload;
+        if (progress.kind === "complete") {
+          setProgressMessage(null);
+          return;
+        }
+        if (progress.message) setProgressMessage(progress.message);
+        if (progress.kind === "fallback_started") transition("processing_long");
       }),
       listen<WidgetPreferences>("widget-preferences-changed", (event) => {
         const mode = event.payload.visibility_mode;
@@ -188,6 +202,17 @@ export function GadgetApp() {
     }
   };
 
+  const useFallback = async () => {
+    if (!failure?.canRetry || retrying) return;
+    setRetrying(true); setProgressMessage("Usando rota alternativa…"); transition("processing_long");
+    try { await retryTranscriptionWithFallback(failure.id); }
+    catch (error) {
+      setRetrying(false);
+      setFailure((current) => current ? { ...current, message: typeof error === "string" ? error : "O fallback falhou." } : current);
+      transition("error");
+    }
+  };
+
   if (state === "hidden") return null;
 
   return (
@@ -210,9 +235,11 @@ export function GadgetApp() {
           shortcut={shortcut}
           failure={failure}
           retrying={retrying}
+          progressMessage={progressMessage}
           onToggle={() => void startOrStop()}
           onCancel={() => void cancel()}
           onRetry={() => void retry()}
+          onFallback={() => void useFallback()}
         />
       </div>
     </div>
@@ -225,12 +252,14 @@ interface GadgetPillProps {
   shortcut: string;
   failure: { id: string; message: string; canRetry: boolean } | null;
   retrying: boolean;
+  progressMessage: string | null;
   onToggle: () => void;
   onCancel: () => void;
   onRetry: () => void;
+  onFallback: () => void;
 }
 
-function GadgetPill({ state, level, shortcut, failure, retrying, onToggle, onCancel, onRetry }: GadgetPillProps) {
+function GadgetPill({ state, level, shortcut, failure, retrying, progressMessage, onToggle, onCancel, onRetry, onFallback }: GadgetPillProps) {
   if (state === "idle") {
     return <button type="button" onClick={onToggle} className="haumea-bar haumea-bar--idle" aria-label={`Iniciar ditado. ${shortcut}`}><MiniWave /></button>;
   }
@@ -254,7 +283,7 @@ function GadgetPill({ state, level, shortcut, failure, retrying, onToggle, onCan
     return (
       <div className={`haumea-bar ${state === "processing" ? "haumea-bar--processing" : "haumea-bar--processing-long"}`} role="status">
         <ProcessingDots />
-        {state === "processing_long" && <span className="haumea-bar__status">{retrying ? "Tentando novamente…" : "Transcrevendo…"}</span>}
+        {(state === "processing_long" || progressMessage) && <span className="haumea-bar__status">{retrying ? "Tentando novamente…" : progressMessage || "Transcrevendo…"}</span>}
       </div>
     );
   }
@@ -267,9 +296,9 @@ function GadgetPill({ state, level, shortcut, failure, retrying, onToggle, onCan
         <AlertCircle className="h-4 w-4 shrink-0 text-[#ffaaa3]" aria-hidden />
         <span className="haumea-bar__error-text">Falha na transcrição</span>
         {failure?.canRetry ? (
-          <button type="button" onClick={onRetry} disabled={retrying} className="haumea-bar__retry" aria-label="Tentar transcrever o áudio salvo novamente">
+          <><button type="button" onClick={onRetry} disabled={retrying} className="haumea-bar__retry" aria-label="Tentar transcrever o áudio salvo novamente">
             <RefreshCw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} aria-hidden /><span>Tentar novamente</span>
-          </button>
+          </button><button type="button" onClick={onFallback} disabled={retrying} className="haumea-bar__retry" aria-label="Usar uma rota alternativa de transcrição"><span>Usar fallback</span></button></>
         ) : (
           <button type="button" onClick={onCancel} className="haumea-bar__dismiss" aria-label="Dispensar erro"><X className="h-3.5 w-3.5" aria-hidden /></button>
         )}
@@ -342,7 +371,7 @@ export function GadgetPreviewApp() {
         {states.map((previewState) => (
           <figure key={previewState}>
             <div className="gadget-preview__stage">
-              <GadgetPill state={previewState} level={level} shortcut="Ctrl + B" failure={{ id: "preview", message: "Falha na transcrição", canRetry: true }} retrying={false} onToggle={() => undefined} onCancel={() => undefined} onRetry={() => undefined} />
+              <GadgetPill state={previewState} level={level} shortcut="Ctrl + B" failure={{ id: "preview", message: "Falha na transcrição", canRetry: true }} retrying={false} progressMessage={previewState === "processing_long" ? "Groq indisponível · usando Deepgram" : null} onToggle={() => undefined} onCancel={() => undefined} onRetry={() => undefined} onFallback={() => undefined} />
             </div>
             <figcaption>{previewState}</figcaption>
           </figure>

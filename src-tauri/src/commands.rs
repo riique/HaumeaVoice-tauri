@@ -448,9 +448,25 @@ pub fn get_recording_state(state: State<'_, SharedState>) -> bool {
 /// kept in sync across invocations by the `history` module.
 #[tauri::command]
 pub async fn get_history() -> Vec<crate::models::HistoryEntry> {
-    tokio::task::spawn_blocking(crate::history::load_all)
-        .await
-        .unwrap_or_default()
+    tokio::task::spawn_blocking(|| {
+        let developer_mode = crate::settings::load_dev_mode();
+        let mut entries = crate::history::load_all();
+        if !developer_mode {
+            for entry in &mut entries {
+                entry.debug_info = None;
+                for run in &mut entry.pipeline_runs {
+                    run.debug_info = None;
+                    for attempt in &mut run.attempts {
+                        attempt.result.request_sanitized = None;
+                        attempt.result.response_sanitized = None;
+                    }
+                }
+            }
+        }
+        entries
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -589,9 +605,29 @@ pub async fn delete_history_entry(id: String) -> Result<(), CommandError> {
 /// Updates the final text of a history entry (manual edit). Keeps evaluation.
 #[tauri::command]
 pub async fn update_history_text(id: String, text: String) -> Result<(), CommandError> {
-    let ok = tokio::task::spawn_blocking(move || crate::history::update_text(&id, &text))
-        .await
-        .map_err(|e| CommandError::Internal(e.to_string()))?;
+    let entry = crate::history::get(&id)
+        .ok_or_else(|| CommandError::Internal("entrada de histórico não encontrada".into()))?;
+    let before = entry.text.clone();
+    let learning_context = entry
+        .pipeline_runs
+        .last()
+        .map(|run| crate::learning::CorrectionContext {
+            application: run.context.process.clone(),
+            domain: run.context.domain.clone(),
+            profile_id: run.profile_id.clone(),
+        })
+        .unwrap_or_default();
+    let ok = tokio::task::spawn_blocking(move || {
+        let updated = crate::history::update_text(&id, &text);
+        if updated {
+            if let Err(error) = crate::learning::record(&before, &text, learning_context) {
+                log::warn!("learning: failed to record correction: {}", error);
+            }
+        }
+        updated
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))?;
     if ok {
         Ok(())
     } else {
@@ -599,6 +635,55 @@ pub async fn update_history_text(id: String, text: String) -> Result<(), Command
             "entrada de histórico não encontrada".into(),
         ))
     }
+}
+
+#[tauri::command]
+pub async fn get_vocabulary_suggestions(
+) -> Result<Vec<crate::learning::CorrectionEvent>, CommandError> {
+    tokio::task::spawn_blocking(crate::learning::suggestions)
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))
+}
+
+#[tauri::command]
+pub async fn resolve_vocabulary_suggestion(
+    state: State<'_, SharedState>,
+    id: String,
+    accepted: bool,
+) -> Result<(), CommandError> {
+    let event = tokio::task::spawn_blocking(move || crate::learning::resolve(&id, accepted))
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))?
+        .map_err(CommandError::Internal)?;
+    if accepted {
+        let event = event.ok_or_else(|| CommandError::Internal("suggestion not found".into()))?;
+        let mut vocabulary = state.vocabulary.read().clone();
+        if let Some(term) = vocabulary
+            .iter_mut()
+            .find(|term| term.canonical == event.after)
+        {
+            if !term
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(&event.before))
+            {
+                term.aliases.push(event.before);
+            }
+        } else {
+            vocabulary.push(crate::vocabulary::VocabularyTerm {
+                canonical: event.after,
+                aliases: vec![event.before],
+                category: crate::vocabulary::VocabularyCategory::Other,
+                strict: true,
+                enabled: true,
+            });
+        }
+        let vocabulary = crate::vocabulary::normalize_and_validate(vocabulary)
+            .map_err(CommandError::InvalidPayload)?;
+        crate::settings::save_vocabulary(vocabulary.clone());
+        *state.vocabulary.write() = vocabulary;
+    }
+    Ok(())
 }
 
 /// `save_system_prompt`
@@ -839,9 +924,8 @@ pub async fn get_dev_mode() -> Result<bool, CommandError> {
 
 /// `set_dev_mode`
 ///
-/// Persists the developer-mode flag. Capture of the sanitizer request happens
-/// unconditionally on every transcription; this flag only gates the UI that
-/// surfaces it in the Histórico.
+/// Persists the developer-mode flag. Raw request/response details are removed
+/// from the history IPC payload while this flag is disabled.
 #[tauri::command]
 pub async fn set_dev_mode(value: bool) -> Result<(), CommandError> {
     log::info!("set_dev_mode: {}", value);
@@ -851,6 +935,134 @@ pub async fn set_dev_mode(value: bool) -> Result<(), CommandError> {
     })
     .await
     .map_err(|e| CommandError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub fn get_context_preferences(
+    state: State<'_, SharedState>,
+) -> crate::context::ContextPreferences {
+    state.context_preferences.read().clone()
+}
+
+#[tauri::command]
+pub async fn set_context_preferences(
+    state: State<'_, SharedState>,
+    mut preferences: crate::context::ContextPreferences,
+) -> Result<crate::context::ContextPreferences, CommandError> {
+    preferences.max_context_chars = preferences.max_context_chars.clamp(100, 4_000);
+    let persisted = preferences.clone();
+    tokio::task::spawn_blocking(move || crate::settings::save_context_preferences(persisted))
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))?;
+    *state.context_preferences.write() = preferences.clone();
+    Ok(preferences)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputPolicyConfig {
+    pub formatting_level: crate::output_policy::FormattingLevel,
+    pub destination: crate::output_policy::DictationDestination,
+    #[serde(default)]
+    pub profiles: Vec<crate::output_policy::OutputProfile>,
+    #[serde(default)]
+    pub temporary_override: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_output_policy_config(state: State<'_, SharedState>) -> OutputPolicyConfig {
+    OutputPolicyConfig {
+        formatting_level: *state.formatting_level.read(),
+        destination: *state.dictation_destination.read(),
+        profiles: state.output_profiles.read().clone(),
+        temporary_override: state.temporary_profile_override.read().clone(),
+    }
+}
+
+#[tauri::command]
+pub async fn set_output_policy_config(
+    state: State<'_, SharedState>,
+    config: OutputPolicyConfig,
+) -> Result<OutputPolicyConfig, CommandError> {
+    let mut ids = std::collections::HashSet::new();
+    for profile in &config.profiles {
+        let id = profile.id.trim();
+        if id.is_empty() || !ids.insert(id.to_ascii_lowercase()) {
+            return Err(CommandError::InvalidPayload(
+                "profile ids must be non-empty and unique".into(),
+            ));
+        }
+        if profile.name.trim().is_empty()
+            || profile
+                .style_instruction
+                .as_deref()
+                .is_some_and(|value| value.chars().count() > 2_000)
+        {
+            return Err(CommandError::InvalidPayload(
+                "invalid profile name or style instruction".into(),
+            ));
+        }
+    }
+    if let Some(override_id) = config.temporary_override.as_deref() {
+        if !config
+            .profiles
+            .iter()
+            .any(|profile| profile.enabled && profile.id == override_id)
+        {
+            return Err(CommandError::InvalidPayload(
+                "temporary override references an unavailable profile".into(),
+            ));
+        }
+    }
+
+    let persisted_profiles = config.profiles.clone();
+    let persisted_level = config.formatting_level;
+    let persisted_destination = config.destination;
+    tokio::task::spawn_blocking(move || {
+        crate::settings::save_output_profiles(persisted_profiles);
+        crate::settings::save_formatting_level(persisted_level);
+        crate::settings::save_dictation_destination(persisted_destination);
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?;
+
+    *state.formatting_level.write() = config.formatting_level;
+    *state.dictation_destination.write() = config.destination;
+    *state.output_profiles.write() = config.profiles.clone();
+    *state.temporary_profile_override.write() = config.temporary_override.clone();
+    Ok(config)
+}
+
+#[tauri::command]
+pub async fn get_scratchpad_notes() -> Result<Vec<crate::scratchpad::ScratchpadNote>, CommandError>
+{
+    tokio::task::spawn_blocking(crate::scratchpad::list)
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))
+}
+
+#[tauri::command]
+pub async fn delete_scratchpad_note(id: String) -> Result<bool, CommandError> {
+    tokio::task::spawn_blocking(move || crate::scratchpad::delete(&id))
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))?
+        .map_err(CommandError::Internal)
+}
+
+#[tauri::command]
+pub async fn get_snippets() -> Result<Vec<crate::snippets::VoiceSnippet>, CommandError> {
+    tokio::task::spawn_blocking(crate::snippets::list)
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))
+}
+
+#[tauri::command]
+pub async fn set_snippets(
+    snippets: Vec<crate::snippets::VoiceSnippet>,
+) -> Result<Vec<crate::snippets::VoiceSnippet>, CommandError> {
+    tokio::task::spawn_blocking(move || crate::snippets::replace(snippets))
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))?
+        .map_err(CommandError::InvalidPayload)
 }
 
 /// `get_sanitizer_enabled`
@@ -976,6 +1188,27 @@ pub async fn retry_transcription(
     log::info!("retry_transcription: {}", id);
     let shared = state.inner().clone();
     crate::audio::retry_transcription_handler(&shared, &id)
+        .await
+        .map_err(CommandError::Internal)
+}
+
+#[tauri::command]
+pub async fn retry_transcription_with_fallback(
+    state: State<'_, SharedState>,
+    id: String,
+) -> Result<String, CommandError> {
+    crate::audio::retry_transcription_handler_with_strategy(state.inner(), &id, true)
+        .await
+        .map_err(CommandError::Internal)
+}
+
+#[tauri::command]
+pub async fn undo_ai_edit(
+    state: State<'_, SharedState>,
+    id: String,
+    version: String,
+) -> Result<crate::audio::UndoAiEditOutcome, CommandError> {
+    crate::audio::undo_ai_edit(state.inner(), &id, &version)
         .await
         .map_err(CommandError::Internal)
 }

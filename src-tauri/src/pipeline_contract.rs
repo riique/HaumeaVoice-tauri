@@ -1,13 +1,13 @@
-//! Pipeline contracts for the future transcription modes.
+//! Stable product-mode identifiers and request compatibility helpers.
 //!
-//! Phase 01: types, serialization, legacy compatibility helpers, and local
-//! mocks only. Nothing here is wired to the live `audio.rs` path or the UI yet.
-//! Existing engine / dual / Deepgram / sanitizer settings remain authoritative
-//! at runtime until a later phase switches the orchestrator over.
+//! [`PipelineRun`] is the single canonical execution result. The legacy
+//! `PipelineResult` name remains only as a type alias for source compatibility.
 
-use crate::models::{
-    DeepgramMode, HistoryEntry, SanitizerDebug, SanitizerModel, TranscriptionEngine,
+use crate::models::{DeepgramMode, SanitizerModel, TranscriptionEngine};
+pub use crate::pipeline_run::{
+    PipelineRun, PipelineTimings, PipelineWarning, StageKind as PipelineStage, StageRecord,
 };
+pub type PipelineResult = PipelineRun;
 use serde::{Deserialize, Deserializer, Serialize};
 
 // ─── Modes & content ────────────────────────────────────────────────────────
@@ -130,6 +130,15 @@ impl<'de> Deserialize<'de> for ContentType {
 }
 
 impl ContentType {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "auto" | "general-speech" => Some(Self::Auto),
+            "programming" => Some(Self::Programming),
+            "study" => Some(Self::Study),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -243,29 +252,6 @@ pub struct GeminiPipelineConfig {
 
 // ─── Stage identity ─────────────────────────────────────────────────────────
 
-/// Named pipeline stage for timings, warnings, and intermediate outputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PipelineStage {
-    Whisper,
-    Deepgram,
-    Sanitizer,
-    GeminiAudio,
-    Finalize,
-}
-
-impl PipelineStage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Whisper => "whisper",
-            Self::Deepgram => "deepgram",
-            Self::Sanitizer => "sanitizer",
-            Self::GeminiAudio => "gemini_audio",
-            Self::Finalize => "finalize",
-        }
-    }
-}
-
 // ─── Request / result contracts ─────────────────────────────────────────────
 
 /// Input to a future pipeline run. Carries audio + resolved preferences.
@@ -341,251 +327,6 @@ impl PipelineRequest {
             source: source.into(),
             duration_ms,
             copy_to_clipboard,
-        }
-    }
-}
-
-/// Per-stage outcome (success or structured failure).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PipelineStageResult {
-    pub stage: PipelineStage,
-    pub ok: bool,
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub latency_ms: u64,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-/// Non-fatal pipeline notice surfaced to logs / future UI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PipelineWarning {
-    pub stage: PipelineStage,
-    pub code: String,
-    pub message: String,
-}
-
-impl PipelineWarning {
-    pub fn new(stage: PipelineStage, code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            stage,
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-}
-
-/// Latency breakdown for a full run.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PipelineTimings {
-    #[serde(default)]
-    pub whisper_ms: Option<u64>,
-    #[serde(default)]
-    pub deepgram_ms: Option<u64>,
-    #[serde(default)]
-    pub sanitizer_ms: Option<u64>,
-    #[serde(default)]
-    pub gemini_ms: Option<u64>,
-    #[serde(default)]
-    pub total_ms: u64,
-}
-
-impl PipelineTimings {
-    pub fn recompute_total(&mut self) {
-        self.total_ms = self.whisper_ms.unwrap_or(0)
-            + self.deepgram_ms.unwrap_or(0)
-            + self.sanitizer_ms.unwrap_or(0)
-            + self.gemini_ms.unwrap_or(0);
-    }
-}
-
-/// Full outcome of a pipeline run (future orchestrator return type).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PipelineResult {
-    pub id: String,
-    pub mode: TranscriptionMode,
-    #[serde(default)]
-    pub content_type: ContentType,
-    /// Final text delivered to clipboard / history (may be empty on hard fail).
-    pub final_text: String,
-    #[serde(default)]
-    pub whisper_text: Option<String>,
-    #[serde(default)]
-    pub deepgram_text: Option<String>,
-    #[serde(default)]
-    pub sanitizer_text: Option<String>,
-    #[serde(default)]
-    pub gemini_text: Option<String>,
-    #[serde(default)]
-    pub stages: Vec<PipelineStageResult>,
-    #[serde(default)]
-    pub warnings: Vec<PipelineWarning>,
-    #[serde(default)]
-    pub timings: PipelineTimings,
-    /// Models actually used (ids as sent to providers).
-    #[serde(default)]
-    pub models_used: Vec<String>,
-    /// True when final_text came from a fallback path (raw STT, secondary engine, etc.).
-    #[serde(default)]
-    pub used_fallback: bool,
-    #[serde(default)]
-    pub fallback_reason: Option<String>,
-    #[serde(default)]
-    pub is_error: bool,
-    #[serde(default)]
-    pub error_message: Option<String>,
-    #[serde(default)]
-    pub debug_info: Option<SanitizerDebug>,
-    /// Engine label written to history (legacy-compatible strings).
-    #[serde(default)]
-    pub history_engine_label: String,
-}
-
-impl PipelineResult {
-    pub fn success(
-        id: impl Into<String>,
-        mode: TranscriptionMode,
-        final_text: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            mode,
-            content_type: ContentType::default(),
-            final_text: final_text.into(),
-            whisper_text: None,
-            deepgram_text: None,
-            sanitizer_text: None,
-            gemini_text: None,
-            stages: Vec::new(),
-            warnings: Vec::new(),
-            timings: PipelineTimings::default(),
-            models_used: Vec::new(),
-            used_fallback: false,
-            fallback_reason: None,
-            is_error: false,
-            error_message: None,
-            debug_info: None,
-            history_engine_label: String::new(),
-        }
-    }
-
-    pub fn hard_error(
-        id: impl Into<String>,
-        mode: TranscriptionMode,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            mode,
-            content_type: ContentType::default(),
-            final_text: String::new(),
-            whisper_text: None,
-            deepgram_text: None,
-            sanitizer_text: None,
-            gemini_text: None,
-            stages: Vec::new(),
-            warnings: Vec::new(),
-            timings: PipelineTimings::default(),
-            models_used: Vec::new(),
-            used_fallback: false,
-            fallback_reason: None,
-            is_error: true,
-            error_message: Some(message.into()),
-            debug_info: None,
-            history_engine_label: String::new(),
-        }
-    }
-
-    /// Projects this result onto a legacy [`HistoryEntry`] without dropping fields
-    /// the Histórico already understands.
-    pub fn to_history_entry(
-        &self,
-        date: impl Into<String>,
-        audio_path: Option<String>,
-        duration_ms: u64,
-        source: impl Into<String>,
-        deepgram_mode: Option<String>,
-    ) -> HistoryEntry {
-        let words = self.final_text.split_whitespace().count();
-        let transcription_latency_ms = self
-            .timings
-            .whisper_ms
-            .into_iter()
-            .chain(self.timings.deepgram_ms)
-            .max();
-        let sanitizer_latency_ms = self.timings.sanitizer_ms;
-        let total = if self.timings.total_ms > 0 {
-            self.timings.total_ms
-        } else {
-            transcription_latency_ms.unwrap_or(0) + sanitizer_latency_ms.unwrap_or(0)
-        };
-        let engine = if self.history_engine_label.is_empty() {
-            format!("{:?}", self.mode)
-        } else {
-            self.history_engine_label.clone()
-        };
-        HistoryEntry {
-            id: self.id.clone(),
-            date: date.into(),
-            words,
-            engine,
-            text: self.final_text.clone(),
-            audio_path,
-            evaluation: None,
-            duration_ms,
-            source: source.into(),
-            latency_ms: total,
-            throughput: 0.0,
-            transcription_latency_ms,
-            sanitizer_latency_ms,
-            transcription_throughput: None,
-            sanitizer_throughput: None,
-            realtime_factor: None,
-            deepgram_mode,
-            total_tokens: Some((words as f64 * 1.3).round() as usize),
-            is_error: Some(self.is_error),
-            error_message: self.error_message.clone(),
-            debug_info: self.debug_info.clone(),
-            mode: Some(self.mode.as_str().to_string()),
-            model: self.models_used.first().cloned(),
-            stages: if self.stages.is_empty() {
-                None
-            } else {
-                Some(
-                    self.stages
-                        .iter()
-                        .map(|s| s.stage.as_str().to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-            },
-            used_fallback: Some(self.used_fallback),
-            fallback_reason: self.fallback_reason.clone(),
-            content_type: Some(self.content_type.as_str().to_string()),
-            whisper_text: self.whisper_text.clone(),
-            sanitizer_text: None,
-            gemini_text: self.gemini_text.clone(),
-            warnings: if self.warnings.is_empty() {
-                None
-            } else {
-                Some(self.warnings.iter().map(|w| w.message.clone()).collect())
-            },
-            audio_prepare_ms: None,
-            base64_ms: None,
-            whisper_ms: self.timings.whisper_ms,
-            sanitizer_ms: self.timings.sanitizer_ms,
-            files_upload_ms: None,
-            files_poll_ms: None,
-            files_poll_count: None,
-            gemini_generate_ms: self.timings.gemini_ms,
-            gemini_delete_ms: None,
-            strict_literals_ms: None,
-            clipboard_ms: None,
-            total_pipeline_ms: Some(total),
-            gemini_transport: None,
         }
     }
 }
@@ -883,10 +624,40 @@ pub struct MockProviders {
     pub gemini: Option<Result<String, String>>,
 }
 
+fn mock_stage(
+    stage: PipelineStage,
+    ok: bool,
+    text: Option<String>,
+    model: Option<String>,
+    latency_ms: u64,
+    error: Option<String>,
+) -> StageRecord {
+    let mut record = StageRecord::completed(stage, latency_ms);
+    record.model = model;
+    record.status = if ok {
+        crate::pipeline_run::StageStatus::Success
+    } else {
+        crate::pipeline_run::StageStatus::Failed
+    };
+    if let Some(text) = text {
+        record.metadata.insert(
+            "output_chars".into(),
+            serde_json::Value::from(text.chars().count() as u64),
+        );
+    }
+    record.error = error.map(|message| crate::pipeline_run::PipelineError {
+        kind: crate::pipeline_run::PipelineErrorKind::Provider,
+        code: "mock_provider_failed".into(),
+        message,
+        retryable: true,
+    });
+    record
+}
+
 /// Runs a **local** mock pipeline for the given mode. Never touches the network.
 pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> PipelineResult {
     let mut result = PipelineResult::success(&req.id, req.mode, "");
-    result.content_type = req.content_type;
+    result.content_hint = req.content_type;
     result.history_engine_label = match (req.dual_engine, req.engine) {
         (true, _) => "Groq+Deepgram".into(),
         (false, TranscriptionEngine::DeepgramNova3) => "DeepgramNova3".into(),
@@ -910,26 +681,26 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
             Ok(t) => {
                 whisper_text = t.clone();
                 result.whisper_text = Some(t.clone());
-                result.stages.push(PipelineStageResult {
-                    stage: PipelineStage::Whisper,
-                    ok: true,
-                    text: Some(t),
-                    model: Some("whisper-large-v3-turbo".into()),
-                    latency_ms: 10,
-                    error: None,
-                });
+                result.journal.push(mock_stage(
+                    PipelineStage::Whisper,
+                    true,
+                    Some(t),
+                    Some("whisper-large-v3-turbo".into()),
+                    10,
+                    None,
+                ));
                 result.models_used.push("whisper-large-v3-turbo".into());
                 result.timings.whisper_ms = Some(10);
             }
             Err(e) => {
-                result.stages.push(PipelineStageResult {
-                    stage: PipelineStage::Whisper,
-                    ok: false,
-                    text: None,
-                    model: Some("whisper-large-v3-turbo".into()),
-                    latency_ms: 10,
-                    error: Some(e.clone()),
-                });
+                result.journal.push(mock_stage(
+                    PipelineStage::Whisper,
+                    false,
+                    None,
+                    Some("whisper-large-v3-turbo".into()),
+                    10,
+                    Some(e.clone()),
+                ));
                 if !want_deepgram && !req.mode.uses_gemini_audio() {
                     result.is_error = true;
                     result.error_message = Some(e);
@@ -945,33 +716,33 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
             Ok(t) => {
                 deepgram_text = t.clone();
                 result.deepgram_text = Some(t.clone());
-                result.stages.push(PipelineStageResult {
-                    stage: PipelineStage::Deepgram,
-                    ok: true,
-                    text: Some(t),
-                    model: Some("nova-3".into()),
-                    latency_ms: 12,
-                    error: None,
-                });
+                result.journal.push(mock_stage(
+                    PipelineStage::Deepgram,
+                    true,
+                    Some(t),
+                    Some("nova-3".into()),
+                    12,
+                    None,
+                ));
                 result.models_used.push("nova-3".into());
                 result.timings.deepgram_ms = Some(12);
             }
             Err(e) => {
-                result.stages.push(PipelineStageResult {
-                    stage: PipelineStage::Deepgram,
-                    ok: false,
-                    text: None,
-                    model: Some("nova-3".into()),
-                    latency_ms: 12,
-                    error: Some(e.clone()),
-                });
+                result.journal.push(mock_stage(
+                    PipelineStage::Deepgram,
+                    false,
+                    None,
+                    Some("nova-3".into()),
+                    12,
+                    Some(e.clone()),
+                ));
                 if whisper_text.is_empty() && !req.mode.uses_gemini_audio() {
                     result.is_error = true;
                     result.error_message = Some(e);
                     result.timings.recompute_total();
                     return result;
                 }
-                result.warnings.push(PipelineWarning::new(
+                result.journal_warnings.push(PipelineWarning::new(
                     PipelineStage::Deepgram,
                     "deepgram_failed",
                     e,
@@ -982,42 +753,38 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
 
     // Dual partial resolution when both were requested.
     if req.dual_engine {
-        let w = if result
-            .stages
-            .iter()
-            .any(|s| s.stage == PipelineStage::Whisper && s.ok)
-        {
+        let w = if result.journal.iter().any(|s| {
+            s.stage == PipelineStage::Whisper
+                && s.status == crate::pipeline_run::StageStatus::Success
+        }) {
             Ok(whisper_text.clone())
-        } else if result
-            .stages
-            .iter()
-            .any(|s| s.stage == PipelineStage::Whisper && !s.ok)
-        {
+        } else if result.journal.iter().any(|s| {
+            s.stage == PipelineStage::Whisper
+                && s.status == crate::pipeline_run::StageStatus::Failed
+        }) {
             Err(result
-                .stages
+                .journal
                 .iter()
                 .find(|s| s.stage == PipelineStage::Whisper)
-                .and_then(|s| s.error.clone())
+                .and_then(|s| s.error.as_ref().map(|error| error.message.clone()))
                 .unwrap_or_else(|| "whisper failed".into()))
         } else {
             Ok(String::new())
         };
-        let d = if result
-            .stages
-            .iter()
-            .any(|s| s.stage == PipelineStage::Deepgram && s.ok)
-        {
+        let d = if result.journal.iter().any(|s| {
+            s.stage == PipelineStage::Deepgram
+                && s.status == crate::pipeline_run::StageStatus::Success
+        }) {
             Ok(deepgram_text.clone())
-        } else if result
-            .stages
-            .iter()
-            .any(|s| s.stage == PipelineStage::Deepgram && !s.ok)
-        {
+        } else if result.journal.iter().any(|s| {
+            s.stage == PipelineStage::Deepgram
+                && s.status == crate::pipeline_run::StageStatus::Failed
+        }) {
             Err(result
-                .stages
+                .journal
                 .iter()
                 .find(|s| s.stage == PipelineStage::Deepgram)
-                .and_then(|s| s.error.clone())
+                .and_then(|s| s.error.as_ref().map(|error| error.message.clone()))
                 .unwrap_or_else(|| "deepgram failed".into()))
         } else {
             Ok(String::new())
@@ -1025,7 +792,7 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
         let (w2, d2, _eff, _dg, warns, hard) = resolve_dual_partial(w, d);
         whisper_text = w2;
         deepgram_text = d2;
-        result.warnings.extend(warns);
+        result.journal_warnings.extend(warns);
         if let Some(msg) = hard {
             result.is_error = true;
             result.error_message = Some(msg);
@@ -1062,26 +829,26 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
                 let (text, used_fb, reason, warns) =
                     resolve_sanitizer_output(Some(&raw), &whisper_text, &deepgram_text);
                 result.sanitizer_text = Some(raw);
-                result.warnings.extend(warns);
+                result.journal_warnings.extend(warns);
                 result.used_fallback = used_fb;
                 result.fallback_reason = reason;
                 result.final_text = text;
-                result.stages.push(PipelineStageResult {
-                    stage: PipelineStage::Sanitizer,
-                    ok: true,
-                    text: Some(result.final_text.clone()),
-                    model: Some(req.sanitizer.api_model_id().into()),
-                    latency_ms: 20,
-                    error: None,
-                });
+                result.journal.push(mock_stage(
+                    PipelineStage::Sanitizer,
+                    true,
+                    Some(result.final_text.clone()),
+                    Some(req.sanitizer.api_model_id().into()),
+                    20,
+                    None,
+                ));
                 result.models_used.push(req.sanitizer.api_model_id().into());
                 result.timings.sanitizer_ms = Some(20);
             }
             Err(e) => {
                 let (text, _, reason, warns) =
                     resolve_sanitizer_output(None, &whisper_text, &deepgram_text);
-                result.warnings.extend(warns);
-                result.warnings.push(PipelineWarning::new(
+                result.journal_warnings.extend(warns);
+                result.journal_warnings.push(PipelineWarning::new(
                     PipelineStage::Sanitizer,
                     "sanitizer_error",
                     e,
@@ -1089,14 +856,14 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
                 result.used_fallback = true;
                 result.fallback_reason = reason.or(Some("sanitizer_error".into()));
                 result.final_text = text;
-                result.stages.push(PipelineStageResult {
-                    stage: PipelineStage::Sanitizer,
-                    ok: false,
-                    text: Some(result.final_text.clone()),
-                    model: Some(req.sanitizer.api_model_id().into()),
-                    latency_ms: 20,
-                    error: result.fallback_reason.clone(),
-                });
+                result.journal.push(mock_stage(
+                    PipelineStage::Sanitizer,
+                    false,
+                    Some(result.final_text.clone()),
+                    Some(req.sanitizer.api_model_id().into()),
+                    20,
+                    result.fallback_reason.clone(),
+                ));
                 result.timings.sanitizer_ms = Some(20);
             }
         }
@@ -1120,19 +887,19 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
                     // Prefer non-empty Gemini refine when provided by mock.
                     result.final_text = t.clone();
                 }
-                result.stages.push(PipelineStageResult {
-                    stage: PipelineStage::GeminiAudio,
-                    ok: true,
-                    text: Some(t),
-                    model: Some("gemini-3.5-flash-lite".into()),
-                    latency_ms: 40,
-                    error: None,
-                });
+                result.journal.push(mock_stage(
+                    PipelineStage::GeminiAudio,
+                    true,
+                    Some(t),
+                    Some("gemini-3.5-flash-lite".into()),
+                    40,
+                    None,
+                ));
                 result.models_used.push("gemini-3.5-flash-lite".into());
                 result.timings.gemini_ms = Some(40);
             }
             Ok(_) => {
-                result.warnings.push(PipelineWarning::new(
+                result.journal_warnings.push(PipelineWarning::new(
                     PipelineStage::GeminiAudio,
                     "gemini_empty",
                     "Gemini devolveu texto vazio; mantendo etapa anterior.",
@@ -1144,7 +911,7 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
                 }
             }
             Err(e) => {
-                result.warnings.push(PipelineWarning::new(
+                result.journal_warnings.push(PipelineWarning::new(
                     PipelineStage::GeminiAudio,
                     "gemini_failed",
                     e,
@@ -1169,6 +936,7 @@ pub fn run_mock_pipeline(req: &PipelineRequest, mocks: &MockProviders) -> Pipeli
     }
 
     result.timings.recompute_total();
+    result.normalize();
     result
 }
 
@@ -1334,7 +1102,7 @@ mod tests {
     fn pipeline_result_serde_roundtrip() {
         let mut r = PipelineResult::success("42", TranscriptionMode::UltraPrecise, "olá mundo");
         r.whisper_text = Some("ola mundo".into());
-        r.warnings
+        r.journal_warnings
             .push(PipelineWarning::new(PipelineStage::Sanitizer, "x", "y"));
         r.timings.whisper_ms = Some(11);
         r.timings.sanitizer_ms = Some(22);
@@ -1343,11 +1111,12 @@ mod tests {
             "whisper-large-v3-turbo".into(),
             "openai/gpt-oss-120b".into(),
         ];
+        r.normalize();
         let json = serde_json::to_string_pretty(&r).unwrap();
         let back: PipelineResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.final_text, "olá mundo");
+        assert_eq!(back.canonical_text(), "olá mundo");
         assert_eq!(back.timings.total_ms, 33);
-        assert_eq!(back.warnings.len(), 1);
+        assert_eq!(back.journal_warnings.len(), 1);
         assert_eq!(back.mode, TranscriptionMode::UltraPrecise);
     }
 
@@ -1505,7 +1274,10 @@ mod tests {
         let out = run_mock_pipeline(&req, &mocks);
         assert!(!out.is_error);
         assert_eq!(out.final_text, "só deepgram");
-        assert!(out.warnings.iter().any(|w| w.code == "dual_whisper_failed"));
+        assert!(out
+            .journal_warnings
+            .iter()
+            .any(|w| w.code == "dual_whisper_failed"));
     }
 
     #[test]
@@ -1570,31 +1342,23 @@ mod tests {
     }
 
     #[test]
-    fn history_entry_from_pipeline_result() {
+    fn pipeline_result_alias_uses_canonical_transcript_versions() {
         let mut r = PipelineResult::success("99", TranscriptionMode::UltraFast, "duas palavras");
         r.history_engine_label = "GroqWhisper".into();
         r.timings.whisper_ms = Some(50);
         r.timings.sanitizer_ms = Some(30);
         r.timings.recompute_total();
-        let entry = r.to_history_entry(
-            "2026-07-18 12:00",
-            Some("C:/a/99.wav".into()),
-            2000,
-            "mic",
-            None,
-        );
-        assert_eq!(entry.id, "99");
-        assert_eq!(entry.words, 2);
-        assert_eq!(entry.engine, "GroqWhisper");
-        assert_eq!(entry.latency_ms, 80);
-        assert_eq!(entry.is_error, Some(false));
-        assert_eq!(entry.audio_path.as_deref(), Some("C:/a/99.wav"));
+        assert_eq!(r.transcript.raw.as_deref(), Some("duas palavras"));
+        assert_eq!(r.transcript.delivered.as_deref(), Some("duas palavras"));
+        assert_eq!(r.timings.total_ms, 80);
 
-        let err = PipelineResult::hard_error("100", TranscriptionMode::UltraFast, "falhou");
-        let e2 = err.to_history_entry("2026-07-18 12:01", None, 0, "file", Some("batch".into()));
-        assert_eq!(e2.is_error, Some(true));
-        assert_eq!(e2.error_message.as_deref(), Some("falhou"));
-        assert_eq!(e2.deepgram_mode.as_deref(), Some("batch"));
+        let err: PipelineResult =
+            PipelineRun::hard_error("100", TranscriptionMode::UltraFast, "falhou");
+        assert_eq!(err.status, crate::pipeline_run::PipelineRunStatus::Failed);
+        assert_eq!(
+            err.error.as_ref().map(|error| error.message.as_str()),
+            Some("falhou")
+        );
     }
 
     #[test]

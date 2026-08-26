@@ -21,6 +21,7 @@ import {
   Settings2,
   SlidersHorizontal,
   BookOpen,
+  BrainCircuit,
   ChevronRight,
   type LucideIcon,
 } from "lucide-react";
@@ -63,12 +64,14 @@ import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Toggle } from "../components/ui/Toggle";
 import { PageHeader, PreferenceRow } from "../components/ui/Surface";
+import { IntelligenceSettings } from "./IntelligenceSettings";
 
 type Tab =
   | "geral"
   | "pipelines"
   | "provedores"
   | "vocabulario"
+  | "inteligencia"
   | "diagnostico";
 
 const TABS: { key: Tab; label: string; description: string; Icon: LucideIcon }[] = [
@@ -76,6 +79,7 @@ const TABS: { key: Tab; label: string; description: string; Icon: LucideIcon }[]
   { key: "pipelines", label: "Pipelines", description: "Velocidade, precisão e conteúdo", Icon: SlidersHorizontal },
   { key: "provedores", label: "Provedores e APIs", description: "Conexões e chaves locais", Icon: KeyRound },
   { key: "vocabulario", label: "Vocabulário", description: "Grafias e variações faladas", Icon: BookOpen },
+  { key: "inteligencia", label: "Inteligência e privacidade", description: "Contexto, styles, snippets e destino", Icon: BrainCircuit },
   { key: "diagnostico", label: "Diagnóstico", description: "Logs e informações técnicas", Icon: Activity },
 ];
 
@@ -165,6 +169,7 @@ export function ConfiguracoesView() {
         {tab === "pipelines" && <PipelinesTab />}
         {tab === "provedores" && <ProvedoresTab />}
         {tab === "vocabulario" && <VocabularioTab />}
+        {tab === "inteligencia" && <IntelligenceSettings />}
         {tab === "diagnostico" && <DiagnosticoTab />}
       </section>
       </div>

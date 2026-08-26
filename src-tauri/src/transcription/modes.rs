@@ -12,45 +12,168 @@ use crate::gemini::{
 };
 use crate::models::{AppState, HistoryEntry, SanitizerDebug, TranscriptionEngine};
 use crate::pipeline_contract::{GeminiProvider, TranscriptionMode};
+use crate::pipeline_run::{
+    AttemptResultMetadata, AttemptStatus, AudioTransport, CostKind, CostRecord, PipelineError,
+    PipelineErrorKind, PipelineRun, ProviderAttempt, StageKind, StageRecord, UsageRecord,
+};
 use crate::transcription::legacy::transcribe_bytes;
 use crate::transcription::telemetry::{
     compute_realtime_factor, est_throughput, est_total_tokens, log_latency,
 };
 use crate::transcription::types::AcousticOutcome;
 
-/// Outcome of a mode-based pipeline run (ready for history + clipboard).
-#[derive(Debug, Clone, Default)]
-pub struct ModePipelineResult {
-    pub final_text: String,
-    pub mode: TranscriptionMode,
-    pub model: String,
-    pub stages: Vec<String>,
-    pub used_fallback: bool,
-    pub fallback_reason: Option<String>,
-    pub whisper_text: Option<String>,
-    pub gemini_text: Option<String>,
-    pub sanitizer_text: Option<String>,
-    pub transcription_latency_ms: u64,
-    pub history_engine_label: String,
-    pub whisper_ms: Option<u64>,
-    pub upload_ms: Option<u64>,
-    pub gemini_ms: Option<u64>,
-    pub debug_info: Option<SanitizerDebug>,
-    pub audio_prepare_ms: Option<u64>,
-    pub base64_ms: Option<u64>,
-    pub sanitizer_ms: Option<u64>,
-    pub files_upload_ms: Option<u64>,
-    pub files_poll_ms: Option<u64>,
-    pub files_poll_count: Option<u32>,
-    pub gemini_generate_ms: Option<u64>,
-    pub gemini_delete_ms: Option<u64>,
-    pub strict_literals_ms: Option<u64>,
-    pub total_pipeline_ms: Option<u64>,
-    pub gemini_transport: Option<String>,
-    pub warnings: Vec<String>,
-    pub content_type: Option<String>,
-    pub openrouter_generation_id: Option<String>,
-    pub reported_total_tokens: Option<usize>,
+fn emit_fallback_progress(state: &AppState, provider: &str, fallback_provider: &str, reason: &str) {
+    crate::pipeline_run::emit_pipeline_progress(
+        state,
+        crate::pipeline_run::PipelineProgressEvent {
+            kind: crate::pipeline_run::PipelineProgressKind::ProviderFailed,
+            provider: Some(provider.to_string()),
+            fallback_provider: Some(fallback_provider.to_string()),
+            message: Some(reason.to_string()),
+            ..Default::default()
+        },
+    );
+    crate::pipeline_run::emit_pipeline_progress(
+        state,
+        crate::pipeline_run::PipelineProgressEvent {
+            kind: crate::pipeline_run::PipelineProgressKind::FallbackStarted,
+            provider: Some(provider.to_string()),
+            fallback_provider: Some(fallback_provider.to_string()),
+            message: Some(format!(
+                "{provider} indisponível · usando {fallback_provider}"
+            )),
+            ..Default::default()
+        },
+    );
+}
+
+fn authorized_context_block(state: &AppState) -> Option<String> {
+    let preferences = state.context_preferences.read().clone();
+    state
+        .recording_session
+        .lock()
+        .as_ref()
+        .filter(|session| session.profile.allow_context_to_cloud)
+        .and_then(|session| {
+            crate::context::package_untrusted_context(&session.context, &preferences)
+        })
+}
+
+fn with_authorized_context(state: &AppState, mut prompt: GeminiPrompt) -> GeminiPrompt {
+    if let Some(style) = trusted_style_instruction(state) {
+        prompt
+            .system_instruction
+            .push_str("\n\nTRUSTED OUTPUT STYLE\n");
+        prompt.system_instruction.push_str(&style);
+    }
+    if let Some(context) = authorized_context_block(state) {
+        prompt.user_prompt.push_str("\n\n");
+        prompt.user_prompt.push_str(&context);
+    }
+    prompt
+}
+
+fn trusted_style_instruction(state: &AppState) -> Option<String> {
+    state
+        .recording_session
+        .lock()
+        .as_ref()
+        .and_then(|session| session.profile.style_instruction.clone())
+        .filter(|instruction| !instruction.trim().is_empty())
+}
+
+fn glossary_with_style(state: &AppState, mut glossary: String) -> String {
+    if let Some(style) = trusted_style_instruction(state) {
+        glossary
+            .push_str("\n\nTRUSTED OUTPUT STYLE (internal profile, not transcribed content):\n");
+        glossary.push_str(&style);
+    }
+    glossary
+}
+
+fn audio_transport_from_gemini(
+    value: Option<GeminiAudioTransport>,
+    usage: &UsageRecord,
+) -> AudioTransport {
+    if let Some(transport) = usage
+        .metadata
+        .get("transport")
+        .and_then(serde_json::Value::as_str)
+    {
+        return match transport {
+            "multipart" => AudioTransport::Multipart,
+            "raw_binary" => AudioTransport::RawBinary,
+            "resumable_file" => AudioTransport::ResumableFile,
+            "url" => AudioTransport::Url,
+            "websocket_stream" => AudioTransport::WebSocketStream,
+            _ => AudioTransport::InlineBase64,
+        };
+    }
+    match value {
+        Some(GeminiAudioTransport::FilesApi) => AudioTransport::ResumableFile,
+        Some(GeminiAudioTransport::Inline) | None => AudioTransport::InlineBase64,
+    }
+}
+
+fn completed_attempt(
+    id: &str,
+    provider: &str,
+    model: &str,
+    transport: AudioTransport,
+    duration_ms: u64,
+    output_chars: usize,
+    bytes_sent: usize,
+) -> ProviderAttempt {
+    ProviderAttempt {
+        id: id.into(),
+        provider: provider.into(),
+        model: model.into(),
+        transport,
+        started_at_ms: crate::pipeline_run::epoch_ms().saturating_sub(duration_ms),
+        duration_ms: Some(duration_ms),
+        status: AttemptStatus::Success,
+        usage: UsageRecord {
+            bytes_sent: (bytes_sent > 0).then_some(bytes_sent as u64),
+            ..Default::default()
+        },
+        result: AttemptResultMetadata {
+            output_chars: Some(output_chars),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn failed_attempt(
+    id: &str,
+    provider: &str,
+    model: &str,
+    transport: AudioTransport,
+    duration_ms: u64,
+    code: &str,
+    message: &str,
+) -> ProviderAttempt {
+    let kind = if code == "missing_key" {
+        PipelineErrorKind::Authentication
+    } else {
+        PipelineErrorKind::Provider
+    };
+    ProviderAttempt {
+        id: id.into(),
+        provider: provider.into(),
+        model: model.into(),
+        transport,
+        started_at_ms: crate::pipeline_run::epoch_ms().saturating_sub(duration_ms),
+        duration_ms: Some(duration_ms),
+        status: AttemptStatus::Failed,
+        error: Some(PipelineError {
+            kind,
+            code: code.into(),
+            message: message.into(),
+            retryable: kind != PipelineErrorKind::Authentication,
+        }),
+        ..Default::default()
+    }
 }
 
 async fn openrouter_audio_result(
@@ -94,6 +217,30 @@ async fn openrouter_audio_result(
             .await?
         }
     };
+    let mut usage = UsageRecord {
+        audio_seconds: out.reported_audio_seconds,
+        input_tokens: out.reported_input_tokens.map(|value| value as u64),
+        output_tokens: out.reported_output_tokens.map(|value| value as u64),
+        total_tokens: out.reported_total_tokens.map(|value| value as u64),
+        bytes_sent: Some(out.bytes_sent),
+        cost: out
+            .reported_cost_usd
+            .map_or_else(CostRecord::default, |amount| CostRecord {
+                kind: CostKind::Actual,
+                amount_usd: Some(amount),
+                source: Some("openrouter_response_usage".into()),
+            }),
+        ..Default::default()
+    };
+    usage
+        .metadata
+        .insert("transport".into(), out.transport.as_str().into());
+    usage
+        .metadata
+        .insert("request_ms".into(), out.request_ms.into());
+    if let Some(ttfb_ms) = out.ttfb_ms {
+        usage.metadata.insert("ttfb_ms".into(), ttfb_ms.into());
+    }
     Ok(GeminiGenerateResult {
         operation,
         text: out.text,
@@ -107,10 +254,11 @@ async fn openrouter_audio_result(
             generate_ms: Some(out.request_ms),
             ..Default::default()
         },
+        usage,
     })
 }
 
-fn pipeline_debug_snapshot(result: &ModePipelineResult) -> SanitizerDebug {
+fn pipeline_debug_snapshot(result: &PipelineRun) -> SanitizerDebug {
     let mut user_parts = Vec::new();
     if let Some(w) = result.whisper_text.as_ref().filter(|s| !s.is_empty()) {
         user_parts.push(format!("[WHISPER]\n{}", w));
@@ -165,11 +313,16 @@ fn pipeline_debug_snapshot(result: &ModePipelineResult) -> SanitizerDebug {
     }
 }
 
-fn apply_timing_from_gemini(
-    result: &mut ModePipelineResult,
-    g: &crate::gemini::GeminiGenerateResult,
-) {
-    if let Some(t) = g.transport {
+fn apply_timing_from_gemini(result: &mut PipelineRun, g: &crate::gemini::GeminiGenerateResult) {
+    result.usage.merge(&g.usage);
+    if let Some(transport) = g
+        .usage
+        .metadata
+        .get("transport")
+        .and_then(serde_json::Value::as_str)
+    {
+        result.gemini_transport = Some(transport.to_string());
+    } else if let Some(t) = g.transport {
         result.gemini_transport = Some(t.as_str().to_string());
     }
     result.base64_ms = g.timing.base64_ms.or(result.base64_ms);
@@ -179,6 +332,16 @@ fn apply_timing_from_gemini(
     result.gemini_generate_ms = g.timing.generate_ms.or(result.gemini_generate_ms);
     result.gemini_delete_ms = g.timing.delete_ms.or(result.gemini_delete_ms);
     result.gemini_ms = g.timing.generate_ms.or(Some(g.latency_ms));
+    result.timings.request_ms = g
+        .usage
+        .metadata
+        .get("request_ms")
+        .and_then(serde_json::Value::as_u64);
+    result.timings.ttfb_ms = g
+        .usage
+        .metadata
+        .get("ttfb_ms")
+        .and_then(serde_json::Value::as_u64);
     if let Some(u) = g.timing.files_upload_ms {
         let poll = g.timing.files_poll_ms.unwrap_or(0);
         result.upload_ms = Some(u + poll);
@@ -191,7 +354,7 @@ pub async fn run_ultra_fast(
     audio: Vec<u8>,
     ext: &str,
     _duration_ms: Option<u64>,
-) -> Result<ModePipelineResult, String> {
+) -> Result<PipelineRun, String> {
     let t0 = std::time::Instant::now();
     let model = state
         .gemini_pipelines
@@ -221,7 +384,37 @@ pub async fn run_ultra_fast(
     }
 
     let ms = t0.elapsed().as_millis() as u64;
-    Ok(ModePipelineResult {
+    let attempt = ProviderAttempt {
+        id: "attempt-1".into(),
+        provider: "openrouter/groq".into(),
+        model: model.into(),
+        transport: generated.transport,
+        started_at_ms: crate::pipeline_run::epoch_ms().saturating_sub(ms),
+        duration_ms: Some(generated.request_ms),
+        status: AttemptStatus::Success,
+        usage: UsageRecord {
+            audio_seconds: generated.reported_audio_seconds,
+            input_tokens: generated.reported_input_tokens.map(|value| value as u64),
+            output_tokens: generated.reported_output_tokens.map(|value| value as u64),
+            total_tokens: generated.reported_total_tokens.map(|value| value as u64),
+            bytes_sent: Some(generated.bytes_sent),
+            cost: generated
+                .reported_cost_usd
+                .map_or_else(CostRecord::default, |amount| CostRecord {
+                    kind: CostKind::Actual,
+                    amount_usd: Some(amount),
+                    source: Some("openrouter_response_usage".into()),
+                }),
+            ..Default::default()
+        },
+        result: AttemptResultMetadata {
+            generation_id: generated.generation_id.clone(),
+            output_chars: Some(text.trim().len()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    Ok(PipelineRun {
         final_text: text.trim().to_string(),
         mode: TranscriptionMode::UltraFast,
         model: model.into(),
@@ -238,6 +431,14 @@ pub async fn run_ultra_fast(
         openrouter_generation_id: generated.generation_id,
         reported_total_tokens: generated.reported_total_tokens,
         total_pipeline_ms: Some(ms),
+        attempts: vec![attempt],
+        journal: vec![StageRecord::completed(StageKind::Recognition, ms)],
+        timings: crate::pipeline_run::PipelineTimings {
+            request_ms: Some(generated.request_ms),
+            ttfb_ms: generated.ttfb_ms,
+            provider_ms: Some(generated.request_ms),
+            ..Default::default()
+        },
         ..Default::default()
     })
 }
@@ -250,8 +451,9 @@ pub async fn run_fast_accurate(
     file_name: &str,
     mime: &str,
     duration_ms: Option<u64>,
-) -> Result<ModePipelineResult, String> {
+) -> Result<PipelineRun, String> {
     let t0 = std::time::Instant::now();
+    let audio_len = audio.len();
     let choice = state.gemini_pipelines.read().fast_accurate.clone();
     let model_id = choice.resolved_model_id()?;
     let fallback = *state.gemini_fallback_to_whisper.read();
@@ -259,9 +461,10 @@ pub async fn run_fast_accurate(
         GeminiProvider::GoogleAiStudio => state.next_google_key(),
         GeminiProvider::OpenRouter => state.next_openrouter_key(),
     };
+    let context_block = authorized_context_block(state);
     let glossary_block = {
         let vocab = state.vocabulary.read().clone();
-        crate::vocabulary::format_glossary_for_prompt(&vocab)
+        glossary_with_style(state, crate::vocabulary::format_glossary_for_prompt(&vocab))
     };
     let file_tagging_enabled = *state.file_tagging_enabled.read();
     log::info!(
@@ -275,30 +478,88 @@ pub async fn run_fast_accurate(
     let mut whisper_text = None;
     let mut gemini_text = None;
     let mut label = "FastAccurate/Gemini".to_string();
-    let mut result_meta = ModePipelineResult::default();
+    let mut result_meta = PipelineRun::default();
+    let mut attempts = Vec::new();
+    let gemini_provider = match choice.provider {
+        GeminiProvider::GoogleAiStudio => "google-ai-studio",
+        GeminiProvider::OpenRouter => "openrouter",
+    };
 
     let (final_text, model) = match api_key {
         None => {
-            if !fallback {
-                return Err(
-                    "Configure uma chave para o provedor selecionado em Provedores e APIs."
-                        .to_string(),
-                );
-            }
             stages.push("gemini_skipped_no_key".into());
+            attempts.push(failed_attempt(
+                "attempt-1",
+                gemini_provider,
+                &model_id,
+                AudioTransport::InlineBase64,
+                0,
+                "missing_key",
+                "Chave do provedor não configurada",
+            ));
+            if !fallback {
+                let message =
+                    "Configure uma chave para o provedor selecionado em Provedores e APIs.";
+                remember_failed_attempts(
+                    state,
+                    TranscriptionMode::FastAccurate,
+                    attempts,
+                    message,
+                    false,
+                    None,
+                );
+                return Err(message.to_string());
+            }
             used_fallback = true;
             fallback_reason = Some("gemini_missing_api_key".into());
+            emit_fallback_progress(state, "Gemini", "Whisper", "Chave do Gemini ausente");
             label = "FastAccurate/WhisperFallback".into();
             let tw = std::time::Instant::now();
-            let w = transcribe_bytes(
+            let w_result = transcribe_bytes(
                 state,
                 audio,
                 file_name,
                 mime,
                 TranscriptionEngine::GroqWhisper,
             )
-            .await?;
-            result_meta.whisper_ms = Some(tw.elapsed().as_millis() as u64);
+            .await;
+            let w = match w_result {
+                Ok(text) => text,
+                Err(error) => {
+                    let whisper_ms = tw.elapsed().as_millis() as u64;
+                    attempts.push(failed_attempt(
+                        "attempt-2",
+                        "groq",
+                        "whisper-large-v3-turbo",
+                        AudioTransport::Multipart,
+                        whisper_ms,
+                        "provider_error",
+                        &error,
+                    ));
+                    let message =
+                        format!("Gemini indisponível e o fallback Whisper falhou: {error}");
+                    remember_failed_attempts(
+                        state,
+                        TranscriptionMode::FastAccurate,
+                        attempts,
+                        &message,
+                        true,
+                        Some("both_providers_failed".into()),
+                    );
+                    return Err(message);
+                }
+            };
+            let whisper_ms = tw.elapsed().as_millis() as u64;
+            result_meta.whisper_ms = Some(whisper_ms);
+            attempts.push(completed_attempt(
+                "attempt-2",
+                "groq",
+                "whisper-large-v3-turbo",
+                AudioTransport::Multipart,
+                whisper_ms,
+                w.len(),
+                audio_len,
+            ));
             stages.push("whisper_fallback".into());
             whisper_text = Some(w.clone());
             (w, "whisper-large-v3-turbo".to_string())
@@ -322,11 +583,16 @@ pub async fn run_fast_accurate(
                 duration_ms,
                 glossary_block,
                 file_tagging_enabled,
+                untrusted_context: context_block.clone(),
             };
+            let provider_started = std::time::Instant::now();
             let generated = if choice.provider == GeminiProvider::OpenRouter {
-                let prompt = fast_accurate_transcription_prompt(
-                    &req.glossary_block,
-                    req.file_tagging_enabled,
+                let prompt = with_authorized_context(
+                    state,
+                    fast_accurate_transcription_prompt(
+                        &req.glossary_block,
+                        req.file_tagging_enabled,
+                    ),
                 );
                 openrouter_audio_result(
                     &req.audio_bytes,
@@ -342,59 +608,174 @@ pub async fn run_fast_accurate(
             } else {
                 transcribe_audio(req).await
             };
+            let provider_ms = provider_started.elapsed().as_millis() as u64;
             match generated {
                 Ok(r) if !r.text.trim().is_empty() => {
                     apply_timing_from_gemini(&mut result_meta, &r);
+                    let mut attempt = completed_attempt(
+                        "attempt-1",
+                        gemini_provider,
+                        &r.model,
+                        audio_transport_from_gemini(r.transport, &r.usage),
+                        provider_ms,
+                        r.text.len(),
+                        audio_len,
+                    );
+                    attempt.usage = r.usage.clone();
+                    attempts.push(attempt);
                     if let Some(t) = r.transport {
                         stages.push(format!("transport:{}", t.as_str()));
                     }
                     gemini_text = Some(r.text.clone());
                     (r.text, r.model)
                 }
-                Ok(_) => {
+                Ok(r) => {
+                    attempts.push(failed_attempt(
+                        "attempt-1",
+                        gemini_provider,
+                        &r.model,
+                        audio_transport_from_gemini(r.transport, &r.usage),
+                        provider_ms,
+                        "empty_response",
+                        "O provider retornou texto vazio",
+                    ));
                     if !fallback {
+                        remember_failed_attempts(
+                            state,
+                            TranscriptionMode::FastAccurate,
+                            attempts,
+                            "O Gemini não retornou texto.",
+                            false,
+                            None,
+                        );
                         return Err("O Gemini não retornou texto.".to_string());
                     }
                     used_fallback = true;
                     fallback_reason = Some("gemini_empty".into());
+                    emit_fallback_progress(state, "Gemini", "Whisper", "Resposta vazia do Gemini");
                     label = "FastAccurate/WhisperFallback".into();
                     let tw = std::time::Instant::now();
-                    let w = transcribe_bytes(
+                    let w_result = transcribe_bytes(
                         state,
                         audio,
                         file_name,
                         mime,
                         TranscriptionEngine::GroqWhisper,
                     )
-                    .await?;
-                    result_meta.whisper_ms = Some(tw.elapsed().as_millis() as u64);
+                    .await;
+                    let w = match w_result {
+                        Ok(text) => text,
+                        Err(error) => {
+                            let whisper_ms = tw.elapsed().as_millis() as u64;
+                            attempts.push(failed_attempt(
+                                "attempt-2",
+                                "groq",
+                                "whisper-large-v3-turbo",
+                                AudioTransport::Multipart,
+                                whisper_ms,
+                                "provider_error",
+                                &error,
+                            ));
+                            let message = format!(
+                                "Gemini retornou vazio e o fallback Whisper falhou: {error}"
+                            );
+                            remember_failed_attempts(
+                                state,
+                                TranscriptionMode::FastAccurate,
+                                attempts,
+                                &message,
+                                true,
+                                Some("both_providers_failed".into()),
+                            );
+                            return Err(message);
+                        }
+                    };
+                    let whisper_ms = tw.elapsed().as_millis() as u64;
+                    result_meta.whisper_ms = Some(whisper_ms);
+                    attempts.push(completed_attempt(
+                        "attempt-2",
+                        "groq",
+                        "whisper-large-v3-turbo",
+                        AudioTransport::Multipart,
+                        whisper_ms,
+                        w.len(),
+                        audio_len,
+                    ));
                     stages.push("whisper_fallback".into());
                     whisper_text = Some(w.clone());
                     (w, "whisper-large-v3-turbo".to_string())
                 }
                 Err(e) => {
+                    attempts.push(failed_attempt(
+                        "attempt-1",
+                        gemini_provider,
+                        &model_id,
+                        AudioTransport::InlineBase64,
+                        provider_ms,
+                        "provider_error",
+                        &e,
+                    ));
                     if !fallback {
-                        return Err(format!("Gemini: {}", e));
+                        let message = format!("Gemini: {e}");
+                        remember_failed_attempts(
+                            state,
+                            TranscriptionMode::FastAccurate,
+                            attempts,
+                            &message,
+                            false,
+                            None,
+                        );
+                        return Err(message);
                     }
                     used_fallback = true;
                     fallback_reason = Some(format!("gemini_error: {}", e));
+                    emit_fallback_progress(state, "Gemini", "Whisper", &e);
                     label = "FastAccurate/WhisperFallback".into();
                     let tw = std::time::Instant::now();
-                    let w = transcribe_bytes(
+                    let w_result = transcribe_bytes(
                         state,
                         audio,
                         file_name,
                         mime,
                         TranscriptionEngine::GroqWhisper,
                     )
-                    .await
-                    .map_err(|we| {
-                        format!(
-                            "Gemini falhou ({}) e o fallback Whisper também falhou: {}",
-                            e, we
-                        )
-                    })?;
-                    result_meta.whisper_ms = Some(tw.elapsed().as_millis() as u64);
+                    .await;
+                    let w = match w_result {
+                        Ok(text) => text,
+                        Err(whisper_error) => {
+                            let whisper_ms = tw.elapsed().as_millis() as u64;
+                            attempts.push(failed_attempt(
+                                "attempt-2",
+                                "groq",
+                                "whisper-large-v3-turbo",
+                                AudioTransport::Multipart,
+                                whisper_ms,
+                                "provider_error",
+                                &whisper_error,
+                            ));
+                            let message = format!("Gemini falhou ({e}) e o fallback Whisper também falhou: {whisper_error}");
+                            remember_failed_attempts(
+                                state,
+                                TranscriptionMode::FastAccurate,
+                                attempts,
+                                &message,
+                                true,
+                                Some("both_providers_failed".into()),
+                            );
+                            return Err(message);
+                        }
+                    };
+                    let whisper_ms = tw.elapsed().as_millis() as u64;
+                    result_meta.whisper_ms = Some(whisper_ms);
+                    attempts.push(completed_attempt(
+                        "attempt-2",
+                        "groq",
+                        "whisper-large-v3-turbo",
+                        AudioTransport::Multipart,
+                        whisper_ms,
+                        w.len(),
+                        audio_len,
+                    ));
                     stages.push("whisper_fallback".into());
                     whisper_text = Some(w.clone());
                     (w, "whisper-large-v3-turbo".to_string())
@@ -408,7 +789,7 @@ pub async fn run_fast_accurate(
     }
 
     let ms = t0.elapsed().as_millis() as u64;
-    Ok(ModePipelineResult {
+    Ok(PipelineRun {
         final_text: final_text.trim().to_string(),
         mode: TranscriptionMode::FastAccurate,
         model,
@@ -429,6 +810,7 @@ pub async fn run_fast_accurate(
         files_poll_count: result_meta.files_poll_count,
         gemini_generate_ms: result_meta.gemini_generate_ms,
         gemini_transport: result_meta.gemini_transport,
+        attempts,
         ..Default::default()
     })
 }
@@ -441,7 +823,7 @@ pub async fn run_precise(
     file_name: &str,
     mime: &str,
     duration_ms: Option<u64>,
-) -> Result<ModePipelineResult, String> {
+) -> Result<PipelineRun, String> {
     let t0 = std::time::Instant::now();
     let choice = state.gemini_pipelines.read().precise.clone();
     let model_id = choice.resolved_model_id()?;
@@ -454,9 +836,16 @@ pub async fn run_precise(
             "Configure uma chave para o provedor selecionado em Provedores e APIs.".to_string(),
         );
     };
+    let context_block = authorized_context_block(state);
     let glossary_block = {
         let vocab = state.vocabulary.read().clone();
-        crate::vocabulary::format_glossary_for_prompt(&vocab)
+        let mut block =
+            glossary_with_style(state, crate::vocabulary::format_glossary_for_prompt(&vocab));
+        if let Some(context) = context_block.as_deref() {
+            block.push_str("\n\n");
+            block.push_str(context);
+        }
+        block
     };
     let vocab_snapshot = state.vocabulary.read().clone();
     let file_tagging_enabled = *state.file_tagging_enabled.read();
@@ -534,7 +923,7 @@ pub async fn run_precise(
             }
         ),
     ];
-    let mut meta = ModePipelineResult {
+    let mut meta = PipelineRun {
         whisper_ms: Some(whisper_ms),
         gemini_transport: Some(transport.as_str().into()),
         ..Default::default()
@@ -547,10 +936,12 @@ pub async fn run_precise(
             let w_trim = w.trim().to_string();
             if w_trim.is_empty() {
                 let pure = if choice.provider == GeminiProvider::OpenRouter {
+                    let prompt =
+                        with_authorized_context(state, transcription_prompt(file_tagging_enabled));
                     openrouter_audio_result(
                         &audio,
                         ext,
-                        &transcription_prompt(file_tagging_enabled),
+                        &prompt,
                         &model_id,
                         &api_key,
                         duration_ms,
@@ -565,6 +956,7 @@ pub async fn run_precise(
                         &audio,
                         mime_g,
                         file_tagging_enabled,
+                        context_block.as_deref(),
                         Some((b64, base64_ms)),
                     )
                     .await
@@ -641,6 +1033,7 @@ pub async fn run_precise(
                     &model_id,
                     &file_ref,
                     file_tagging_enabled,
+                    context_block.as_deref(),
                     duration_ms,
                     audio.len(),
                 )
@@ -697,7 +1090,7 @@ pub async fn run_precise(
                 stages.push(format!("strict_literals:{}", hits.len()));
             }
             let total = t0.elapsed().as_millis() as u64;
-            Ok(ModePipelineResult {
+            Ok(PipelineRun {
                 final_text,
                 mode: TranscriptionMode::Precise,
                 model: "whisper-large-v3-turbo".into(),
@@ -718,10 +1111,12 @@ pub async fn run_precise(
             meta.base64_ms = Some(base64_ms);
             stages.push(format!("whisper_failed:{}", w_err));
             let pure = if choice.provider == GeminiProvider::OpenRouter {
+                let prompt =
+                    with_authorized_context(state, transcription_prompt(file_tagging_enabled));
                 openrouter_audio_result(
                     &audio,
                     ext,
-                    &transcription_prompt(file_tagging_enabled),
+                    &prompt,
                     &model_id,
                     &api_key,
                     duration_ms,
@@ -736,6 +1131,7 @@ pub async fn run_precise(
                     &audio,
                     mime_g,
                     file_tagging_enabled,
+                    context_block.as_deref(),
                     Some((b64, base64_ms)),
                 )
                 .await
@@ -770,6 +1166,7 @@ pub async fn run_precise(
                 &model_id,
                 &file_ref,
                 file_tagging_enabled,
+                context_block.as_deref(),
                 duration_ms,
                 audio.len(),
             )
@@ -810,11 +1207,11 @@ fn finish_precise_refine(
     refined: Result<crate::gemini::GeminiGenerateResult, String>,
     t0: std::time::Instant,
     mut stages: Vec<String>,
-    mut meta: ModePipelineResult,
+    mut meta: PipelineRun,
     w_trim: String,
     whisper_ms: u64,
     vocab: &[crate::vocabulary::VocabularyTerm],
-) -> Result<ModePipelineResult, String> {
+) -> Result<PipelineRun, String> {
     match refined {
         Ok(r) if !r.text.trim().is_empty() => {
             apply_timing_from_gemini(&mut meta, &r);
@@ -828,7 +1225,7 @@ fn finish_precise_refine(
                 stages.push(format!("strict_literals:{}", hits.len()));
             }
             let total = t0.elapsed().as_millis() as u64;
-            Ok(ModePipelineResult {
+            Ok(PipelineRun {
                 final_text,
                 mode: TranscriptionMode::Precise,
                 model: r.model,
@@ -859,7 +1256,7 @@ fn finish_precise_refine(
                 stages.push(format!("strict_literals:{}", hits.len()));
             }
             let total = t0.elapsed().as_millis() as u64;
-            Ok(ModePipelineResult {
+            Ok(PipelineRun {
                 final_text,
                 mode: TranscriptionMode::Precise,
                 model: "whisper-large-v3-turbo".into(),
@@ -882,12 +1279,12 @@ fn finish_precise_pure(
     pure: Result<crate::gemini::GeminiGenerateResult, String>,
     t0: std::time::Instant,
     mut stages: Vec<String>,
-    mut meta: ModePipelineResult,
+    mut meta: PipelineRun,
     whisper_ms: u64,
     upload_ms: Option<u64>,
     reason: &str,
     vocab: &[crate::vocabulary::VocabularyTerm],
-) -> Result<ModePipelineResult, String> {
+) -> Result<PipelineRun, String> {
     match pure {
         Ok(r) if !r.text.trim().is_empty() => {
             apply_timing_from_gemini(&mut meta, &r);
@@ -899,7 +1296,7 @@ fn finish_precise_pure(
                 stages.push(format!("strict_literals:{}", hits.len()));
             }
             let total = t0.elapsed().as_millis() as u64;
-            Ok(ModePipelineResult {
+            Ok(PipelineRun {
                 final_text,
                 mode: TranscriptionMode::Precise,
                 model: r.model,
@@ -935,7 +1332,7 @@ pub async fn run_ultra_precise(
     file_name: &str,
     mime: &str,
     duration_ms: Option<u64>,
-) -> Result<ModePipelineResult, String> {
+) -> Result<PipelineRun, String> {
     let t0 = std::time::Instant::now();
     let choice = state.gemini_pipelines.read().ultra_precise.clone();
     let model_id = choice.resolved_model_id()?;
@@ -943,9 +1340,16 @@ pub async fn run_ultra_precise(
         GeminiProvider::GoogleAiStudio => state.next_google_key(),
         GeminiProvider::OpenRouter => state.next_openrouter_key(),
     };
+    let context_block = authorized_context_block(state);
     let glossary_block = {
         let vocab = state.vocabulary.read().clone();
-        crate::vocabulary::format_glossary_for_prompt(&vocab)
+        let mut block =
+            glossary_with_style(state, crate::vocabulary::format_glossary_for_prompt(&vocab));
+        if let Some(context) = context_block.as_deref() {
+            block.push_str("\n\n");
+            block.push_str(context);
+        }
+        block
     };
     let vocab_snapshot = state.vocabulary.read().clone();
     let file_tagging_enabled = *state.file_tagging_enabled.read();
@@ -1066,7 +1470,7 @@ pub async fn run_ultra_precise(
     } else {
         sanitize.final_text.clone()
     };
-    let mut meta = ModePipelineResult {
+    let mut meta = PipelineRun {
         whisper_ms: Some(whisper_ms),
         sanitizer_ms: Some(sanitizer_ms),
         gemini_transport: Some(transport.as_str().into()),
@@ -1258,7 +1662,7 @@ pub async fn run_ultra_precise(
     } else {
         Some(sanitized_text)
     };
-    Ok(ModePipelineResult {
+    Ok(PipelineRun {
         final_text,
         mode: TranscriptionMode::UltraPrecise,
         model,
@@ -1284,6 +1688,8 @@ pub async fn run_ultra_precise(
         gemini_transport: meta.gemini_transport,
         strict_literals_ms: meta.strict_literals_ms,
         warnings: meta.warnings,
+        usage: meta.usage,
+        timings: meta.timings,
         ..Default::default()
     })
 }
@@ -1295,8 +1701,24 @@ pub fn mode_result_to_history(
     audio_path: Option<String>,
     duration_ms: u64,
     source: &str,
-    result: &ModePipelineResult,
+    result: &PipelineRun,
 ) -> HistoryEntry {
+    let mut canonical_run = result.clone();
+    if canonical_run.id.is_empty() {
+        canonical_run.id = format!("{id}-run-{}", crate::pipeline_run::epoch_ms());
+    }
+    if canonical_run.session_id.is_empty() {
+        canonical_run.session_id = format!("{id}-session");
+    }
+    if canonical_run.started_at_ms == 0 {
+        canonical_run.started_at_ms =
+            crate::pipeline_run::epoch_ms().saturating_sub(canonical_run.transcription_latency_ms);
+    }
+    canonical_run.normalize();
+    if canonical_run.finished_at_ms.is_none() {
+        canonical_run.finish_success();
+    }
+    let result = &canonical_run;
     let words = result.final_text.split_whitespace().count();
     let transcription_throughput = est_throughput(words, result.transcription_latency_ms);
     let realtime_factor = compute_realtime_factor(result.transcription_latency_ms, duration_ms);
@@ -1336,6 +1758,7 @@ pub fn mode_result_to_history(
     }
 
     HistoryEntry {
+        schema_version: crate::pipeline_run::PIPELINE_RUN_SCHEMA_VERSION,
         id,
         date,
         words,
@@ -1398,6 +1821,7 @@ pub fn mode_result_to_history(
             .total_pipeline_ms
             .or(Some(result.transcription_latency_ms)),
         gemini_transport: result.gemini_transport.clone(),
+        pipeline_runs: vec![canonical_run],
     }
 }
 
@@ -1410,7 +1834,14 @@ pub fn mode_failed_history(
     mode: TranscriptionMode,
     error_msg: String,
 ) -> HistoryEntry {
+    let mut run = PipelineRun::hard_error(
+        format!("{id}-run-{}", crate::pipeline_run::epoch_ms()),
+        mode,
+        error_msg.clone(),
+    );
+    run.session_id = format!("{id}-session");
     HistoryEntry {
+        schema_version: crate::pipeline_run::PIPELINE_RUN_SCHEMA_VERSION,
         id,
         date,
         words: 0,
@@ -1455,6 +1886,7 @@ pub fn mode_failed_history(
         clipboard_ms: None,
         total_pipeline_ms: None,
         gemini_transport: None,
+        pipeline_runs: vec![run],
     }
 }
 
@@ -1478,7 +1910,7 @@ pub async fn run_product_mode(
     file_name: &str,
     mime: &str,
     ext: &str,
-) -> Result<ModePipelineResult, String> {
+) -> Result<PipelineRun, String> {
     run_product_mode_with_duration(state, audio, file_name, mime, ext, None).await
 }
 
@@ -1489,20 +1921,159 @@ pub async fn run_product_mode_with_duration(
     mime: &str,
     ext: &str,
     duration_ms: Option<u64>,
-) -> Result<ModePipelineResult, String> {
+) -> Result<PipelineRun, String> {
+    state.pending_failed_pipeline_run.lock().take();
     let mode = *state.transcription_mode.read();
-    let mut result = match mode {
-        TranscriptionMode::UltraFast => run_ultra_fast(state, audio, ext, duration_ms).await?,
+    let result = match mode {
+        TranscriptionMode::UltraFast => run_ultra_fast(state, audio, ext, duration_ms).await,
         TranscriptionMode::FastAccurate => {
-            run_fast_accurate(state, audio, ext, file_name, mime, duration_ms).await?
+            run_fast_accurate(state, audio, ext, file_name, mime, duration_ms).await
         }
         TranscriptionMode::Precise => {
-            run_precise(state, audio, ext, file_name, mime, duration_ms).await?
+            run_precise(state, audio, ext, file_name, mime, duration_ms).await
         }
         TranscriptionMode::UltraPrecise => {
-            run_ultra_precise(state, audio, ext, file_name, mime, duration_ms).await?
+            run_ultra_precise(state, audio, ext, file_name, mime, duration_ms).await
         }
     };
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            if state.pending_failed_pipeline_run.lock().is_none() {
+                remember_failed_attempts(state, mode, Vec::new(), &error, false, None);
+            }
+            return Err(error);
+        }
+    };
+    Ok(finalize_product_result(state, result))
+}
+
+fn remember_failed_attempts(
+    state: &AppState,
+    mode: TranscriptionMode,
+    mut attempts: Vec<ProviderAttempt>,
+    message: &str,
+    fallback_used: bool,
+    fallback_reason: Option<String>,
+) {
+    if attempts.is_empty() {
+        let (provider, model, transport) = match mode {
+            TranscriptionMode::UltraFast => {
+                ("openrouter", "whisper-large-v3", AudioTransport::Multipart)
+            }
+            TranscriptionMode::FastAccurate => {
+                ("gemini", "configured-model", AudioTransport::InlineBase64)
+            }
+            TranscriptionMode::Precise | TranscriptionMode::UltraPrecise => {
+                ("pipeline", "multi-provider", AudioTransport::Multipart)
+            }
+        };
+        attempts.push(failed_attempt(
+            "attempt-1",
+            provider,
+            model,
+            transport,
+            0,
+            "pipeline_error",
+            message,
+        ));
+    }
+    let mut run = PipelineRun::hard_error("", mode, message);
+    run.attempts = attempts;
+    run.fallback.used = fallback_used;
+    run.fallback.reason = fallback_reason;
+    if let Some(session) = state.recording_session.lock().clone() {
+        run.session_id = session.id;
+        run.context = session.context.persisted_metadata();
+        run.profile_id = Some(session.profile.profile_id);
+        run.formatting_level = session.formatting_level;
+        run.destination = session.destination;
+    }
+    *state.pending_failed_pipeline_run.lock() = Some(run);
+}
+
+pub(crate) fn finalize_product_result(
+    state: &Arc<AppState>,
+    mut result: PipelineRun,
+) -> PipelineRun {
+    // Output policy is part of the recording session and must be attached before
+    // any output transformation. Otherwise a profile-selected Literal/Aggressive
+    // policy would be applied only after Smart formatting had already run.
+    if let Some(session) = state.recording_session.lock().clone() {
+        result.session_id = session.id.clone();
+        result.started_at_ms = session.started_at_ms;
+        result.context = session.context.persisted_metadata();
+        result.profile_id = Some(session.profile.profile_id);
+        result.formatting_level = session.formatting_level;
+        result.content_hint = session
+            .profile
+            .content_type
+            .as_deref()
+            .and_then(crate::pipeline_contract::ContentType::from_str)
+            .unwrap_or(result.content_hint);
+        result.destination = session.destination;
+        result.delivery.destination = session.destination;
+    }
+    synthesize_provider_attempts(state, &mut result);
+    if !result.attempts.is_empty()
+        && !result
+            .journal
+            .iter()
+            .any(|stage| stage.stage == StageKind::Recognition && stage.provider.is_some())
+    {
+        for attempt in result.attempts.clone() {
+            let mut stage = StageRecord::completed(
+                StageKind::Recognition,
+                attempt.duration_ms.unwrap_or_default(),
+            );
+            stage.id = format!("recognition-{}", attempt.id);
+            stage.started_at_ms = attempt.started_at_ms;
+            stage.provider = Some(attempt.provider.clone());
+            stage.model = Some(attempt.model.clone());
+            stage.transport = Some(attempt.transport);
+            stage.usage = attempt.usage.clone();
+            stage.error = attempt.error.clone();
+            stage.status = match attempt.status {
+                AttemptStatus::Success => crate::pipeline_run::StageStatus::Success,
+                AttemptStatus::Failed => crate::pipeline_run::StageStatus::Failed,
+                AttemptStatus::Skipped => crate::pipeline_run::StageStatus::Skipped,
+                AttemptStatus::Running => crate::pipeline_run::StageStatus::Running,
+                AttemptStatus::Pending => crate::pipeline_run::StageStatus::Pending,
+            };
+            result.add_stage(stage);
+        }
+    }
+    if result.used_fallback
+        && !result
+            .journal
+            .iter()
+            .any(|stage| stage.stage == StageKind::Fallback)
+    {
+        let mut fallback = StageRecord::completed(StageKind::Fallback, 0);
+        fallback.metadata.insert(
+            "reason".into(),
+            result
+                .fallback_reason
+                .clone()
+                .unwrap_or_else(|| "provider_fallback".into())
+                .into(),
+        );
+        result.add_stage(fallback);
+    }
+    if result.sanitizer_ms.is_some()
+        && !result
+            .journal
+            .iter()
+            .any(|stage| stage.stage == StageKind::Sanitizer)
+    {
+        let mut sanitizer = StageRecord::completed(
+            StageKind::Sanitizer,
+            result.sanitizer_ms.unwrap_or_default(),
+        );
+        sanitizer.provider = Some("groq".into());
+        sanitizer.model = Some(state.sanitizer.read().api_model_id().into());
+        result.add_stage(sanitizer);
+    }
     // Global strict pass (may double-apply with in-mode; safe / idempotent).
     let vocab = state.vocabulary.read().clone();
     let ts = std::time::Instant::now();
@@ -1521,8 +2092,193 @@ pub async fn run_product_mode_with_duration(
             .push(format!("strict_literals:{}", hits.len()));
         result.warnings.extend(hits);
     }
-    result.final_text = crate::transcription::remove_known_transcription_artifacts(&text);
-    Ok(result)
+    let raw_text = result
+        .whisper_text
+        .clone()
+        .or_else(|| result.deepgram_text.clone())
+        .or_else(|| result.gemini_text.clone())
+        .unwrap_or_else(|| result.final_text.clone());
+    let refined_candidate = crate::transcription::remove_known_transcription_artifacts(&text);
+    let refinement_guard =
+        crate::transformations::enforce_protected_spans(&raw_text, &refined_candidate);
+    result.warnings.extend(refinement_guard.warnings.clone());
+    result.transcript.set_raw_once(raw_text.clone());
+    result.transcript.refined = Some(refinement_guard.text.clone());
+
+    let backtrack_started = std::time::Instant::now();
+    let backtracked =
+        crate::transformations::apply_backtrack(&refinement_guard.text, result.formatting_level);
+    let backtrack_ms = backtrack_started.elapsed().as_millis() as u64;
+    result.timings.backtrack_ms = Some(backtrack_ms);
+    result.add_stage(StageRecord::completed(StageKind::Backtrack, backtrack_ms));
+    result.warnings.extend(backtracked.warnings);
+
+    crate::pipeline_run::emit_pipeline_progress(
+        state,
+        crate::pipeline_run::PipelineProgressEvent {
+            kind: crate::pipeline_run::PipelineProgressKind::Formatting,
+            message: Some("Formatando saída".into()),
+            ..Default::default()
+        },
+    );
+    let formatting_target = formatting_target_for_result(&result);
+    let formatting_started = std::time::Instant::now();
+    let formatted = crate::transformations::apply_smart_formatting(
+        &backtracked.text,
+        result.formatting_level,
+        formatting_target,
+    );
+    let formatting_ms = formatting_started.elapsed().as_millis() as u64;
+    result.timings.formatting_ms = Some(formatting_ms);
+    result.add_stage(StageRecord::completed(StageKind::Formatting, formatting_ms));
+    result.warnings.extend(formatted.warnings);
+
+    let code_guard_started = std::time::Instant::now();
+    let guarded = crate::transformations::enforce_protected_spans(&raw_text, &formatted.text);
+    let code_guard_ms = code_guard_started.elapsed().as_millis() as u64;
+    result.timings.code_guard_ms = Some(code_guard_ms);
+    result.add_stage(StageRecord::completed(StageKind::CodeGuard, code_guard_ms));
+    result.warnings.extend(guarded.warnings);
+    result.transcript.formatted = Some(guarded.text.clone());
+    let snippet_started = std::time::Instant::now();
+    let (final_text, snippet_id) =
+        crate::snippets::resolve(&guarded.text, &crate::snippets::list())
+            .map(|(expansion, id)| (expansion, Some(id)))
+            .unwrap_or_else(|| (guarded.text, None));
+    let snippet_ms = snippet_started.elapsed().as_millis() as u64;
+    result.timings.snippet_ms = Some(snippet_ms);
+    let mut snippet_stage = StageRecord::completed(StageKind::SnippetResolution, snippet_ms);
+    if let Some(snippet_id) = snippet_id {
+        snippet_stage
+            .metadata
+            .insert("snippet_id".into(), snippet_id.into());
+    }
+    result.add_stage(snippet_stage);
+    result.final_text = final_text;
+    result
+}
+
+fn synthesize_provider_attempts(state: &AppState, result: &mut PipelineRun) {
+    if !result.attempts.is_empty() {
+        return;
+    }
+    let started = crate::pipeline_run::epoch_ms().saturating_sub(result.transcription_latency_ms);
+    let whisper_failure = result
+        .stages
+        .iter()
+        .find_map(|stage| stage.strip_prefix("whisper_failed:"));
+    if let Some(text) = result
+        .whisper_text
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        result.attempts.push(completed_attempt(
+            "attempt-whisper",
+            "groq",
+            "whisper-large-v3-turbo",
+            AudioTransport::Multipart,
+            result.whisper_ms.unwrap_or_default(),
+            text.len(),
+            0,
+        ));
+    } else if let Some(error) = whisper_failure {
+        result.attempts.push(failed_attempt(
+            "attempt-whisper",
+            "groq",
+            "whisper-large-v3-turbo",
+            AudioTransport::Multipart,
+            result.whisper_ms.unwrap_or_default(),
+            "provider_error",
+            error,
+        ));
+    }
+
+    let choice = match result.mode {
+        TranscriptionMode::FastAccurate => state.gemini_pipelines.read().fast_accurate.clone(),
+        TranscriptionMode::Precise => state.gemini_pipelines.read().precise.clone(),
+        TranscriptionMode::UltraPrecise => state.gemini_pipelines.read().ultra_precise.clone(),
+        TranscriptionMode::UltraFast => return,
+    };
+    let provider = match choice.provider {
+        GeminiProvider::GoogleAiStudio => "google-ai-studio",
+        GeminiProvider::OpenRouter => "openrouter",
+    };
+    let model = choice
+        .resolved_model_id()
+        .unwrap_or_else(|_| result.model.clone());
+    let transport = match result.gemini_transport.as_deref() {
+        Some("multipart") => AudioTransport::Multipart,
+        Some("files_api" | "resumable_file") => AudioTransport::ResumableFile,
+        Some("raw_binary") => AudioTransport::RawBinary,
+        Some("url") => AudioTransport::Url,
+        Some("websocket_stream") => AudioTransport::WebSocketStream,
+        _ => AudioTransport::InlineBase64,
+    };
+    if let Some(text) = result
+        .gemini_text
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        let mut attempt = completed_attempt(
+            "attempt-gemini",
+            provider,
+            &model,
+            transport,
+            result
+                .gemini_ms
+                .or(result.gemini_generate_ms)
+                .unwrap_or_default(),
+            text.len(),
+            result.usage.bytes_sent.unwrap_or_default() as usize,
+        );
+        attempt.started_at_ms = started;
+        attempt.usage = result.usage.clone();
+        result.attempts.push(attempt);
+    } else if result.used_fallback {
+        let reason = result
+            .fallback_reason
+            .clone()
+            .unwrap_or_else(|| "provider unavailable".into());
+        result.attempts.push(failed_attempt(
+            "attempt-gemini",
+            provider,
+            &model,
+            transport,
+            result
+                .gemini_ms
+                .or(result.gemini_generate_ms)
+                .unwrap_or_default(),
+            "provider_error",
+            &reason,
+        ));
+    }
+}
+
+fn formatting_target_for_result(result: &PipelineRun) -> crate::transformations::FormattingTarget {
+    if result.content_hint == crate::pipeline_contract::ContentType::Programming {
+        return crate::transformations::FormattingTarget::Code;
+    }
+    let domain = result
+        .context
+        .domain
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let title = result
+        .context
+        .window_title
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ["chatgpt.com", "gemini.google.com", "claude.ai"]
+        .iter()
+        .any(|candidate| domain == *candidate)
+        || title.contains("codex")
+    {
+        crate::transformations::FormattingTarget::Markdown
+    } else {
+        crate::transformations::FormattingTarget::PlainText
+    }
 }
 
 #[allow(dead_code)]
@@ -1554,7 +2310,7 @@ mod tests {
 
     #[test]
     fn mode_history_fields() {
-        let r = ModePipelineResult {
+        let r = PipelineRun {
             final_text: "olá mundo".into(),
             mode: TranscriptionMode::UltraFast,
             model: "whisper-large-v3-turbo".into(),
@@ -1577,7 +2333,7 @@ mod tests {
 
     #[test]
     fn ultra_history_keeps_sanitizer_ms() {
-        let r = ModePipelineResult {
+        let r = PipelineRun {
             final_text: "x".into(),
             mode: TranscriptionMode::UltraPrecise,
             model: "gemini-3.5-flash-lite".into(),

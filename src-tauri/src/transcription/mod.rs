@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod telemetry;
 pub mod types;
 
+pub use crate::pipeline_run::PipelineRun;
 pub use fallback::{coalesce_empty_final, pick_raw_acoustic, single_engine_slots};
 pub use legacy::{
     deepgram_from_live_or_posthoc, run_acoustic_file, run_acoustic_mic, run_dual_posthoc,
@@ -19,7 +20,7 @@ pub use legacy::{
 };
 pub use modes::{
     mode_failed_history, mode_result_to_history, run_product_mode, run_product_mode_with_duration,
-    should_use_product_mode, ModePipelineResult,
+    should_use_product_mode,
 };
 pub use pipeline::{
     build_failed_entry, build_success_entry, emit_saved, run_sanitize, update_failed_entry,

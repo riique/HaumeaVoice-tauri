@@ -6,6 +6,7 @@ import { TranscricaoView } from "./views/TranscricaoView";
 import { HistoricoView } from "./views/HistoricoView";
 import { AtalhosView } from "./views/AtalhosView";
 import { ConfiguracoesView } from "./views/ConfiguracoesView";
+import { ScratchpadView } from "./views/ScratchpadView";
 import type { ViewKey } from "./views";
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
           {view === "inicio" && <InicioView onNavigate={setView} />}
           {view === "transcricao" && <TranscricaoView />}
           {view === "historico" && <HistoricoView />}
+          {view === "scratchpad" && <ScratchpadView />}
           {view === "atalhos" && <AtalhosView />}
           {view === "configuracoes" && <ConfiguracoesView />}
         </div>
