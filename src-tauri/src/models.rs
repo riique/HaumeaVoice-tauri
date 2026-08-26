@@ -372,16 +372,15 @@ pub struct AppState {
     /// until the gadget reports for the first time. Consumed by the cursor
     /// watcher to make the overlay click-through outside the pill.
     pub gadget_hit_rect: RwLock<Option<GadgetHitRect>>,
-    /// When `true`, mic/file runs use the product mode pipeline
-    /// ([`crate::pipeline_contract::TranscriptionMode`]) for supported modes.
-    /// When `false`, the legacy engine/dual/sanitizer path is used unchanged.
+    /// Compatibility flag kept for persisted settings and older frontends.
+    /// Product pipelines are always active in the current application.
     pub modes_enabled: RwLock<bool>,
     /// Selected product mode (UltraFast / FastAccurate / …).
     pub transcription_mode: RwLock<crate::pipeline_contract::TranscriptionMode>,
     /// FastAccurate: if Gemini fails or is unavailable, fall back to Whisper.
     pub gemini_fallback_to_whisper: RwLock<bool>,
-    /// Content-type hint for sanitizer / UltraPrecise prompts (`Auto` = heuristic).
-    pub content_type: RwLock<crate::pipeline_contract::ContentType>,
+    /// Adds plain `@file.ext` mentions when Gemini recognizes an explicit file reference.
+    pub file_tagging_enabled: RwLock<bool>,
     pub gemini_pipelines: RwLock<crate::pipeline_contract::GeminiPipelineConfig>,
     groq_key_cursor: AtomicUsize,
     google_key_cursor: AtomicUsize,
@@ -417,10 +416,10 @@ impl AppState {
             reasoning_effort: RwLock::new("medium".to_string()),
             vocabulary: RwLock::new(Vec::new()),
             gadget_hit_rect: RwLock::new(None),
-            modes_enabled: RwLock::new(false),
+            modes_enabled: RwLock::new(true),
             transcription_mode: RwLock::new(crate::pipeline_contract::TranscriptionMode::UltraFast),
             gemini_fallback_to_whisper: RwLock::new(true),
-            content_type: RwLock::new(crate::pipeline_contract::ContentType::Auto),
+            file_tagging_enabled: RwLock::new(true),
             gemini_pipelines: RwLock::new(crate::pipeline_contract::GeminiPipelineConfig::default()),
             groq_key_cursor: AtomicUsize::new(0),
             google_key_cursor: AtomicUsize::new(0),

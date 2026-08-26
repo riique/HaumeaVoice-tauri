@@ -120,16 +120,16 @@ pub fn get_engine_config(state: State<'_, SharedState>) -> EngineConfigSnapshot 
     }
 }
 
-/// Product-mode configuration (Phase 04+). Independent from legacy engine cards
-/// so existing installs keep the dual/Deepgram path until modes are enabled.
+/// Product-pipeline configuration. `modes_enabled` remains in the payload only
+/// for compatibility with older frontends and is normalized to `true`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModeConfigPayload {
     pub modes_enabled: bool,
     pub mode: TranscriptionMode,
     #[serde(default = "default_true_fallback")]
     pub gemini_fallback_to_whisper: bool,
-    #[serde(default)]
-    pub content_type: crate::pipeline_contract::ContentType,
+    #[serde(default = "default_true_file_tagging")]
+    pub file_tagging_enabled: bool,
     #[serde(default)]
     pub gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
 }
@@ -138,12 +138,16 @@ fn default_true_fallback() -> bool {
     true
 }
 
+fn default_true_file_tagging() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ModeConfigSnapshot {
     pub modes_enabled: bool,
     pub mode: TranscriptionMode,
     pub gemini_fallback_to_whisper: bool,
-    pub content_type: crate::pipeline_contract::ContentType,
+    pub file_tagging_enabled: bool,
     pub gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
     /// Human labels for UI (copywriting).
     pub mode_label: String,
@@ -172,7 +176,7 @@ pub fn get_mode_config(state: State<'_, SharedState>) -> ModeConfigSnapshot {
         modes_enabled: *state.modes_enabled.read(),
         mode,
         gemini_fallback_to_whisper: *state.gemini_fallback_to_whisper.read(),
-        content_type: *state.content_type.read(),
+        file_tagging_enabled: *state.file_tagging_enabled.read(),
         gemini_pipelines: state.gemini_pipelines.read().clone(),
         mode_label: label.to_string(),
         mode_description: desc.to_string(),
@@ -195,32 +199,31 @@ pub async fn update_mode_config(
     }
 
     log::info!(
-        "update_mode_config: enabled={} mode={:?} gemini_fallback={}",
-        payload.modes_enabled,
+        "update_mode_config: mode={:?} gemini_fallback={}",
         payload.mode,
         payload.gemini_fallback_to_whisper
     );
 
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        *shared.modes_enabled.write() = payload.modes_enabled;
+        *shared.modes_enabled.write() = true;
         *shared.transcription_mode.write() = payload.mode;
         *shared.gemini_fallback_to_whisper.write() = payload.gemini_fallback_to_whisper;
-        *shared.content_type.write() = payload.content_type;
+        *shared.file_tagging_enabled.write() = payload.file_tagging_enabled;
         *shared.gemini_pipelines.write() = payload.gemini_pipelines.clone();
         crate::settings::save_mode_config_batch(
-            payload.modes_enabled,
+            true,
             payload.mode,
             payload.gemini_fallback_to_whisper,
-            payload.content_type,
+            payload.file_tagging_enabled,
             payload.gemini_pipelines.clone(),
         );
         let (label, desc) = mode_copy(payload.mode);
         Ok(ModeConfigSnapshot {
-            modes_enabled: payload.modes_enabled,
+            modes_enabled: true,
             mode: payload.mode,
             gemini_fallback_to_whisper: payload.gemini_fallback_to_whisper,
-            content_type: payload.content_type,
+            file_tagging_enabled: payload.file_tagging_enabled,
             gemini_pipelines: payload.gemini_pipelines,
             mode_label: label.to_string(),
             mode_description: desc.to_string(),
@@ -534,6 +537,25 @@ pub async fn reveal_history_audio(id: String) -> Result<(), CommandError> {
     })
     .await
     .map_err(|e| CommandError::Internal(e.to_string()))?
+}
+
+/// Returns the persisted source audio as a raw IPC response for in-app
+/// playback. Resolving the file through the history id avoids exposing an
+/// arbitrary file-read command to the frontend.
+#[tauri::command]
+pub async fn read_history_audio(id: String) -> Result<tauri::ipc::Response, CommandError> {
+    let bytes = tokio::task::spawn_blocking(move || {
+        let entry = crate::history::get(&id)
+            .ok_or_else(|| CommandError::Internal("histórico não encontrado".to_string()))?;
+        let path = entry.audio_path.ok_or_else(|| {
+            CommandError::Internal("este item não possui áudio salvo".to_string())
+        })?;
+        crate::audio_store::read(&path).map_err(CommandError::Internal)
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))??;
+
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// `clear_history`

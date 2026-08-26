@@ -14,9 +14,7 @@ import {
   Eye,
   EyeOff,
   Save,
-  AlertCircle,
   CheckCircle2,
-  FlaskConical,
   FolderOpen,
   HardDrive,
   RotateCcw,
@@ -51,7 +49,6 @@ import {
   type DeepgramMode,
   type SanitizerModel,
   type TranscriptionMode,
-  type ContentType,
   type GeminiModel,
   type GeminiProvider,
   type GeminiPipelineChoice,
@@ -123,24 +120,6 @@ const MODE_CARDS: {
     engine: "Whisper → Sanitizer → Gemini",
     blurb: "Para conteúdo importante",
     Icon: Gem,
-  },
-];
-
-const CONTENT_TYPES: { id: ContentType; label: string; hint: string }[] = [
-  {
-    id: "auto",
-    label: "Automático",
-    hint: "Detecta programação ou estudo; caso contrário mantém o prompt neutro",
-  },
-  {
-    id: "programming",
-    label: "Programação",
-    hint: "Preserva literais, comandos e caminhos",
-  },
-  {
-    id: "study",
-    label: "Estudo",
-    hint: "Terminologia e estrutura explicativa",
   },
 ];
 
@@ -453,13 +432,11 @@ function GeralTab() {
 /* ------------------------------- Pipelines ------------------------------- */
 
 function PipelinesTab() {
-  const [modesEnabled, setModesEnabled] = useState(true);
   const [mode, setMode] = useState<TranscriptionMode>("ultra-fast");
-  const [contentType, setContentType] = useState<ContentType>("auto");
+  const [fileTaggingEnabled, setFileTaggingEnabled] = useState(true);
   const [geminiFallback, setGeminiFallback] = useState(true);
   const [sanitizer, setSanitizer] = useState<SanitizerModel>("llama-70b");
   const [sanitizerEnabled, setSanitizerEnabledState] = useState(true);
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [engine, setEngine] = useState("groq-whisper");
   const [dual, setDual] = useState(false);
   const [deepgramMode, setDeepgramMode] = useState<DeepgramMode>("batch");
@@ -489,17 +466,16 @@ function PipelinesTab() {
   });
 
   const persistMode = (p: {
-    modes_enabled?: boolean;
     mode?: TranscriptionMode;
     gemini_fallback_to_whisper?: boolean;
-    content_type?: ContentType;
+    file_tagging_enabled?: boolean;
     gemini_pipelines?: GeminiPipelineConfig;
   }) => {
     const payload = {
-      modes_enabled: p.modes_enabled ?? modesEnabled,
+      modes_enabled: true,
       mode: p.mode ?? mode,
       gemini_fallback_to_whisper: p.gemini_fallback_to_whisper ?? geminiFallback,
-      content_type: p.content_type ?? contentType,
+      file_tagging_enabled: p.file_tagging_enabled ?? fileTaggingEnabled,
       gemini_pipelines: p.gemini_pipelines ?? geminiPipelines,
     };
     updateModeConfig(payload)
@@ -510,10 +486,9 @@ function PipelinesTab() {
   useEffect(() => {
     getModeConfig()
       .then((m) => {
-        setModesEnabled(m.modes_enabled);
         setMode(m.mode);
         setGeminiFallback(m.gemini_fallback_to_whisper);
-        setContentType(m.content_type || "auto");
+        setFileTaggingEnabled(m.file_tagging_enabled);
         setGeminiPipelines(m.gemini_pipelines);
       })
       .catch(console.error);
@@ -535,8 +510,7 @@ function PipelinesTab() {
 
   const selectMode = (id: TranscriptionMode) => {
     setMode(id);
-    setModesEnabled(true);
-    persistMode({ mode: id, modes_enabled: true });
+    persistMode({ mode: id });
   };
 
   const updateGeminiRoute = (
@@ -569,12 +543,6 @@ function PipelinesTab() {
             <p className="mt-1 text-[13px] text-muted">
               {selected.engine} · {selected.blurb}
             </p>
-            {!modesEnabled && (
-              <p className="mt-2 flex items-center gap-1.5 text-[12px] text-[#8a5b16]">
-                <AlertCircle className="h-3.5 w-3.5" />
-                Modos desligados — o fluxo legado (motores manuais) está em uso.
-              </p>
-            )}
           </div>
           {status && (
             <span className="inline-flex items-center gap-1.5 text-xs text-[#25613f]">
@@ -595,7 +563,7 @@ function PipelinesTab() {
           aria-label="Modo de transcrição"
         >
           {MODE_CARDS.map((card) => {
-            const active = modesEnabled && mode === card.id;
+            const active = mode === card.id;
             const Icon = card.Icon;
             const routeKey =
               card.id === "fast-accurate"
@@ -765,43 +733,27 @@ function PipelinesTab() {
       </div>
 
       <section className="border-t border-line pt-6">
-        <h3 className="text-[14px] font-medium text-ink">Tipo de conteúdo</h3>
-        <p className="mt-1 text-[12px] leading-5 text-muted">
-          Ajusta o tom do validador e do Gemini. Não garante resultado perfeito —
-          só orienta o pipeline.
-        </p>
-        <div
-          className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3"
-          role="group"
-          aria-label="Tipo de conteúdo"
-        >
-          {CONTENT_TYPES.map((ct) => {
-            const on = contentType === ct.id;
-            return (
-              <button
-                key={ct.id}
-                type="button"
-                aria-pressed={on}
-                onClick={() => {
-                  setContentType(ct.id);
-                  persistMode({ content_type: ct.id });
-                }}
-                className={
-                  "rounded-[9px] border px-4 py-3 text-left transition-colors " +
-                  (on
-                    ? "border-[#5c5d57] bg-[#f0f0eb]"
-                    : "border-line bg-white hover:border-line-strong")
-                }
-              >
-                <div className="text-[13px] font-medium text-ink">{ct.label}</div>
-                <div className="mt-0.5 text-[11px] leading-4 text-muted">{ct.hint}</div>
-              </button>
-            );
-          })}
+        <h3 className="text-[14px] font-medium text-ink">Vibe coding</h3>
+        <div className="surface-subtle mt-3 flex items-center justify-between gap-5 px-5 py-4">
+          <div>
+            <h4 className="text-[13px] font-medium text-ink">FileTagging</h4>
+            <p className="mt-1 max-w-2xl text-[12px] leading-5 text-muted">
+              Converte referências claras a arquivos em menções como @index.tsx.
+              O texto é preparado para chats de código; o IDE decide como usar a menção.
+            </p>
+          </div>
+          <Toggle
+            label="Ativar FileTagging"
+            checked={fileTaggingEnabled}
+            onChange={(value) => {
+              setFileTaggingEnabled(value);
+              persistMode({ file_tagging_enabled: value });
+            }}
+          />
         </div>
       </section>
 
-      {mode === "fast-accurate" && modesEnabled && (
+      {mode === "fast-accurate" && (
         <div className="surface-subtle flex items-center justify-between gap-4 px-5 py-4">
           <div>
             <h4 className="text-[13px] font-medium text-ink">
@@ -822,7 +774,7 @@ function PipelinesTab() {
         </div>
       )}
 
-      {(mode === "ultra-precise" || !modesEnabled) && (
+      {mode === "ultra-precise" && (
         <div className="surface-subtle space-y-3 p-5">
           <div className="flex items-center justify-between">
             <div>
@@ -830,7 +782,7 @@ function PipelinesTab() {
                 Validador semântico
               </h4>
               <p className="mt-1 text-[12px] text-muted">
-                Limpa ortografia após o Whisper (Ultrapreciso e fluxo legado).
+                Limpa ortografia após o Whisper no pipeline Ultrapreciso.
               </p>
             </div>
             <Toggle
@@ -883,150 +835,6 @@ function PipelinesTab() {
         </div>
       )}
 
-      {/* Advanced / experimental */}
-      <div className="pt-2">
-        <button
-          type="button"
-          onClick={() => setShowAdvanced((v) => !v)}
-          className="flex items-center gap-2 text-[12px] font-medium text-[#555650] hover:text-ink"
-        >
-          <FlaskConical className="h-3.5 w-3.5" />
-          {showAdvanced ? "Ocultar avançado" : "Avançado e experimental"}
-        </button>
-      </div>
-
-      {showAdvanced && (
-        <div className="surface-subtle space-y-5 p-5">
-          <div className="flex items-start gap-2">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#8a5b16]" />
-            <p className="text-[12px] leading-5 text-muted">
-              Opções legadas. Com um modo de pipeline ativo, o dual engine e a
-              escolha manual de motor{" "}
-              <strong className="font-medium text-[#444540]">não</strong> definem o caminho
-              principal — só valem se você desligar os modos abaixo.
-            </p>
-          </div>
-
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h4 className="text-[13px] font-medium text-ink">
-                Usar modos de pipeline
-              </h4>
-              <p className="text-[12px] text-muted">
-                Desligado = fluxo antigo (motor + dual + Deepgram).
-              </p>
-            </div>
-            <Toggle
-              label="Usar modos de pipeline"
-              checked={modesEnabled}
-              onChange={(v) => {
-                setModesEnabled(v);
-                persistMode({ modes_enabled: v });
-              }}
-            />
-          </div>
-
-          <div className={"space-y-4 " + (modesEnabled ? "opacity-40" : "")}>
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h4 className="text-[13px] font-medium text-ink">
-                  Dual Whisper + Deepgram
-                </h4>
-                <p className="text-[12px] text-muted">
-                  Só no fluxo legado. Não se mistura com os cards de modo.
-                </p>
-              </div>
-              <Toggle
-                label="Ativar Dual Whisper e Deepgram"
-                checked={dual}
-                disabled={modesEnabled}
-                onChange={(v) => {
-                  setDual(v);
-                  invoke("update_engine_config", {
-                    payload: {
-                      engine,
-                      sanitizer,
-                      dual_engine: v,
-                      reasoning_enabled: reasoning,
-                      reasoning_effort: effort,
-                      deepgram_mode: deepgramMode,
-                    },
-                  }).catch(console.error);
-                }}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="field-label">
-                Deepgram (experimental)
-              </label>
-              <div className="flex gap-2">
-                {(
-                  [
-                    ["batch", "Batch"],
-                    ["streaming_final", "Streaming final"],
-                  ] as const
-                ).map(([id, label]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    disabled={modesEnabled}
-                    onClick={() => {
-                      setDeepgramMode(id);
-                      invoke("update_engine_config", {
-                        payload: {
-                          engine: dual ? engine : "deepgram-nova3",
-                          sanitizer,
-                          dual_engine: dual,
-                          reasoning_enabled: reasoning,
-                          reasoning_effort: effort,
-                          deepgram_mode: id,
-                        },
-                      }).catch(console.error);
-                    }}
-                    className={
-                      "flex-1 rounded-[8px] border py-2 text-[12px] font-medium " +
-                      (deepgramMode === id
-                        ? "border-[#22221f] bg-[#22221f] text-white"
-                        : "border-line bg-white text-[#555650]")
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h4 className="text-[13px] font-medium text-ink">
-                  Reasoning no validador (GPT-OSS)
-                </h4>
-                <p className="text-[12px] text-muted">
-                  Desligado por padrão. Só modelos GPT-OSS.
-                </p>
-              </div>
-              <Toggle
-                label="Ativar reasoning no validador"
-                checked={reasoning}
-                onChange={(v) => {
-                  setReasoning(v);
-                  invoke("update_engine_config", {
-                    payload: {
-                      engine,
-                      sanitizer,
-                      dual_engine: dual,
-                      reasoning_enabled: v,
-                      reasoning_effort: effort,
-                      deepgram_mode: deepgramMode,
-                    },
-                  }).catch(console.error);
-                }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1081,13 +889,6 @@ function ProvedoresTab() {
       placeholder: "AIza…",
       help: "Transcrição Gemini e avaliação de pronúncia no Histórico.",
       requiredFor: "Rápido e preciso, Preciso, Ultrapreciso, Pronúncia",
-    },
-    {
-      id: "deepgram",
-      name: "Deepgram",
-      placeholder: "Cole sua chave Deepgram…",
-      help: "Apenas no fluxo legado / experimental.",
-      requiredFor: "Avançado · dual / Deepgram",
     },
     {
       id: "openrouter",

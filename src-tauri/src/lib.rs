@@ -1002,7 +1002,7 @@ pub fn run() {
                         *state.transcription_mode.write() = settings::load_transcription_mode();
                         *state.gemini_fallback_to_whisper.write() =
                             settings::load_gemini_fallback_to_whisper();
-                        *state.content_type.write() = settings::load_content_type();
+                        *state.file_tagging_enabled.write() = settings::load_file_tagging_enabled();
                         *state.gemini_pipelines.write() = settings::load_gemini_pipelines();
                     }
                     Err(e) => {
@@ -1070,6 +1070,7 @@ pub fn run() {
             commands::get_audio_storage_config,
             commands::set_audio_storage_directory,
             commands::reveal_history_audio,
+            commands::read_history_audio,
             commands::clear_history,
             commands::delete_history_entry,
             commands::update_history_text,

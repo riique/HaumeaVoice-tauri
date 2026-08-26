@@ -84,6 +84,9 @@ pub fn adaptive_generate_timeout(duration_ms: Option<u64>, audio_bytes: usize) -
 
 #[derive(Debug, Serialize)]
 pub struct GenerateContentRequest {
+    /// Stable behavioral policy, kept separate from request-specific evidence.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "systemInstruction")]
+    pub system_instruction: Option<Content>,
     pub contents: Vec<Content>,
     /// Prefer deterministic transcription; supported on Generative Language API.
     #[serde(skip_serializing_if = "Option::is_none", rename = "generationConfig")]
@@ -108,6 +111,7 @@ pub struct ThinkingConfig {
 impl GenerateContentRequest {
     pub fn with_parts(parts: Vec<Part>) -> Self {
         Self {
+            system_instruction: None,
             contents: vec![Content { parts }],
             generation_config: Some(GenerationConfig {
                 temperature: None,
@@ -116,6 +120,17 @@ impl GenerateContentRequest {
                 }),
             }),
         }
+    }
+
+    pub fn with_system_instruction(mut self, instruction: &str) -> Self {
+        if !instruction.trim().is_empty() {
+            self.system_instruction = Some(Content {
+                parts: vec![Part::Text {
+                    text: instruction.to_string(),
+                }],
+            });
+        }
+        self
     }
 
     /// Direct STT is a simple task: use the fastest supported reasoning level
@@ -285,11 +300,16 @@ pub async fn generate_content_with_model(
     Ok((text, generate_ms))
 }
 
-/// Build generateContent body with text prompt + inline Base64 audio.
-pub fn build_inline_request(prompt: &str, mime: &str, base64_data: &str) -> GenerateContentRequest {
+/// Build generateContent body with a real system instruction + user text + inline audio.
+pub fn build_inline_request(
+    system_instruction: &str,
+    user_prompt: &str,
+    mime: &str,
+    base64_data: &str,
+) -> GenerateContentRequest {
     GenerateContentRequest::with_parts(vec![
         Part::Text {
-            text: prompt.to_string(),
+            text: user_prompt.to_string(),
         },
         Part::Inline {
             inline_data: InlineData {
@@ -298,13 +318,19 @@ pub fn build_inline_request(prompt: &str, mime: &str, base64_data: &str) -> Gene
             },
         },
     ])
+    .with_system_instruction(system_instruction)
 }
 
-/// Build generateContent body with text prompt + remote file_data.
-pub fn build_file_request(prompt: &str, mime: &str, file_uri: &str) -> GenerateContentRequest {
+/// Build generateContent body with a real system instruction + user text + remote file.
+pub fn build_file_request(
+    system_instruction: &str,
+    user_prompt: &str,
+    mime: &str,
+    file_uri: &str,
+) -> GenerateContentRequest {
     GenerateContentRequest::with_parts(vec![
         Part::Text {
-            text: prompt.to_string(),
+            text: user_prompt.to_string(),
         },
         Part::File {
             file_data: FileData {
@@ -313,6 +339,7 @@ pub fn build_file_request(prompt: &str, mime: &str, file_uri: &str) -> GenerateC
             },
         },
     ])
+    .with_system_instruction(system_instruction)
 }
 
 #[cfg(test)]
@@ -374,8 +401,18 @@ mod tests {
 
     #[test]
     fn fast_accurate_uses_explicit_minimal_thinking_without_temperature() {
-        let request = build_inline_request("transcreva", "audio/wav", "AA==").for_fast_accurate();
+        let request =
+            build_inline_request("política", "transcreva", "audio/wav", "AA==").for_fast_accurate();
         let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            json.pointer("/systemInstruction/parts/0/text"),
+            Some(&serde_json::Value::String("política".into()))
+        );
+        assert_eq!(
+            json.pointer("/contents/0/parts/0/text"),
+            Some(&serde_json::Value::String("transcreva".into()))
+        );
 
         assert_eq!(
             json.pointer("/generationConfig/thinkingConfig/thinkingLevel"),

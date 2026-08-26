@@ -37,9 +37,6 @@ function formatEntryDuration(ms?: number): string {
 
 function routeDetails(config: ModeConfigSnapshot | null) {
   if (!config) return { engine: "Carregando…", model: "—", provider: "—" };
-  if (!config.modes_enabled) {
-    return { engine: "Fluxo legado", model: "Configuração manual", provider: "Avançado" };
-  }
   if (config.mode === "ultra-fast") {
     return {
       engine: "Whisper · baixa latência",
@@ -123,7 +120,7 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
               </span>
               <div>
                 <p className="text-[17px] font-semibold tracking-[-0.015em] text-ink">
-                  {pipeline?.modes_enabled === false ? "Legado" : MODE_LABELS[pipeline?.mode ?? ""] ?? "Carregando…"}
+                  {MODE_LABELS[pipeline?.mode ?? ""] ?? "Carregando…"}
                 </p>
                 <p className="mt-0.5 text-[12px] text-muted">{details.engine}</p>
               </div>
@@ -137,7 +134,7 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
         <dl className="mt-5 grid grid-cols-3 divide-x divide-line border-t border-line pt-4 max-[980px]:grid-cols-1 max-[980px]:divide-x-0 max-[980px]:divide-y">
           <PipelineFact label="Modelo" value={details.model} />
           <PipelineFact label="Provedor" value={details.provider} />
-          <PipelineFact label="Tipo de conteúdo" value={pipeline?.content_type === "programming" ? "Programação" : pipeline?.content_type === "study" ? "Estudo" : "Automático"} />
+          <PipelineFact label="FileTagging" value={pipeline ? (pipeline.file_tagging_enabled ? "Ativo" : "Desativado") : "Carregando…"} />
         </dl>
       </section>
 

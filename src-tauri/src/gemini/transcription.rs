@@ -28,14 +28,16 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
         .or_else(|| estimate_wav_duration_ms(&req.audio_bytes));
     let transport = select_gemini_audio_transport(req.audio_bytes.len(), duration, mime)?;
     let generate_timeout = adaptive_generate_timeout(duration, req.audio_bytes.len());
-    let prompt = fast_accurate_transcription_prompt(&req.glossary_block, &req.content_note);
+    let prompt = fast_accurate_transcription_prompt(&req.glossary_block, req.file_tagging_enabled);
 
     let (text, timing, remote) = match transport {
         GeminiAudioTransport::Inline => {
             let tb = std::time::Instant::now();
             let b64 = general_purpose::STANDARD.encode(&req.audio_bytes);
             let base64_ms = tb.elapsed().as_millis() as u64;
-            let body = build_inline_request(&prompt, mime, &b64).for_fast_accurate();
+            let body =
+                build_inline_request(&prompt.system_instruction, &prompt.user_prompt, mime, &b64)
+                    .for_fast_accurate();
             let (text, generate_ms) =
                 generate_content_with_model(&req.api_key, &req.model, &body, generate_timeout)
                     .await?;
@@ -53,8 +55,13 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
             let (guard, up) =
                 upload_and_wait(&req.api_key, &req.audio_bytes, mime, &display).await?;
             let name = guard.name().to_string();
-            let body =
-                build_file_request(&prompt, guard.mime_type(), guard.uri()).for_fast_accurate();
+            let body = build_file_request(
+                &prompt.system_instruction,
+                &prompt.user_prompt,
+                guard.mime_type(),
+                guard.uri(),
+            )
+            .for_fast_accurate();
             let gen =
                 generate_content_with_model(&req.api_key, &req.model, &body, generate_timeout)
                     .await;

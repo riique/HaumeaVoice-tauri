@@ -10,6 +10,8 @@ src-tauri/check_err.txt
 
 # Local tooling and generated diagnostics
 .kimchi/
+.impeccable/qa/screenshots/
+.serena/memories/
 nul
 *.log
 

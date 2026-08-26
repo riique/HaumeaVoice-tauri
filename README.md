@@ -2,7 +2,7 @@
 
 Aplicativo desktop de **digitação por voz** para Windows. Grave com um atalho global, o app transcreve com motores em nuvem, opcionalmente refina o texto e cola no campo focado (`Ctrl+V`).
 
-**Versão:** 1.0.15 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
+**Versão:** 1.0.17 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
 
 ---
 
@@ -14,6 +14,7 @@ Aplicativo desktop de **digitação por voz** para Windows. Grave com um atalho 
 - Upload de arquivos de áudio (WAV, MP3, etc.)
 - Histórico local sem limite artificial, com áudio revelável no Explorer, retranscrição e avaliação de pronúncia
 - Modelo customizado por pipeline via Google AI Studio ou OpenRouter (LLM multimodal ou STT dedicado no OpenRouter)
+- FileTagging opcional para converter referências faladas em menções como `@index.tsx` nos modelos multimodais
 - Vocabulário estruturado (termos, aliases, categorias, literais strict)
 - Overlay **gadget** sempre no topo + recuperação direta quando uma transcrição falha
 - Atalhos globais configuráveis (padrão: `Ctrl+B` grava, `Ctrl+Q` cancela)
@@ -22,7 +23,7 @@ Aplicativo desktop de **digitação por voz** para Windows. Grave com um atalho 
 
 ## Novidades — pipelines de transcrição
 
-A orquestração saiu de um monólito em `audio.rs` para módulos dedicados (`transcription/`, `gemini/`, contratos e vocabulário). A UI de **Configurações** passa a ser centrada em **pipelines de produto**, com o modo legado disponível em *Avançado*.
+A orquestração saiu de um monólito em `audio.rs` para módulos dedicados (`transcription/`, `gemini/`, contratos e vocabulário). A UI de **Configurações** é centrada nos pipelines de produto ativos.
 
 ### Modos de produto
 
@@ -33,13 +34,11 @@ A orquestração saiu de um monólito em `audio.rs` para módulos dedicados (`tr
 | 🎯 **Preciso** | Whisper ∥ upload → refine Gemini | Não | Whisper ou Gemini puro |
 | 💎 **Ultrapreciso** | Whisper ∥ upload → sanitizer → Gemini | Sim (JSON) | Texto sanitizado / Whisper |
 
-### Tipo de conteúdo
+### Prompt universal e FileTagging
 
-Hint opcional para o prompt de refinamento:
+Os modelos Gemini multimodais recebem uma `systemInstruction` única que trata, por trecho, conversa comum, programação e conteúdo acadêmico/científico. Não é necessário escolher previamente um tipo de conteúdo.
 
-- **Automático**
-- **Programação**
-- **Estudo**
+O botão **FileTagging** em Configurações ativa ou desativa a regra que converte referências inequívocas a arquivos em texto simples como `@src/components/Header.tsx`. A função prepara a menção no texto; a integração do IDE/chat continua sob responsabilidade do aplicativo de destino.
 
 ### Outras melhorias desta entrega
 
@@ -49,11 +48,10 @@ Hint opcional para o prompt de refinamento:
 - **Histórico observável** — modo, modelos, estágios, textos intermediários, fallback, latências; copiar / editar / excluir / detalhes / retranscrever / pronúncia
 - **Áudio configurável** — escolha a pasta para novas gravações transcritas e abra cada arquivo diretamente pelo Histórico
 - **Normalização sensível a ruído** — ganho adaptativo limitado, pausas sem amplificação de room tone, limiter em -3 dBFS e original preservado como `.original.wav`
-- **UI de Configurações** — cards de pipeline, tipo de conteúdo e painel avançado (legado)
+- **UI de Configurações** — cards de pipeline e botão persistente de FileTagging
 - **Roteamento customizado** — presets ou ID livre por pipeline; OpenRouter separa Chat Completions multimodal de Speech-to-Text dedicado
 - **Whisper no Ultrarrápido** — escolha entre `openai/whisper-large-v3-turbo` e `openai/whisper-large-v3`, sempre pelo provedor Groq no OpenRouter
 - **Recuperação no gadget** — falhas exibem uma ação **Regenerar** usando o áudio já salvo, sem abrir o Histórico
-- **Deepgram** — permanece **experimental** no caminho legado (motor manual / dual Whisper+Deepgram)
 - **Telemetria local** — latência por estágio, RTF estimado, throughput (sem analytics externo)
 - Testes unitários Rust no pipeline (`cargo test`)
 
@@ -64,14 +62,14 @@ src-tauri/src/
 ├── audio.rs                 # captura mic, WAV, clipboard/paste
 ├── transcription/           # legado + modos de produto + telemetria
 ├── gemini/                  # Files API, STT, refine, pronúncia
-├── pipeline_contract.rs     # TranscriptionMode, ContentType, estágios
+├── pipeline_contract.rs     # TranscriptionMode, configuração e estágios
 ├── vocabulary.rs            # termos estruturados
 ├── sanitizer_json.rs        # parse da saída JSON do sanitizer
-├── groq.rs / deepgram.rs    # Whisper e Deepgram (legado/fallback)
+├── groq.rs                  # Whisper e sanitizer
 └── history.rs / settings.rs
 
 src/views/
-├── ConfiguracoesView.tsx    # pipelines + avançado + vocabulário
+├── ConfiguracoesView.tsx    # pipelines + FileTagging + vocabulário
 ├── HistoricoView.tsx        # cards, detalhes, ações
 └── TranscricaoView.tsx      # upload de arquivo
 ```
@@ -88,7 +86,6 @@ Documentação técnica da migração: [`docs/TRANSCRIPTION_MIGRATION_FINAL_REPO
    - **Groq** — Preciso, Ultrapreciso, sanitizer e fallbacks legados
    - **Google (Gemini)** — Rápido e preciso, Preciso, Ultrapreciso, pronúncia
    - **OpenRouter** — obrigatório no Ultrarrápido; também aceita modelos multimodais com áudio e modelos dedicados de transcrição
-   - **Deepgram** — apenas no modo legado avançado
 
 ---
 

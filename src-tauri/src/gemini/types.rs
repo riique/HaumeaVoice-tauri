@@ -74,8 +74,8 @@ pub struct TranscribeRequest {
     pub duration_ms: Option<u64>,
     /// Glossary block for FastAccurate (strict terms + aliases).
     pub glossary_block: String,
-    /// Optional content-type label (`programming` / `study`; empty = neutral).
-    pub content_note: String,
+    /// Enables prompt-only `@file.ext` mentions in clear coding contexts.
+    pub file_tagging_enabled: bool,
 }
 
 /// Input for audio + draft text refinement.
@@ -89,4 +89,5 @@ pub struct RefineRequest {
     pub draft_text: String,
     pub duration_ms: Option<u64>,
     pub glossary_block: String,
+    pub file_tagging_enabled: bool,
 }

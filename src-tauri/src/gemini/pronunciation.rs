@@ -32,6 +32,7 @@ pub async fn evaluate_pronunciation(
     let encoded = general_purpose::STANDARD.encode(&audio_bytes);
 
     let body = GenerateContentRequest {
+        system_instruction: None,
         contents: vec![Content {
             parts: vec![
                 Part::Text {

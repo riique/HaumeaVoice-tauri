@@ -72,9 +72,8 @@ struct Settings {
     /// the exact sanitizer request, parameters and reasoning that were used.
     #[serde(default)]
     dev_mode: bool,
-    /// When `true`, use product modes (UltraFast / FastAccurate) instead of
-    /// the legacy engine+dual path. Defaults to `false` so existing installs
-    /// keep their previous behaviour until the user opts in.
+    /// Compatibility field from builds that allowed disabling product modes.
+    /// New builds always normalize it to `true`.
     #[serde(default)]
     modes_enabled: bool,
     /// Selected product mode. Absent on old installs → derived at load time.
@@ -83,8 +82,10 @@ struct Settings {
     /// FastAccurate: fall back to Whisper when Gemini fails. Default true.
     #[serde(default = "default_gemini_fallback")]
     gemini_fallback_to_whisper: bool,
+    /// When enabled, Gemini turns clear spoken file references into plain
+    /// `@path/to/file.ext` mentions. Defaults on for existing installations.
     #[serde(default)]
-    content_type: crate::pipeline_contract::ContentType,
+    file_tagging_enabled: Option<bool>,
     #[serde(default)]
     gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
     /// Optional absolute directory for future source-audio files. Existing
@@ -464,14 +465,14 @@ pub fn save_dev_mode(value: bool) {
     write(&s);
 }
 
-/// Whether product modes are active (vs legacy engine path).
+/// Product pipelines are always active. The stored flag is compatibility-only.
 pub fn load_modes_enabled() -> bool {
-    read().modes_enabled
+    true
 }
 
-pub fn save_modes_enabled(value: bool) {
+pub fn save_modes_enabled(_value: bool) {
     let mut s = read();
-    s.modes_enabled = value;
+    s.modes_enabled = true;
     write(&s);
 }
 
@@ -506,23 +507,23 @@ pub fn save_gemini_fallback_to_whisper(value: bool) {
 
 /// Atomic save of mode preferences.
 pub fn save_mode_config_batch(
-    modes_enabled: bool,
+    _modes_enabled: bool,
     mode: crate::pipeline_contract::TranscriptionMode,
     gemini_fallback_to_whisper: bool,
-    content_type: crate::pipeline_contract::ContentType,
+    file_tagging_enabled: bool,
     gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
 ) {
     let mut s = read();
-    s.modes_enabled = modes_enabled;
+    s.modes_enabled = true;
     s.transcription_mode = Some(mode);
     s.gemini_fallback_to_whisper = gemini_fallback_to_whisper;
-    s.content_type = content_type;
+    s.file_tagging_enabled = Some(file_tagging_enabled);
     s.gemini_pipelines = gemini_pipelines;
     write(&s);
 }
 
-pub fn load_content_type() -> crate::pipeline_contract::ContentType {
-    read().content_type
+pub fn load_file_tagging_enabled() -> bool {
+    read().file_tagging_enabled.unwrap_or(true)
 }
 
 /// Loads the new visibility preference, coherently migrating the old compact

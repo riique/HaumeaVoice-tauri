@@ -56,17 +56,6 @@ pub async fn run_sanitize(
     let mut changed = false;
     let start_sanitizer = std::time::Instant::now();
 
-    // Content-type hint (auto heuristic resolves to a concrete type).
-    let content_type = crate::sanitizer_json::resolve_content_type(
-        *state.content_type.read(),
-        &pick_raw_acoustic(whisper_text, deepgram_text),
-    );
-    let system_prompt_to_use = format!(
-        "{}{}",
-        system_prompt_to_use,
-        crate::sanitizer_json::content_type_instruction(content_type)
-    );
-
     let final_text = if !*state.sanitizer_enabled.read() {
         let picked = pick_raw_acoustic(whisper_text, deepgram_text);
         log::info!(
@@ -156,7 +145,9 @@ pub async fn run_sanitize(
         warnings,
         used_raw_fallback,
         changed,
-        content_type,
+        // Kept only for compatibility with historical/debug structures. The
+        // active prompt no longer branches on a user-selected content type.
+        content_type: crate::pipeline_contract::ContentType::Auto,
     }
 }
 

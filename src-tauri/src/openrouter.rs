@@ -47,7 +47,14 @@ struct ChatRequest<'a> {
 #[derive(Debug, Serialize)]
 struct Message<'a> {
     role: &'static str,
-    content: Vec<ContentPart<'a>>,
+    content: MessageContent<'a>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum MessageContent<'a> {
+    Text(&'a str),
+    Parts(Vec<ContentPart<'a>>),
 }
 
 #[derive(Debug, Serialize)]
@@ -200,7 +207,8 @@ pub async fn detect_audio_route(model: &str) -> OpenRouterAudioRoute {
 pub async fn generate_with_audio(
     audio: &[u8],
     ext: &str,
-    prompt: &str,
+    system_instruction: &str,
+    user_prompt: &str,
     model: &str,
     api_key: &str,
     timeout: Duration,
@@ -218,18 +226,24 @@ pub async fn generate_with_audio(
     let base64_ms = encode_started.elapsed().as_millis() as u64;
     let body = ChatRequest {
         model,
-        messages: vec![Message {
-            role: "user",
-            content: vec![
-                ContentPart::Text { text: prompt },
-                ContentPart::InputAudio {
-                    input_audio: InputAudio {
-                        data: &encoded,
-                        format,
+        messages: vec![
+            Message {
+                role: "system",
+                content: MessageContent::Text(system_instruction),
+            },
+            Message {
+                role: "user",
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text { text: user_prompt },
+                    ContentPart::InputAudio {
+                        input_audio: InputAudio {
+                            data: &encoded,
+                            format,
+                        },
                     },
-                },
-            ],
-        }],
+                ]),
+            },
+        ],
         stream: false,
     };
 
@@ -417,25 +431,33 @@ mod tests {
     fn request_matches_openrouter_audio_contract() {
         let body = ChatRequest {
             model: "google/gemini-3.6-flash",
-            messages: vec![Message {
-                role: "user",
-                content: vec![
-                    ContentPart::Text { text: "transcreva" },
-                    ContentPart::InputAudio {
-                        input_audio: InputAudio {
-                            data: "UklGRg==",
-                            format: "wav",
+            messages: vec![
+                Message {
+                    role: "system",
+                    content: MessageContent::Text("política"),
+                },
+                Message {
+                    role: "user",
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Text { text: "transcreva" },
+                        ContentPart::InputAudio {
+                            input_audio: InputAudio {
+                                data: "UklGRg==",
+                                format: "wav",
+                            },
                         },
-                    },
-                ],
-            }],
+                    ]),
+                },
+            ],
             stream: false,
         };
         let json = serde_json::to_value(body).unwrap();
         assert_eq!(json["model"], "google/gemini-3.6-flash");
-        assert_eq!(json["messages"][0]["content"][1]["type"], "input_audio");
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert_eq!(json["messages"][0]["content"], "política");
+        assert_eq!(json["messages"][1]["content"][1]["type"], "input_audio");
         assert_eq!(
-            json["messages"][0]["content"][1]["input_audio"]["format"],
+            json["messages"][1]["content"][1]["input_audio"]["format"],
             "wav"
         );
     }

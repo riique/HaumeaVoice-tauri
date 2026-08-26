@@ -40,6 +40,6 @@ pub use client::mime_for_ext;
 pub use files::{spawn_cleanup, upload_and_wait, RemoteFileGuard, UploadTiming};
 pub(crate) use prompts::{
     fast_accurate_transcription_prompt, precise_refinement_prompt, transcription_prompt,
-    ultraprecise_refinement_prompt, PRECISE_PROMPT_VERSION, TRANSCRIBE_PROMPT_VERSION,
-    ULTRAPRECISE_PROMPT_VERSION,
+    ultraprecise_refinement_prompt, GeminiPrompt, PRECISE_PROMPT_VERSION,
+    TRANSCRIBE_PROMPT_VERSION, ULTRAPRECISE_PROMPT_VERSION,
 };

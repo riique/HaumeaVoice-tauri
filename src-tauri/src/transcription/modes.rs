@@ -7,7 +7,7 @@ use crate::gemini::{
     mime_for_ext, precise_refinement_prompt, refine_precise, refine_precise_with_file,
     refine_ultraprecise, spawn_cleanup, transcribe_audio, transcribe_inline, transcribe_with_file,
     transcription_prompt, ultraprecise_refinement_prompt, upload_and_wait, GeminiAudioTransport,
-    GeminiGenerateResult, GeminiOperation, GeminiStageTiming, TranscribeRequest,
+    GeminiGenerateResult, GeminiOperation, GeminiPrompt, GeminiStageTiming, TranscribeRequest,
     PRECISE_PROMPT_VERSION, TRANSCRIBE_PROMPT_VERSION, ULTRAPRECISE_PROMPT_VERSION,
 };
 use crate::models::{AppState, HistoryEntry, SanitizerDebug, TranscriptionEngine};
@@ -56,7 +56,7 @@ pub struct ModePipelineResult {
 async fn openrouter_audio_result(
     audio: &[u8],
     ext: &str,
-    prompt: &str,
+    prompt: &GeminiPrompt,
     model: &str,
     api_key: &str,
     duration_ms: Option<u64>,
@@ -75,7 +75,8 @@ async fn openrouter_audio_result(
             crate::openrouter::generate_with_audio(
                 audio,
                 ext,
-                prompt,
+                &prompt.system_instruction,
+                &prompt.user_prompt,
                 model,
                 api_key,
                 adaptive_timeout,
@@ -262,14 +263,7 @@ pub async fn run_fast_accurate(
         let vocab = state.vocabulary.read().clone();
         crate::vocabulary::format_glossary_for_prompt(&vocab)
     };
-    // Content type for FastAccurate is pre-hint only (no acoustic text yet).
-    // After Gemini we re-resolve on the transcript for history; preference still applies.
-    let pref_ct = *state.content_type.read();
-    let content_note = if pref_ct == crate::pipeline_contract::ContentType::Auto {
-        String::new() // detect after we have text; empty = neutral prompt
-    } else {
-        pref_ct.as_str().to_string()
-    };
+    let file_tagging_enabled = *state.file_tagging_enabled.read();
     log::info!(
         "modes: FastAccurate → Gemini hybrid (fallback_to_whisper={})",
         fallback
@@ -327,11 +321,13 @@ pub async fn run_fast_accurate(
                 display_name: file_name.to_string(),
                 duration_ms,
                 glossary_block,
-                content_note: content_note.clone(),
+                file_tagging_enabled,
             };
             let generated = if choice.provider == GeminiProvider::OpenRouter {
-                let prompt =
-                    fast_accurate_transcription_prompt(&req.glossary_block, &req.content_note);
+                let prompt = fast_accurate_transcription_prompt(
+                    &req.glossary_block,
+                    req.file_tagging_enabled,
+                );
                 openrouter_audio_result(
                     &req.audio_bytes,
                     ext,
@@ -412,7 +408,6 @@ pub async fn run_fast_accurate(
     }
 
     let ms = t0.elapsed().as_millis() as u64;
-    let resolved_ct = crate::sanitizer_json::resolve_content_type(pref_ct, final_text.trim());
     Ok(ModePipelineResult {
         final_text: final_text.trim().to_string(),
         mode: TranscriptionMode::FastAccurate,
@@ -434,7 +429,6 @@ pub async fn run_fast_accurate(
         files_poll_count: result_meta.files_poll_count,
         gemini_generate_ms: result_meta.gemini_generate_ms,
         gemini_transport: result_meta.gemini_transport,
-        content_type: Some(resolved_ct.as_str().to_string()),
         ..Default::default()
     })
 }
@@ -465,6 +459,7 @@ pub async fn run_precise(
         crate::vocabulary::format_glossary_for_prompt(&vocab)
     };
     let vocab_snapshot = state.vocabulary.read().clone();
+    let file_tagging_enabled = *state.file_tagging_enabled.read();
     let display = if file_name.trim().is_empty() {
         format!("haumea-precise.{}", ext)
     } else {
@@ -555,7 +550,7 @@ pub async fn run_precise(
                     openrouter_audio_result(
                         &audio,
                         ext,
-                        transcription_prompt(),
+                        &transcription_prompt(file_tagging_enabled),
                         &model_id,
                         &api_key,
                         duration_ms,
@@ -564,8 +559,15 @@ pub async fn run_precise(
                     )
                     .await
                 } else {
-                    transcribe_inline(&api_key, &model_id, &audio, mime_g, Some((b64, base64_ms)))
-                        .await
+                    transcribe_inline(
+                        &api_key,
+                        &model_id,
+                        &audio,
+                        mime_g,
+                        file_tagging_enabled,
+                        Some((b64, base64_ms)),
+                    )
+                    .await
                 };
                 return finish_precise_pure(
                     pure,
@@ -579,7 +581,8 @@ pub async fn run_precise(
                 );
             }
             let refined = if choice.provider == GeminiProvider::OpenRouter {
-                let prompt = precise_refinement_prompt(&w_trim, &glossary_block);
+                let prompt =
+                    precise_refinement_prompt(&w_trim, &glossary_block, file_tagging_enabled);
                 openrouter_audio_result(
                     &audio,
                     ext,
@@ -600,6 +603,7 @@ pub async fn run_precise(
                     &display,
                     &w_trim,
                     &glossary_block,
+                    file_tagging_enabled,
                     duration_ms,
                     Some((b64, base64_ms)),
                 )
@@ -632,9 +636,15 @@ pub async fn run_precise(
             if w_trim.is_empty() {
                 stages.push("whisper_empty".into());
                 let file_ref = guard.file_ref();
-                let pure =
-                    transcribe_with_file(&api_key, &model_id, &file_ref, duration_ms, audio.len())
-                        .await;
+                let pure = transcribe_with_file(
+                    &api_key,
+                    &model_id,
+                    &file_ref,
+                    file_tagging_enabled,
+                    duration_ms,
+                    audio.len(),
+                )
+                .await;
                 spawn_cleanup(guard);
                 return finish_precise_pure(
                     pure,
@@ -654,6 +664,7 @@ pub async fn run_precise(
                 &file_ref,
                 &w_trim,
                 &glossary_block,
+                file_tagging_enabled,
                 duration_ms,
                 audio.len(),
             )
@@ -710,7 +721,7 @@ pub async fn run_precise(
                 openrouter_audio_result(
                     &audio,
                     ext,
-                    transcription_prompt(),
+                    &transcription_prompt(file_tagging_enabled),
                     &model_id,
                     &api_key,
                     duration_ms,
@@ -719,7 +730,15 @@ pub async fn run_precise(
                 )
                 .await
             } else {
-                transcribe_inline(&api_key, &model_id, &audio, mime_g, Some((b64, base64_ms))).await
+                transcribe_inline(
+                    &api_key,
+                    &model_id,
+                    &audio,
+                    mime_g,
+                    file_tagging_enabled,
+                    Some((b64, base64_ms)),
+                )
+                .await
             };
             finish_precise_pure(
                 pure,
@@ -746,9 +765,15 @@ pub async fn run_precise(
             meta.upload_ms = Some(wall_ms);
             stages.push(format!("whisper_failed:{}", w_err));
             let file_ref = guard.file_ref();
-            let pure =
-                transcribe_with_file(&api_key, &model_id, &file_ref, duration_ms, audio.len())
-                    .await;
+            let pure = transcribe_with_file(
+                &api_key,
+                &model_id,
+                &file_ref,
+                file_tagging_enabled,
+                duration_ms,
+                audio.len(),
+            )
+            .await;
             spawn_cleanup(guard);
             finish_precise_pure(
                 pure,
@@ -923,6 +948,7 @@ pub async fn run_ultra_precise(
         crate::vocabulary::format_glossary_for_prompt(&vocab)
     };
     let vocab_snapshot = state.vocabulary.read().clone();
+    let file_tagging_enabled = *state.file_tagging_enabled.read();
     let display = if file_name.trim().is_empty() {
         format!("haumea-ultraprecise.{}", ext)
     } else {
@@ -1040,10 +1066,6 @@ pub async fn run_ultra_precise(
     } else {
         sanitize.final_text.clone()
     };
-    let resolved_ct =
-        crate::sanitizer_json::resolve_content_type(*state.content_type.read(), &whisper_text);
-    let content_note = resolved_ct.as_str().to_string();
-
     let mut meta = ModePipelineResult {
         whisper_ms: Some(whisper_ms),
         sanitizer_ms: Some(sanitizer_ms),
@@ -1063,7 +1085,7 @@ pub async fn run_ultra_precise(
                         &whisper_text,
                         &sanitized_text,
                         &glossary_block,
-                        &content_note,
+                        file_tagging_enabled,
                     );
                     openrouter_audio_result(
                         &audio,
@@ -1086,7 +1108,7 @@ pub async fn run_ultra_precise(
                         &whisper_text,
                         &sanitized_text,
                         &glossary_block,
-                        &content_note,
+                        file_tagging_enabled,
                         duration_ms,
                         Some((b64, base64_ms)),
                     )
@@ -1150,7 +1172,7 @@ pub async fn run_ultra_precise(
                     &whisper_text,
                     &sanitized_text,
                     &glossary_block,
-                    &content_note,
+                    file_tagging_enabled,
                     duration_ms,
                     audio.len(),
                 )
@@ -1262,7 +1284,6 @@ pub async fn run_ultra_precise(
         gemini_transport: meta.gemini_transport,
         strict_literals_ms: meta.strict_literals_ms,
         warnings: meta.warnings,
-        content_type: Some(content_note),
         ..Default::default()
     })
 }
@@ -1438,11 +1459,12 @@ pub fn mode_failed_history(
 }
 
 pub fn should_use_product_mode(state: &AppState) -> bool {
-    if !*state.modes_enabled.read() {
-        return false;
-    }
+    is_product_mode(*state.transcription_mode.read())
+}
+
+fn is_product_mode(mode: TranscriptionMode) -> bool {
     matches!(
-        *state.transcription_mode.read(),
+        mode,
         TranscriptionMode::UltraFast
             | TranscriptionMode::FastAccurate
             | TranscriptionMode::Precise
@@ -1517,6 +1539,18 @@ pub fn acoustic_from_whisper(text: String) -> AcousticOutcome {
 mod tests {
     use super::*;
     use crate::pipeline_contract::TranscriptionMode;
+
+    #[test]
+    fn every_available_mode_is_a_product_pipeline() {
+        for mode in [
+            TranscriptionMode::UltraFast,
+            TranscriptionMode::FastAccurate,
+            TranscriptionMode::Precise,
+            TranscriptionMode::UltraPrecise,
+        ] {
+            assert!(is_product_mode(mode));
+        }
+    }
 
     #[test]
     fn mode_history_fields() {

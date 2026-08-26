@@ -44,10 +44,6 @@ export interface EngineConfigSnapshot {
   deepgram_mode: DeepgramMode;
 }
 
-export type ContentType =
-  | "auto"
-  | "programming"
-  | "study";
 export type GeminiModel = "flash-lite35" | "flash36";
 export type GeminiProvider = "google-ai-studio" | "open-router";
 export type OpenRouterWhisperModel = "large-v3-turbo" | "large-v3";
@@ -68,7 +64,7 @@ export interface ModeConfigPayload {
   modes_enabled: boolean;
   mode: TranscriptionMode;
   gemini_fallback_to_whisper: boolean;
-  content_type: ContentType;
+  file_tagging_enabled: boolean;
   gemini_pipelines: GeminiPipelineConfig;
 }
 
@@ -76,7 +72,7 @@ export interface ModeConfigSnapshot {
   modes_enabled: boolean;
   mode: TranscriptionMode;
   gemini_fallback_to_whisper: boolean;
-  content_type: ContentType;
+  file_tagging_enabled: boolean;
   gemini_pipelines: GeminiPipelineConfig;
   mode_label: string;
   mode_description: string;
@@ -275,6 +271,11 @@ export async function setAudioStorageDirectory(
 /** Opens Explorer with the saved audio file selected. */
 export async function revealHistoryAudio(id: string): Promise<void> {
   await invoke<void>("reveal_history_audio", { id });
+}
+
+/** Reads the saved source audio as raw bytes for in-app playback. */
+export async function readHistoryAudio(id: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_history_audio", { id });
 }
 
 /** Regenerates a persisted transcription from its saved audio. */

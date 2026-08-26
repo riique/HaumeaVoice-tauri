@@ -90,7 +90,7 @@ pub fn mock_refine(
         return Err("o Gemini não retornou texto".into());
     }
     // draft is embedded in prompt (sanity for tests)
-    let _ = refinement_prompt(draft);
+    let _ = refinement_prompt(draft, false);
     Ok(GeminiGenerateResult {
         operation: GeminiOperation::Refine,
         text,
@@ -174,6 +174,6 @@ mod tests {
 
     #[test]
     fn transcription_prompt_loaded() {
-        assert!(!transcription_prompt().is_empty());
+        assert!(!transcription_prompt(false).system_instruction.is_empty());
     }
 }

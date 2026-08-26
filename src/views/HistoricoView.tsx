@@ -9,7 +9,9 @@ import {
   FolderOpen,
   Loader2,
   MoreHorizontal,
+  Pause,
   Pencil,
+  Play,
   RefreshCw,
   Search,
   Sparkles,
@@ -23,6 +25,7 @@ import {
   evaluatePronunciation,
   getDevMode,
   getHistory,
+  readHistoryAudio,
   revealHistoryAudio,
   retryTranscription,
   type HistoryEntry,
@@ -55,6 +58,22 @@ function formatEntryDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(parsed);
+}
+
+function audioMimeType(path: string | null | undefined): string {
+  const extension = path?.split(".").pop()?.toLowerCase();
+  return ({
+    wav: "audio/wav",
+    wave: "audio/wav",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    mp4: "audio/mp4",
+    aac: "audio/mp4",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    oga: "audio/ogg",
+    webm: "audio/webm",
+  } as Record<string, string>)[extension ?? ""] ?? "application/octet-stream";
 }
 
 function formatHistoryForClipboard(items: HistoryEntry[]): string {
@@ -134,9 +153,32 @@ export function HistoricoView() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [loadingAudioId, setLoadingAudioId] = useState<string | null>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+  const activeAudioIdRef = useRef<string | null>(null);
+
+  const releaseAudio = () => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    audioRef.current = null;
+    audioUrlRef.current = null;
+    activeAudioIdRef.current = null;
+  };
+
+  const disposeAudio = () => {
+    releaseAudio();
+    setPlayingId(null);
+  };
 
   const refresh = async () => {
     try {
@@ -152,7 +194,10 @@ export function HistoricoView() {
     void refresh();
     void getDevMode().then(setDevMode).catch(console.error);
     const unlistenPromise = listen("transcription-saved", () => void refresh());
-    return () => { void unlistenPromise.then((unlisten) => unlisten()); };
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+      releaseAudio();
+    };
   }, []);
 
   useEffect(() => {
@@ -174,6 +219,47 @@ export function HistoricoView() {
       window.setTimeout(() => setCopiedId((current) => current === id ? null : current), 1500);
     } catch {
       setErrors((current) => ({ ...current, [id]: "Não foi possível copiar." }));
+    }
+  };
+
+  const toggleAudio = async (entry: HistoryEntry) => {
+    const currentAudio = audioRef.current;
+    if (activeAudioIdRef.current === entry.id && currentAudio) {
+      if (currentAudio.paused) {
+        await currentAudio.play();
+      } else {
+        currentAudio.pause();
+      }
+      return;
+    }
+
+    disposeAudio();
+    setLoadingAudioId(entry.id);
+    setErrors((current) => {
+      const next = { ...current };
+      delete next[entry.id];
+      return next;
+    });
+    try {
+      const bytes = await readHistoryAudio(entry.id);
+      const url = URL.createObjectURL(new Blob([bytes], { type: audioMimeType(entry.audio_path) }));
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audioUrlRef.current = url;
+      activeAudioIdRef.current = entry.id;
+      audio.onplay = () => setPlayingId(entry.id);
+      audio.onpause = () => setPlayingId((current) => current === entry.id ? null : current);
+      audio.onended = disposeAudio;
+      audio.onerror = () => {
+        setErrors((current) => ({ ...current, [entry.id]: "Não foi possível reproduzir o áudio salvo." }));
+        disposeAudio();
+      };
+      await audio.play();
+    } catch (error) {
+      disposeAudio();
+      setErrors((current) => ({ ...current, [entry.id]: String(error) }));
+    } finally {
+      setLoadingAudioId((current) => current === entry.id ? null : current);
     }
   };
 
@@ -222,6 +308,7 @@ export function HistoricoView() {
     setMenuOpen(null);
     if (!window.confirm("Excluir esta transcrição e o áudio salvo?")) return;
     try {
+      if (activeAudioIdRef.current === id) disposeAudio();
       await invoke("delete_history_entry", { id });
       setItems((current) => current.filter((item) => item.id !== id));
     } catch (error) {
@@ -236,6 +323,7 @@ export function HistoricoView() {
 
   const clearAll = async () => {
     if (!window.confirm("Limpar todo o histórico e remover os áudios salvos?")) return;
+    disposeAudio();
     await invoke("clear_history");
     setItems([]);
   };
@@ -291,6 +379,7 @@ export function HistoricoView() {
                     )}
                   </div>
                   <div className="flex items-start gap-1">
+                    {hasAudio && <button className="icon-button" disabled={loadingAudioId === entry.id} onClick={() => void toggleAudio(entry)} aria-label={playingId === entry.id ? "Pausar áudio" : "Reproduzir áudio"} title={playingId === entry.id ? "Pausar áudio" : "Reproduzir áudio"}>{loadingAudioId === entry.id ? <Loader2 className="h-4 w-4 animate-spin" /> : playingId === entry.id ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}</button>}
                     {!isError && <button className="icon-button" onClick={() => void copyText(entry.id, entry.text)} aria-label="Copiar transcrição" title="Copiar">{copiedId === entry.id ? <Check className="h-4 w-4 text-[#25613f]" /> : <Copy className="h-4 w-4" />}</button>}
                     {!isError && <button className="icon-button" onClick={() => { setEditingId(entry.id); setEditDraft(entry.text); }} aria-label="Editar transcrição" title="Editar"><Pencil className="h-4 w-4" /></button>}
                     {hasAudio && <button className="icon-button" disabled={isBusy} onClick={() => void retry(entry.id)} aria-label="Retranscrever" title="Retranscrever">{isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}</button>}
