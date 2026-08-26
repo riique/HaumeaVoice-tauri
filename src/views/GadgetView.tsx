@@ -19,6 +19,7 @@ import {
 import {
   GADGET_STATES,
   restState,
+  showsProcessingLabel,
   stateAfterTimeout,
   type GadgetState,
 } from "../gadget/machine";
@@ -45,12 +46,19 @@ export function GadgetApp() {
   const stateRef = useRef<GadgetState>("hidden");
   const modeRef = useRef<WidgetVisibilityMode>("auto");
   const lastHitRectRef = useRef("");
+  const visualStateQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const transition = useCallback((next: GadgetState) => {
     if (stateRef.current === next) return;
     stateRef.current = next;
     setState(next);
-    void setGadgetVisualState(next).catch((error) => console.error("set_gadget_visual_state failed:", error));
+    visualStateQueueRef.current = visualStateQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const latest = stateRef.current;
+        await setGadgetVisualState(latest);
+      })
+      .catch((error) => console.error("set_gadget_visual_state failed:", error));
   }, []);
 
   const transitionToRest = useCallback(() => {
@@ -283,7 +291,7 @@ function GadgetPill({ state, level, shortcut, failure, retrying, progressMessage
     return (
       <div className={`haumea-bar ${state === "processing" ? "haumea-bar--processing" : "haumea-bar--processing-long"}`} role="status">
         <ProcessingDots />
-        {(state === "processing_long" || progressMessage) && <span className="haumea-bar__status">{retrying ? "Tentando novamente…" : progressMessage || "Transcrevendo…"}</span>}
+        {showsProcessingLabel(state) && <span className="haumea-bar__status">{retrying ? "Tentando novamente…" : progressMessage || "Transcrevendo…"}</span>}
       </div>
     );
   }

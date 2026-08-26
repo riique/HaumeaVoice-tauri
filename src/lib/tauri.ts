@@ -674,6 +674,13 @@ export interface VoiceProfile {
   reported_cost_usd?: number;
   generation_id?: string;
   bytes_sent: number;
+  attempts?: Array<{
+    provider: string;
+    model: string;
+    status: string;
+    duration_ms: number;
+    error?: string | null;
+  }>;
 }
 export interface MetricTrend {
   metric: string;

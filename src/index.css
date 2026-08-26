@@ -202,6 +202,7 @@ button.haumea-bar:focus-visible,
 }
 
 .haumea-bar__shortcut { color: #b7b7b0; font-size: 10px; }
+.haumea-bar__status { min-width: 0; flex: 1; }
 .haumea-bar__error-text { min-width: 0; flex: 1; color: #f2f2ed; }
 
 .haumea-bar__control {

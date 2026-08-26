@@ -18,7 +18,8 @@ use tauri::Emitter;
 
 pub const INSIGHTS_SCHEMA_VERSION: u32 = 4;
 pub const ANALYSIS_VERSION: u32 = 1;
-pub const VOICE_PROFILE_MODEL: &str = "google/gemini-2.5-flash";
+pub const VOICE_PROFILE_MODEL: &str = "google/gemini-3.7-flash";
+pub const VOICE_PROFILE_FALLBACK_MODEL: &str = "meta/muse-spark-1.2-contributor";
 const PROFILE_MIN_WORDS: u64 = 5_000;
 const PROFILE_REFRESH_WORDS: u64 = 10_000;
 const MIN_TREND_SESSIONS: u64 = 3;
@@ -259,6 +260,19 @@ pub struct VoiceProfile {
     pub generation_id: Option<String>,
     #[serde(default)]
     pub bytes_sent: u64,
+    #[serde(default)]
+    pub attempts: Vec<VoiceProfileAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceProfileAttempt {
+    pub provider: String,
+    pub model: String,
+    pub status: String,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2060,14 +2074,45 @@ pub async fn generate_voice_profile(state: &AppState) -> Result<VoiceProfile, St
         "Métricas locais agregadas do Voice Insights (sem histórico bruto):\n{}",
         serde_json::to_string(&metrics).map_err(|error| error.to_string())?
     );
-    let result = crate::openrouter::generate_text(
-        system,
-        &user,
-        VOICE_PROFILE_MODEL,
-        &api_key,
-        Duration::from_secs(45),
-    )
-    .await?;
+    let mut attempts = Vec::new();
+    let mut selected_model = VOICE_PROFILE_MODEL;
+    let mut selected_result = None;
+    for model in [VOICE_PROFILE_MODEL, VOICE_PROFILE_FALLBACK_MODEL] {
+        let started = std::time::Instant::now();
+        match crate::openrouter::generate_text(
+            system,
+            &user,
+            model,
+            &api_key,
+            Duration::from_secs(45),
+        )
+        .await
+        {
+            Ok(result) => {
+                attempts.push(VoiceProfileAttempt {
+                    provider: "OpenRouter".into(),
+                    model: model.into(),
+                    status: "success".into(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    error: None,
+                });
+                selected_model = model;
+                selected_result = Some(result);
+                break;
+            }
+            Err(error) => attempts.push(VoiceProfileAttempt {
+                provider: "OpenRouter".into(),
+                model: model.into(),
+                status: "failed".into(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                error: Some(error),
+            }),
+        }
+    }
+    let result = selected_result.ok_or_else(|| {
+        "Voice Profile: o modelo principal e o fallback falharam; consulte os detalhes técnicos."
+            .to_string()
+    })?;
     #[derive(Deserialize)]
     struct ProfileResponse {
         title: String,
@@ -2097,7 +2142,7 @@ pub async fn generate_voice_profile(state: &AppState) -> Result<VoiceProfile, St
         next_update_word_count: aggregate.words + PROFILE_REFRESH_WORDS,
         profile_version: 1,
         provider: "OpenRouter".into(),
-        model: VOICE_PROFILE_MODEL.into(),
+        model: selected_model.into(),
         request_ms: result.request_ms,
         ttfb_ms: result.ttfb_ms,
         reported_total_tokens: result.reported_total_tokens,
@@ -2106,6 +2151,7 @@ pub async fn generate_voice_profile(state: &AppState) -> Result<VoiceProfile, St
         reported_cost_usd: result.reported_cost_usd,
         generation_id: result.generation_id,
         bytes_sent: result.bytes_sent,
+        attempts,
     };
     let _guard = lock().lock();
     let mut store = read_store_unlocked();

@@ -143,3 +143,8 @@ export function stateAfterTimeout(
   if (state === "success" || state === "error") return restState(mode);
   return null;
 }
+
+/** Compact processing only has room for the activity dots. */
+export function showsProcessingLabel(state: GadgetState): boolean {
+  return state === "processing_long";
+}
