@@ -254,8 +254,10 @@ pub fn push(entry: HistoryEntry) {
     };
 
     let (mut entries, _) = read_entries(file);
-    entries.insert(0, entry);
-    let _ = persist_entries(file, &entries);
+    entries.insert(0, entry.clone());
+    if persist_entries(file, &entries) {
+        crate::insights::enqueue_entry(entry);
+    }
 }
 
 /// Returns a single history entry by id, or `None` if it does not exist.
@@ -305,6 +307,7 @@ pub fn clear() {
         }
     }
     let _ = fs::write(file, "[]");
+    crate::insights::enqueue_clear();
 }
 
 /// Deletes one history entry by id. Also best-effort removes its audio file.
@@ -324,7 +327,11 @@ pub fn delete_entry(id: &str) -> bool {
     if entries.len() == before {
         return false;
     }
-    persist_entries(file, &entries)
+    let persisted = persist_entries(file, &entries);
+    if persisted {
+        crate::insights::enqueue_remove(id.to_string());
+    }
+    persisted
 }
 
 /// Updates only the final text (and word count) of an entry — preserves evaluation.
@@ -334,7 +341,7 @@ pub fn update_text(id: &str, text: &str) -> bool {
         return false;
     };
     let (mut entries, _) = read_entries(file);
-    let mut found = false;
+    let mut updated_entry = None;
     for entry in entries.iter_mut() {
         if entry.id == id {
             entry.text = text.to_string();
@@ -344,14 +351,18 @@ pub fn update_text(id: &str, text: &str) -> bool {
             if let Some(run) = entry.pipeline_runs.last_mut() {
                 run.transcript.set_user_corrected(text.to_string());
             }
-            found = true;
+            updated_entry = Some(entry.clone());
             break;
         }
     }
-    if !found {
+    let Some(updated_entry) = updated_entry else {
         return false;
+    };
+    let persisted = persist_entries(file, &entries);
+    if persisted {
+        crate::insights::enqueue_entry(updated_entry);
     }
-    persist_entries(file, &entries)
+    persisted
 }
 
 /// Updates an existing history entry with new details.
@@ -374,6 +385,9 @@ pub fn update_entry(updated: HistoryEntry) -> bool {
 
     if found && !persist_entries(file, &entries) {
         return false;
+    }
+    if found {
+        crate::insights::enqueue_entry(updated);
     }
     found
 }

@@ -8,6 +8,7 @@ import {
   Keyboard,
   Settings,
   NotebookPen,
+  ChartNoAxesCombined,
   type LucideIcon,
 } from "lucide-react";
 import type { ViewKey } from "../views";
@@ -16,6 +17,7 @@ const NAV: { key: ViewKey; label: string; icon: LucideIcon }[] = [
   { key: "inicio", label: "Início", icon: Home },
   { key: "transcricao", label: "Transcrição", icon: FileAudio },
   { key: "historico", label: "Histórico", icon: History },
+  { key: "insights", label: "Insights", icon: ChartNoAxesCombined },
   { key: "scratchpad", label: "Scratchpad", icon: NotebookPen },
   { key: "atalhos", label: "Atalhos", icon: Keyboard },
   { key: "configuracoes", label: "Configurações", icon: Settings },
@@ -40,7 +42,7 @@ export function Sidebar({
         <div className="flex h-8 w-8 items-center justify-center rounded-[10px] border border-[#cacbc4] bg-white text-ink">
           <AudioLines className="h-[17px] w-[17px]" strokeWidth={1.8} aria-hidden />
         </div>
-        <span className="text-[16px] font-semibold tracking-[-0.02em] text-ink max-[1180px]:hidden">
+        <span className="text-[17px] font-semibold tracking-[-0.02em] text-ink max-[1180px]:hidden">
           Haumea
         </span>
       </div>

@@ -168,6 +168,19 @@ pub struct OpenRouterGenerateResult {
     pub bytes_sent: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct OpenRouterTextResult {
+    pub text: String,
+    pub request_ms: u64,
+    pub ttfb_ms: Option<u64>,
+    pub generation_id: Option<String>,
+    pub reported_total_tokens: Option<usize>,
+    pub reported_input_tokens: Option<usize>,
+    pub reported_output_tokens: Option<usize>,
+    pub reported_cost_usd: Option<f64>,
+    pub bytes_sent: u64,
+}
+
 fn model_looks_dedicated_stt(model: &str) -> bool {
     let id = model.to_ascii_lowercase();
     id.contains("whisper") || id.contains("chirp") || id.contains("transcribe")
@@ -336,6 +349,95 @@ pub async fn generate_with_audio(
         reported_cost_usd: usage.cost,
         transport: AudioTransport::InlineBase64,
         bytes_sent: encoded.len() as u64,
+    })
+}
+
+/// Text-only OpenRouter call used exclusively by explicitly requested,
+/// opt-in derived features such as the Voice Profile. The caller supplies
+/// aggregate data; this helper never reads history or audio.
+pub async fn generate_text(
+    system_instruction: &str,
+    user_prompt: &str,
+    model: &str,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<OpenRouterTextResult, String> {
+    if api_key.trim().is_empty() {
+        return Err("Configure uma chave do OpenRouter em Provedores e APIs.".into());
+    }
+    let body = ChatRequest {
+        model,
+        messages: vec![
+            Message {
+                role: "system",
+                content: MessageContent::Text(system_instruction),
+            },
+            Message {
+                role: "user",
+                content: MessageContent::Text(user_prompt),
+            },
+        ],
+        stream: false,
+    };
+    let started = Instant::now();
+    let exchange = async {
+        let response = http_client()?
+            .post(CHAT_COMPLETIONS_URL)
+            .bearer_auth(api_key.trim())
+            .headers(app_attribution_headers())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| format!("OpenRouter: falha de rede: {error}"))?;
+        let ttfb_ms = started.elapsed().as_millis() as u64;
+        let status = response.status();
+        let generation_id = response
+            .headers()
+            .get("x-generation-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let response_body = response
+            .text()
+            .await
+            .map_err(|error| format!("OpenRouter: falha ao ler a resposta: {error}"))?;
+        Ok::<_, String>((status, generation_id, response_body, ttfb_ms))
+    };
+    let (status, generation_id, response_body, ttfb_ms) = tokio::time::timeout(timeout, exchange)
+        .await
+        .map_err(|_| format!("OpenRouter: timeout após {} segundos.", timeout.as_secs()))??;
+    let request_ms = started.elapsed().as_millis() as u64;
+    if !status.is_success() {
+        return Err(format!(
+            "OpenRouter retornou status {}: {}",
+            status.as_u16(),
+            truncate_error(&response_body, 800)
+        ));
+    }
+    let parsed: ChatResponse = serde_json::from_str(&response_body)
+        .map_err(|error| format!("OpenRouter: resposta inválida: {error}"))?;
+    let usage = parsed.usage.unwrap_or_default();
+    let text = parsed
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| choice.message.content.trim().to_string())
+        .unwrap_or_default();
+    if text.is_empty() {
+        return Err("OpenRouter não retornou texto.".into());
+    }
+    let bytes_sent = serde_json::to_vec(&body)
+        .map(|payload| payload.len() as u64)
+        .unwrap_or_default();
+    Ok(OpenRouterTextResult {
+        text,
+        request_ms,
+        ttfb_ms: Some(ttfb_ms),
+        generation_id,
+        reported_total_tokens: usage.total_tokens,
+        reported_input_tokens: usage.input_tokens,
+        reported_output_tokens: usage.output_tokens,
+        reported_cost_usd: usage.cost,
+        bytes_sent,
     })
 }
 

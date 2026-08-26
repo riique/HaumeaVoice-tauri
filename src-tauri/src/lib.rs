@@ -7,6 +7,7 @@ pub mod deepgram;
 pub mod gemini;
 pub mod groq;
 pub mod history;
+pub mod insights;
 pub mod learning;
 pub mod mic_control;
 pub mod models;
@@ -992,6 +993,7 @@ pub fn run() {
                         scratchpad::init(dir.clone());
                         snippets::init(dir.clone());
                         learning::init(dir.clone());
+                        insights::init(dir.clone());
                         *state.compact_mode.write() = settings::load_compact();
                         *state.widget_visibility_mode.write() =
                             settings::load_widget_visibility_mode();
@@ -1021,6 +1023,7 @@ pub fn run() {
                         *state.formatting_level.write() = settings::load_formatting_level();
                         *state.dictation_destination.write() =
                             settings::load_dictation_destination();
+                        insights::start_backfill(app.handle().clone());
                     }
                     Err(e) => {
                         log::warn!("history: could not resolve app data dir: {}", e);
@@ -1127,6 +1130,12 @@ pub fn run() {
             commands::set_snippets,
             commands::get_vocabulary_suggestions,
             commands::resolve_vocabulary_suggestion,
+            commands::get_insights,
+            commands::get_insights_backfill_status,
+            commands::set_insights_backfill_paused,
+            commands::set_ai_voice_profile_enabled,
+            commands::generate_ai_voice_profile,
+            commands::add_insight_correction_to_vocabulary,
             commands::get_sanitizer_enabled,
             commands::set_sanitizer_enabled,
         ])

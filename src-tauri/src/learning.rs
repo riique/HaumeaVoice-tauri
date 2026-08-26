@@ -41,6 +41,11 @@ pub struct CorrectionEvent {
     pub context: CorrectionContext,
     pub timestamp_ms: u64,
     pub count: u32,
+    /// Per-occurrence timestamps enable period-aware Insights without changing
+    /// the existing aggregate count. Older files migrate safely from an empty
+    /// list and remain available in all-time statistics.
+    #[serde(default)]
+    pub occurrences_ms: Vec<u64>,
     pub source: CorrectionSource,
     #[serde(default)]
     pub status: SuggestionStatus,
@@ -97,8 +102,10 @@ fn upsert_event(
         .iter_mut()
         .find(|event| event.before.eq_ignore_ascii_case(&before) && event.after == after)
     {
+        let timestamp_ms = crate::pipeline_run::epoch_ms();
         event.count = event.count.saturating_add(1);
-        event.timestamp_ms = crate::pipeline_run::epoch_ms();
+        event.timestamp_ms = timestamp_ms;
+        event.occurrences_ms.push(timestamp_ms);
         event.context = context;
         event.clone()
     } else {
@@ -110,6 +117,7 @@ fn upsert_event(
             context,
             timestamp_ms,
             count: 1,
+            occurrences_ms: vec![timestamp_ms],
             source: CorrectionSource::HistoryEdit,
             status: SuggestionStatus::Pending,
         };
@@ -124,6 +132,30 @@ pub fn suggestions() -> Vec<CorrectionEvent> {
         .into_iter()
         .filter(|event| event.count >= 3 && event.status == SuggestionStatus::Pending)
         .collect()
+}
+
+/// Read-only snapshot used by the local Insights projection. Correction text
+/// never leaves the device unless the user explicitly generates an AI profile,
+/// and that profile receives aggregate counts rather than these events.
+pub fn all() -> Vec<CorrectionEvent> {
+    let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
+    read_unlocked()
+}
+
+pub fn accept_pair(before: &str, after: &str) -> Result<(), String> {
+    let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
+    let mut events = read_unlocked();
+    let mut changed = false;
+    for event in &mut events {
+        if event.before.eq_ignore_ascii_case(before) && event.after.eq_ignore_ascii_case(after) {
+            event.status = SuggestionStatus::Accepted;
+            changed = true;
+        }
+    }
+    if changed {
+        write_unlocked(&events)?;
+    }
+    Ok(())
 }
 
 pub fn resolve(id: &str, accepted: bool) -> Result<Option<CorrectionEvent>, String> {
@@ -256,6 +288,24 @@ mod tests {
             );
         }
         assert_eq!(events[0].count, 3);
+        assert_eq!(events[0].occurrences_ms.len(), 3);
         assert_eq!(events[0].status, SuggestionStatus::Pending);
+    }
+
+    #[test]
+    fn legacy_correction_migrates_without_occurrence_history() {
+        let event: CorrectionEvent = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "before": "open router",
+            "after": "OpenRouter",
+            "context": {},
+            "timestamp_ms": 1,
+            "count": 4,
+            "source": "history_edit",
+            "status": "accepted"
+        }))
+        .unwrap();
+        assert_eq!(event.count, 4);
+        assert!(event.occurrences_ms.is_empty());
     }
 }

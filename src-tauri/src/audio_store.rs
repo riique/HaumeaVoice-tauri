@@ -146,6 +146,25 @@ pub fn read(path: &str) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|e| format!("could not read saved audio at {}: {}", path, e))
 }
 
+/// Reads the microphone capture before normalization when that sidecar exists.
+/// Voice Insights uses this path so capture-level metrics describe the input,
+/// while transcription continues to use the canonical processed file.
+pub fn read_original_or_canonical(path: &str) -> Result<Vec<u8>, String> {
+    let canonical = PathBuf::from(path);
+    if let Some(original) = original_sidecar_path(&canonical) {
+        if original.is_file() {
+            return fs::read(&original).map_err(|e| {
+                format!(
+                    "could not read original saved audio at {}: {}",
+                    original.display(),
+                    e
+                )
+            });
+        }
+    }
+    read(path)
+}
+
 /// Removes every file in the effective audio directory. Kept for maintenance
 /// callers that explicitly own the whole directory; history cleanup deletes
 /// only the exact files referenced by its entries.

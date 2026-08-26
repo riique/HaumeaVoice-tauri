@@ -641,3 +641,99 @@ export function onTranscribingEvent(handler: (transcribing: boolean) => void): P
   return listen<boolean>("transcribing", (event) => handler(event.payload));
 }
 
+/* ---------------------------- Voice Insights ---------------------------- */
+
+export type InsightPeriod = "today" | "last7_days" | "last30_days" | "all_time";
+export interface RankedCount { label: string; count: number; percentage: number }
+export interface ApplicationInsight { name: string; count: number; percentage: number; domains: RankedCount[] }
+export interface FillerInsight { phrase: string; count: number; per_1000_words: number }
+export interface CorrectionInsight { before: string; after: string; count: number; in_vocabulary: boolean }
+export interface BackfillStatus {
+  running: boolean;
+  paused: boolean;
+  processed: number;
+  total: number;
+  analyzed: number;
+  unavailable_audio: number;
+  last_error?: string | null;
+}
+export interface VoiceProfile {
+  title: string;
+  description: string;
+  generated_at_ms: number;
+  generated_at_word_count: number;
+  next_update_word_count: number;
+  profile_version: number;
+  provider: string;
+  model: string;
+  request_ms: number;
+  ttfb_ms?: number;
+  reported_total_tokens?: number;
+  reported_input_tokens?: number;
+  reported_output_tokens?: number;
+  reported_cost_usd?: number;
+  generation_id?: string;
+  bytes_sent: number;
+}
+export interface MetricTrend {
+  metric: string;
+  current: number;
+  previous: number;
+  change_percent?: number | null;
+  change_absolute: number;
+}
+export interface InsightsResponse {
+  analysis_version: number;
+  period: InsightPeriod;
+  usage: {
+    sessions: number; words: number; audio_duration_ms: number;
+    average_wpm?: number | null; median_wpm?: number | null; typical_wpm?: [number, number] | null;
+    manual_corrections: number; vocabulary_corrections: number;
+  };
+  language: {
+    language: string;
+    most_used_word?: RankedCount | null;
+    most_used_content_word?: RankedCount | null;
+    most_used_phrase?: RankedCount | null;
+    catchphrase?: RankedCount | null;
+    fillers: FillerInsight[];
+    self_corrections_per_1000_words?: number | null;
+    vocabulary_variety?: number | null;
+    vocabulary_variety_label?: string | null;
+    most_corrected?: CorrectionInsight | null;
+    catchphrase_ready: boolean;
+    profile_ready: boolean;
+  };
+  audio: {
+    analyzed_sessions: number; coverage_percentage: number;
+    lufs_median?: number | null; lufs_typical?: [number, number] | null;
+    rms_dbfs_median?: number | null; peak_dbfs_median?: number | null;
+    clipping_ratio?: number | null; silence_ratio?: number | null; speech_ratio?: number | null;
+    estimated_snr_db?: number | null; average_pause_ms?: number | null;
+    median_f0_hz?: number | null; pitch_variation?: string | null; capture_quality?: string | null;
+  };
+  applications: RankedCount[];
+  application_details: ApplicationInsight[];
+  domains: RankedCount[];
+  categories: RankedCount[];
+  temporal: {
+    peak_hour?: number | null; peak_weekday?: number | null;
+    current_streak_days: number; longest_streak_days: number;
+    activity: Array<{ day: string; sessions: number; words: number }>;
+  };
+  trends: MetricTrend[];
+  profile_enabled: boolean;
+  profile?: VoiceProfile | null;
+  profile_progress_words: number;
+  profile_required_words: number;
+  backfill: BackfillStatus;
+  generated_at_ms: number;
+}
+
+export const getInsights = (period: InsightPeriod) => invoke<InsightsResponse>("get_insights", { period });
+export const getInsightsBackfillStatus = () => invoke<BackfillStatus>("get_insights_backfill_status");
+export const setInsightsBackfillPaused = (paused: boolean) => invoke<BackfillStatus>("set_insights_backfill_paused", { paused });
+export const setAiVoiceProfileEnabled = (enabled: boolean) => invoke<void>("set_ai_voice_profile_enabled", { enabled });
+export const generateAiVoiceProfile = () => invoke<VoiceProfile>("generate_ai_voice_profile");
+export const addInsightCorrectionToVocabulary = (before: string, after: string) => invoke<void>("add_insight_correction_to_vocabulary", { before, after });
+

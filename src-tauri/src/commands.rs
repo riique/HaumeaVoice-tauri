@@ -686,6 +686,84 @@ pub async fn resolve_vocabulary_suggestion(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn get_insights(
+    state: State<'_, SharedState>,
+    period: crate::insights::InsightPeriod,
+) -> Result<crate::insights::InsightsResponse, CommandError> {
+    let vocabulary = state.vocabulary.read().clone();
+    tokio::task::spawn_blocking(move || crate::insights::snapshot(period, &vocabulary))
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))
+}
+
+#[tauri::command]
+pub fn get_insights_backfill_status() -> crate::insights::BackfillStatus {
+    crate::insights::backfill_status()
+}
+
+#[tauri::command]
+pub fn set_insights_backfill_paused(paused: bool) -> crate::insights::BackfillStatus {
+    crate::insights::set_backfill_paused(paused)
+}
+
+#[tauri::command]
+pub async fn set_ai_voice_profile_enabled(enabled: bool) -> Result<(), CommandError> {
+    tokio::task::spawn_blocking(move || crate::insights::set_profile_enabled(enabled))
+        .await
+        .map_err(|error| CommandError::Internal(error.to_string()))?
+        .map_err(CommandError::Internal)
+}
+
+#[tauri::command]
+pub async fn generate_ai_voice_profile(
+    state: State<'_, SharedState>,
+) -> Result<crate::insights::VoiceProfile, CommandError> {
+    crate::insights::generate_voice_profile(state.inner())
+        .await
+        .map_err(CommandError::Internal)
+}
+
+#[tauri::command]
+pub async fn add_insight_correction_to_vocabulary(
+    state: State<'_, SharedState>,
+    before: String,
+    after: String,
+) -> Result<(), CommandError> {
+    if before.trim().is_empty() || after.trim().is_empty() {
+        return Err(CommandError::InvalidPayload(
+            "Correção e grafia canônica são obrigatórias.".into(),
+        ));
+    }
+    let mut vocabulary = state.vocabulary.read().clone();
+    if let Some(term) = vocabulary
+        .iter_mut()
+        .find(|term| term.canonical.eq_ignore_ascii_case(after.trim()))
+    {
+        if !term
+            .aliases
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(before.trim()))
+        {
+            term.aliases.push(before.trim().to_string());
+        }
+    } else {
+        vocabulary.push(crate::vocabulary::VocabularyTerm {
+            canonical: after.trim().to_string(),
+            aliases: vec![before.trim().to_string()],
+            category: crate::vocabulary::VocabularyCategory::Other,
+            strict: true,
+            enabled: true,
+        });
+    }
+    let vocabulary = crate::vocabulary::normalize_and_validate(vocabulary)
+        .map_err(CommandError::InvalidPayload)?;
+    crate::settings::save_vocabulary(vocabulary.clone());
+    *state.vocabulary.write() = vocabulary;
+    crate::learning::accept_pair(before.trim(), after.trim()).map_err(CommandError::Internal)?;
+    Ok(())
+}
+
 /// `save_system_prompt`
 ///
 /// Stores the user-edited sanitizer system prompt in the in-memory

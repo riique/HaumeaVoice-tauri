@@ -28,6 +28,29 @@ typography:
     fontSize: "17px"
     fontWeight: 600
     letterSpacing: "-0.015em"
+  section:
+    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, sans-serif"
+    fontSize: "14px"
+    fontWeight: 600
+    lineHeight: 1.428
+  metricHero:
+    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, sans-serif"
+    fontSize: "42px"
+    fontWeight: 600
+    lineHeight: 1.1
+    letterSpacing: "-0.04em"
+  metricLarge:
+    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, sans-serif"
+    fontSize: "32px"
+    fontWeight: 600
+    lineHeight: 1.15
+    letterSpacing: "-0.03em"
+  metricMedium:
+    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, sans-serif"
+    fontSize: "26px"
+    fontWeight: 600
+    lineHeight: 1.2
+    letterSpacing: "-0.03em"
   body:
     fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, sans-serif"
     fontSize: "13px"
@@ -168,6 +191,7 @@ A paleta combina papéis quentes e neutros com tinta near-black; nenhuma cor dec
 - **Headline** (600, 28px, 1.25, -0.025em): título principal de cada página.
 - **Title** (600, 17px, -0.015em): pipeline ativa e outros destaques locais.
 - **Section title** (600, 14px, 20px): entrada de seções operacionais.
+- **Metric hero / large / medium** (600, 42px / 32px / 26px): números analíticos e valores dominantes; sempre tabulares quando numéricos e nunca usados como título de navegação.
 - **Body** (400, 13px, 20px): descrições, linhas de dados e controles; descrições longas ficam em aproximadamente 68–72ch.
 - **Label** (500, 11px): metadados, atalhos e informação compacta.
 - **Mono** (400, 11px): caminhos, modelos, temporizadores e valores técnicos.
