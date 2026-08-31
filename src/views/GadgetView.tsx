@@ -2,17 +2,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Check, Mic, RefreshCw, Square, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  acknowledgeGadgetRendered,
   cancelRecording,
-  getRecordingState,
+  getRecordingStatus,
   getShortcuts,
   getWidgetPreferences,
   retryTranscription,
   retryTranscriptionWithFallback,
-  setGadgetHitRect,
   setGadgetVisualState,
   toggleRecordingState,
   type HistoryEntry,
+  type GadgetPresentation,
   type PipelineProgressEvent,
+  type RecordingStatus,
   type WidgetPreferences,
   type WidgetVisibilityMode,
 } from "../lib/tauri";
@@ -23,6 +25,10 @@ import {
   stateAfterTimeout,
   type GadgetState,
 } from "../gadget/machine";
+import {
+  belongsToRecordingSession,
+  shouldApplyRecordingStatus,
+} from "../recording/status";
 
 const BAR_COUNT = 18;
 const WAVE_WEIGHTS = [
@@ -45,8 +51,49 @@ export function GadgetApp() {
   const pillRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<GadgetState>("hidden");
   const modeRef = useRef<WidgetVisibilityMode>("auto");
-  const lastHitRectRef = useRef("");
+  const presentationRef = useRef<GadgetPresentation | null>(null);
+  const lastRenderAckRef = useRef("");
   const visualStateQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const latestRecordingRevisionRef = useRef(-1);
+  const activeSessionIdRef = useRef<string | null>(null);
+
+  const reportRendered = useCallback((force = false) => {
+    const element = pillRef.current;
+    const presentation = presentationRef.current;
+    if (
+      !element
+      || !presentation
+      || GADGET_STATES[stateRef.current].visibility === "hidden"
+      || presentation.visual_state !== stateRef.current
+    ) return;
+
+    const rect = element.getBoundingClientRect();
+    const parentRect = element.parentElement?.getBoundingClientRect();
+    if (!parentRect) return;
+    // getBoundingClientRect includes the reveal/morph transform. Preserve the
+    // layout footprint used by native hit-testing while the pill animates.
+    const width = element.offsetWidth;
+    const height = element.offsetHeight;
+    const measured = {
+      x: rect.left + rect.width / 2 - width / 2 - parentRect.left,
+      y: rect.top + rect.height / 2 - height / 2 - parentRect.top,
+      width,
+      height,
+    };
+    const acknowledgementKey = `${presentation.generation}:${JSON.stringify(measured)}`;
+    if (!force && acknowledgementKey === lastRenderAckRef.current) return;
+    lastRenderAckRef.current = acknowledgementKey;
+    void acknowledgeGadgetRendered(presentation, measured)
+      .then((accepted) => {
+        if (!accepted && lastRenderAckRef.current === acknowledgementKey) {
+          lastRenderAckRef.current = "";
+        }
+      })
+      .catch((error) => {
+        if (lastRenderAckRef.current === acknowledgementKey) lastRenderAckRef.current = "";
+        console.error("acknowledge_gadget_rendered failed:", error);
+      });
+  }, []);
 
   const transition = useCallback((next: GadgetState) => {
     if (stateRef.current === next) return;
@@ -55,62 +102,84 @@ export function GadgetApp() {
     visualStateQueueRef.current = visualStateQueueRef.current
       .catch(() => undefined)
       .then(async () => {
-        const latest = stateRef.current;
-        await setGadgetVisualState(latest);
+        // A newer transition already owns presentation. Skipping stale queue
+        // entries prevents duplicate native resizes from resetting input state.
+        if (stateRef.current !== next) return;
+        const presentation = await setGadgetVisualState(next);
+        if (stateRef.current !== next) return;
+        presentationRef.current = presentation;
+        if (presentation.visual_state !== next) {
+          stateRef.current = presentation.visual_state;
+          setState(presentation.visual_state);
+        }
+        if (presentation.visual_state === "hidden") {
+          lastRenderAckRef.current = "";
+          return;
+        }
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => reportRendered(true));
+        });
       })
       .catch((error) => console.error("set_gadget_visual_state failed:", error));
-  }, []);
+  }, [reportRendered]);
 
   const transitionToRest = useCallback(() => {
     setAudioLevel(0);
     transition(restState(modeRef.current));
   }, [transition]);
 
+  const applyRecordingStatus = useCallback((status: RecordingStatus) => {
+    if (!shouldApplyRecordingStatus(latestRecordingRevisionRef.current, status)) return;
+    latestRecordingRevisionRef.current = status.revision;
+    activeSessionIdRef.current = status.session_id ?? null;
+
+    if (status.phase === "starting") {
+      setFailure(null);
+      setRetrying(false);
+      setProgressMessage(null);
+      setAudioLevel(0);
+      transition("appearing");
+    } else if (status.phase === "recording") {
+      setFailure(null);
+      setAudioLevel(0);
+      transition("recording");
+    } else if (status.phase === "stopping") {
+      setAudioLevel(0);
+      transition("stopping");
+    } else if (status.phase === "cancelling") {
+      transitionToRest();
+    } else if (!(["success", "error"] as GadgetState[]).includes(stateRef.current)) {
+      transitionToRest();
+    }
+  }, [transition, transitionToRest]);
+
   useEffect(() => {
     let mounted = true;
-    void Promise.all([getRecordingState(), getWidgetPreferences(), getShortcuts()])
-      .then(([recording, preferences, shortcuts]) => {
-        if (!mounted) return;
-        modeRef.current = preferences.visibility_mode;
-        setVisibilityMode(preferences.visibility_mode);
-        setShortcut(shortcutLabel(shortcuts.toggle));
-        transition(recording ? "recording" : restState(preferences.visibility_mode));
-      })
-      .catch((error) => console.error("gadget bootstrap failed:", error));
+    let subscriptions: Array<() => void> = [];
 
-    const subscriptions: Array<Promise<() => void>> = [
-      listen("recording-initializing", () => {
-        setFailure(null);
-        setRetrying(false);
-        setProgressMessage(null);
-        setAudioLevel(0);
-        transition("appearing");
-      }),
-      listen("recording-started", () => {
-        setFailure(null);
-        setAudioLevel(0);
-        transition("recording");
-      }),
-      listen("recording-stopped", () => {
-        setAudioLevel(0);
-        transition("stopping");
-      }),
-      listen("recording-cancelled", transitionToRest),
-      listen<number>("audio-level", (event) => {
+    const setup = async () => {
+      subscriptions = await Promise.all([
+        listen<RecordingStatus>("recording-initializing", (event) => applyRecordingStatus(event.payload)),
+        listen<RecordingStatus>("recording-started", (event) => applyRecordingStatus(event.payload)),
+        listen<RecordingStatus>("recording-stopped", (event) => applyRecordingStatus(event.payload)),
+        listen<RecordingStatus>("recording-cancelled", (event) => applyRecordingStatus(event.payload)),
+        listen<RecordingStatus>("recording-idle", (event) => applyRecordingStatus(event.payload)),
+        listen<number>("audio-level", (event) => {
         const level = Number.isFinite(event.payload) ? Math.max(0, Math.min(1, event.payload)) : 0;
         setAudioLevel((previous) => Math.abs(previous - level) < 0.005 ? previous : level);
-      }),
-      listen<boolean>("transcribing", (event) => {
+        }),
+        listen<boolean>("transcribing", (event) => {
         if (event.payload) {
           transition("processing");
         } else if (["processing", "processing_long", "stopping"].includes(stateRef.current)) {
           setFailure({ id: "", message: "Nenhuma fala foi detectada na gravação.", canRetry: false });
           transition("error");
         }
-      }),
-      listen<HistoryEntry>("transcription-saved", (event) => {
+        }),
+        listen<HistoryEntry>("transcription-saved", (event) => {
         const entry = event.payload;
         if (entry.source && entry.source !== "mic") return;
+        if (!belongsToRecordingSession(entry, activeSessionIdRef.current)) return;
         setRetrying(false);
         setProgressMessage(null);
         if (entry.is_error) {
@@ -124,8 +193,8 @@ export function GadgetApp() {
           setFailure(null);
           transition("success");
         }
-      }),
-      listen<PipelineProgressEvent>("pipeline-progress", (event) => {
+        }),
+        listen<PipelineProgressEvent>("pipeline-progress", (event) => {
         const progress = event.payload;
         if (progress.kind === "complete") {
           setProgressMessage(null);
@@ -133,20 +202,39 @@ export function GadgetApp() {
         }
         if (progress.message) setProgressMessage(progress.message);
         if (progress.kind === "fallback_started") transition("processing_long");
-      }),
-      listen<WidgetPreferences>("widget-preferences-changed", (event) => {
+        }),
+        listen<WidgetPreferences>("widget-preferences-changed", (event) => {
         const mode = event.payload.visibility_mode;
         modeRef.current = mode;
         setVisibilityMode(mode);
         if (["hidden", "idle", "hover"].includes(stateRef.current)) transition(restState(mode));
-      }),
-    ];
+        }),
+      ]);
+
+      if (!mounted) {
+        subscriptions.forEach((unlisten) => unlisten());
+        subscriptions = [];
+        return;
+      }
+
+      const [status, preferences, shortcuts] = await Promise.all([
+        getRecordingStatus(),
+        getWidgetPreferences(),
+        getShortcuts(),
+      ]);
+      if (!mounted) return;
+      modeRef.current = preferences.visibility_mode;
+      setVisibilityMode(preferences.visibility_mode);
+      setShortcut(shortcutLabel(shortcuts.toggle));
+      applyRecordingStatus(status);
+    };
+    void setup().catch((error) => console.error("gadget bootstrap failed:", error));
 
     return () => {
       mounted = false;
-      subscriptions.forEach((subscription) => void subscription.then((unlisten) => unlisten()));
+      subscriptions.forEach((unlisten) => unlisten());
     };
-  }, [transition, transitionToRest]);
+  }, [applyRecordingStatus, transition]);
 
   useEffect(() => {
     const timeout = GADGET_STATES[state].timeoutMs;
@@ -158,25 +246,22 @@ export function GadgetApp() {
     return () => window.clearTimeout(timer);
   }, [state, transition]);
 
-  const reportHitRect = useCallback(() => {
-    const element = pillRef.current;
-    if (!element || GADGET_STATES[stateRef.current].visibility === "hidden") return;
-    const rect = element.getBoundingClientRect();
-    const next = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
-    const serialized = JSON.stringify(next);
-    if (serialized === lastHitRectRef.current) return;
-    lastHitRectRef.current = serialized;
-    void setGadgetHitRect(next).catch(() => undefined);
-  }, []);
-
   useEffect(() => {
-    reportHitRect();
+    reportRendered();
     const element = pillRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(reportHitRect);
+    const observer = new ResizeObserver(() => reportRendered());
     observer.observe(element);
     return () => observer.disconnect();
-  }, [state, reportHitRect]);
+  }, [state, reportRendered]);
+
+  useEffect(() => {
+    const handleNativeRepaint = () => {
+      window.requestAnimationFrame(() => reportRendered(true));
+    };
+    window.addEventListener("haumea-gadget-repaint", handleNativeRepaint);
+    return () => window.removeEventListener("haumea-gadget-repaint", handleNativeRepaint);
+  }, [reportRendered]);
 
   const startOrStop = async () => {
     if (["idle", "hover"].includes(stateRef.current)) transition("appearing");

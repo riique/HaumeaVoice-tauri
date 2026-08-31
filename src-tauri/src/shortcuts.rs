@@ -1,5 +1,5 @@
 use crate::audio::{cancel_capture, start_capture, stop_capture};
-use crate::models::{event_names, RecordingEvent, SharedState, ShortcutConfig};
+use crate::models::{event_names, RecordingPhase, RecordingToggle, SharedState, ShortcutConfig};
 use parking_lot::Mutex;
 use std::{fs, path::PathBuf, sync::OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
@@ -88,99 +88,146 @@ pub fn save_store(cfg: &ShortcutConfig) {
 /// the recording state is reverted and a `recording-cancelled` event is
 /// emitted.
 pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
-    let current = state.is_recording();
-    let next = !current;
-    state.set_recording(next);
-
-    log::info!("shortcut: toggle recording {} -> {}", current, next);
-
-    if next {
-        // Seed the anchor from the cursor immediately. The foreground-monitor
-        // watcher may replace it later if focus crosses to another display.
-        crate::begin_gadget_session(app, state);
-        if let Err(e) = app.emit(event_names::RECORDING_INITIALIZING, true) {
-            log::warn!(
-                "failed to emit {}: {}",
-                event_names::RECORDING_INITIALIZING,
-                e
+    match state.toggle_recording_lifecycle() {
+        RecordingToggle::Start(status) => {
+            log::info!(
+                "shortcut: start recording generation={} session={}",
+                status.generation,
+                status.session_id.as_deref().unwrap_or("-")
             );
-        }
-        // Heavy work (COM unmute + CPAL device open) runs off the main
-        // thread to prevent AppHang when drivers stall.
-        let app_bg = app.clone();
-        let state_bg = state.clone();
-        std::thread::spawn(move || {
-            let start_requested_at = std::time::Instant::now();
+            // Seed the session from the foreground application's monitor. A saved
+            // display still wins; cursor and primary monitor are only fallbacks.
+            crate::begin_gadget_session(app, state);
+            if let Err(e) = app.emit(event_names::RECORDING_INITIALIZING, &status) {
+                log::warn!(
+                    "failed to emit {}: {}",
+                    event_names::RECORDING_INITIALIZING,
+                    e
+                );
+            }
+            // Heavy work (COM unmute + CPAL device open) runs off the main
+            // thread to prevent AppHang when drivers stall.
+            let app_bg = app.clone();
+            let state_bg = state.clone();
+            let generation = status.generation;
+            let session_id = status.session_id.clone().unwrap_or_default();
+            std::thread::spawn(move || {
+                let start_requested_at = std::time::Instant::now();
 
-            // Opening the CPAL stream and asking Windows to unmute the input
-            // are independent. Run them concurrently so a muted endpoint does
-            // not add a fixed delay before capture can become ready.
-            let (capture_result, was_muted) = std::thread::scope(|scope| {
-                let unmute = scope.spawn(crate::mic_control::ensure_mic_unmuted);
-                let capture_result = start_capture(&state_bg);
-                let was_muted = unmute.join().unwrap_or(false);
-                (capture_result, was_muted)
-            });
+                // Opening the CPAL stream and asking Windows to unmute the input
+                // are independent. Run them concurrently so a muted endpoint does
+                // not add a fixed delay before capture can become ready.
+                let (capture_result, was_muted) = std::thread::scope(|scope| {
+                    let unmute = scope.spawn(crate::mic_control::ensure_mic_unmuted);
+                    let capture_result = start_capture(&state_bg, generation, &session_id);
+                    let was_muted = unmute.join().unwrap_or(false);
+                    (capture_result, was_muted)
+                });
 
-            match capture_result {
-                Ok(()) => {
-                    // A second toggle may have stopped the pending recording
-                    // while the driver was opening. Never resurrect that stale
-                    // start or emit a misleading ready event.
-                    if !state_bg.is_recording() {
-                        let _ = state_bg.drop_audio_stream();
-                        log::info!("shortcut: capture became ready after stop; discarded");
-                        return;
-                    }
+                match capture_result {
+                    Ok(()) => {
+                        let Some((accepted, ready_status)) =
+                            state_bg.recording_capture_ready(generation)
+                        else {
+                            log::warn!(
+                                "shortcut: capture ready for stale generation={}",
+                                generation
+                            );
+                            return;
+                        };
+                        if !accepted {
+                            log::info!(
+                                "shortcut: capture became ready after stop/cancel generation={}; stop path owns cleanup",
+                                generation
+                            );
+                            return;
+                        }
 
-                    state_bg.mark_recording_start();
-                    if let Err(e) = app_bg.emit(
-                        event_names::RECORDING_STARTED,
-                        &RecordingEvent::RecordingStarted,
-                    ) {
-                        log::warn!("failed to emit {}: {}", event_names::RECORDING_STARTED, e);
-                    }
-                    crate::audio::spawn_audio_level_emitter(app_bg.clone(), state_bg.clone());
-                    log::info!("shortcut: live audio-level emitter started for gadget waveform");
-                    log::info!(
-                        "shortcut: capture ready in {}ms (mic_was_muted={})",
-                        start_requested_at.elapsed().as_millis(),
-                        was_muted
-                    );
-                }
-                Err(e) => {
-                    log::error!("shortcut: failed to start capture: {}", e);
-                    state_bg.set_recording(false);
-                    state_bg.clear_recording_start();
-                    if let Err(ee) = app_bg.emit(
-                        event_names::RECORDING_CANCELLED,
-                        &RecordingEvent::RecordingCancelled,
-                    ) {
-                        log::warn!(
-                            "failed to emit {}: {}",
-                            event_names::RECORDING_CANCELLED,
-                            ee
+                        state_bg.mark_recording_start();
+                        if let Err(e) = app_bg.emit(event_names::RECORDING_STARTED, &ready_status) {
+                            log::warn!("failed to emit {}: {}", event_names::RECORDING_STARTED, e);
+                        }
+                        crate::audio::spawn_audio_level_emitter(app_bg.clone(), state_bg.clone());
+                        log::info!(
+                            "shortcut: live audio-level emitter started for gadget waveform"
+                        );
+                        log::info!(
+                            "shortcut: capture ready in {}ms (mic_was_muted={})",
+                            start_requested_at.elapsed().as_millis(),
+                            was_muted
                         );
                     }
+                    Err(e) => {
+                        let superseded = matches!(e, crate::audio::AudioError::Superseded);
+                        if superseded {
+                            log::info!(
+                                "shortcut: capture start superseded generation={}",
+                                generation
+                            );
+                        } else {
+                            log::error!("shortcut: failed to start capture: {}", e);
+                        }
+                        state_bg.clear_recording_start();
+                        let failed_status = state_bg.recording_capture_failed(generation);
+                        if let Some(failed_status) = failed_status
+                            .filter(|status| status.phase == RecordingPhase::Idle && !superseded)
+                        {
+                            if let Err(ee) =
+                                app_bg.emit(event_names::RECORDING_CANCELLED, &failed_status)
+                            {
+                                log::warn!(
+                                    "failed to emit {}: {}",
+                                    event_names::RECORDING_CANCELLED,
+                                    ee
+                                );
+                            }
+                        }
+                    }
                 }
+            });
+            true
+        }
+        RecordingToggle::Stop(status) => {
+            log::info!(
+                "shortcut: stop recording generation={} session={}",
+                status.generation,
+                status.session_id.as_deref().unwrap_or("-")
+            );
+            state.clear_recording_start();
+            if let Err(e) = app.emit(event_names::RECORDING_STOPPED, &status) {
+                log::warn!("failed to emit {}: {}", event_names::RECORDING_STOPPED, e);
             }
-        });
-    } else {
-        state.clear_recording_start();
-        let state_clone = state.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = stop_capture(&state_clone).await;
-        });
-
-        if let Err(e) = app.emit(
-            event_names::RECORDING_STOPPED,
-            &RecordingEvent::RecordingStopped,
-        ) {
-            log::warn!("failed to emit {}: {}", event_names::RECORDING_STOPPED, e);
+            let state_clone = state.clone();
+            let app_clone = app.clone();
+            let generation = status.generation;
+            tauri::async_runtime::spawn(async move {
+                while state_clone.recording_capture_start_pending(generation) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let _ = stop_capture(&state_clone).await;
+                let finished = state_clone.finish_recording_stop(generation);
+                if let Err(error) = app_clone.emit(event_names::RECORDING_IDLE, &finished) {
+                    log::warn!("failed to emit {}: {}", event_names::RECORDING_IDLE, error);
+                }
+                log::info!(
+                    "shortcut: recording lifecycle finished generation={} revision={} phase={:?}",
+                    finished.generation,
+                    finished.revision,
+                    finished.phase
+                );
+            });
+            false
+        }
+        RecordingToggle::Busy(status) => {
+            log::warn!(
+                "shortcut: toggle ignored while lifecycle is busy generation={} revision={} phase={:?}",
+                status.generation,
+                status.revision,
+                status.phase
+            );
+            status.recording
         }
     }
-
-    next
 }
 
 /// Core cancel logic shared by the IPC command path and the global
@@ -189,19 +236,33 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
 /// producing any WAV output and emits the `recording-cancelled`
 /// event so the UI resets the timer to 00:00.
 pub fn handle_cancel(app: &AppHandle, state: &SharedState) {
-    let was_recording = state.is_recording();
-    state.set_recording(false);
+    let status = state.request_recording_cancel();
+    if status.phase != RecordingPhase::Cancelling {
+        log::info!(
+            "shortcut: cancel ignored generation={} phase={:?}",
+            status.generation,
+            status.phase
+        );
+        return;
+    }
     state.clear_recording_start();
 
     cancel_capture(state);
 
-    log::info!("shortcut: cancel recording (was_active={})", was_recording);
+    log::info!(
+        "shortcut: cancel recording generation={} session={}",
+        status.generation,
+        status.session_id.as_deref().unwrap_or("-")
+    );
 
-    if let Err(e) = app.emit(
-        event_names::RECORDING_CANCELLED,
-        &RecordingEvent::RecordingCancelled,
-    ) {
+    if let Err(e) = app.emit(event_names::RECORDING_CANCELLED, &status) {
         log::warn!("failed to emit {}: {}", event_names::RECORDING_CANCELLED, e);
+    }
+    let idle = state.finish_recording_cancel(status.generation);
+    if idle.phase == RecordingPhase::Idle {
+        if let Err(error) = app.emit(event_names::RECORDING_IDLE, &idle) {
+            log::warn!("failed to emit {}: {}", event_names::RECORDING_IDLE, error);
+        }
     }
 }
 

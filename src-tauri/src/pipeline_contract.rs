@@ -189,8 +189,8 @@ pub struct GeminiPipelineChoice {
     #[serde(default)]
     pub use_custom_model: bool,
     /// When non-empty, replaces the selected preset with the provider model id
-    /// exactly as entered in settings (apart from an optional Google `models/`
-    /// prefix, which is normalized by [`resolved_model_id`]).
+    /// exactly as entered in settings (apart from an optional models/ prefix,
+    /// which is normalized by resolved_model_id).
     #[serde(default)]
     pub custom_model: String,
 }
@@ -203,10 +203,8 @@ impl GeminiPipelineChoice {
                 GeminiProvider::GoogleAiStudio => self.model.google_id().to_string(),
                 GeminiProvider::OpenRouter => self.model.openrouter_id().to_string(),
             }
-        } else if self.provider == GeminiProvider::GoogleAiStudio {
-            custom.strip_prefix("models/").unwrap_or(custom).to_string()
         } else {
-            custom.to_string()
+            custom.strip_prefix("models/").unwrap_or(custom).to_string()
         };
 
         if model.is_empty()
@@ -1419,6 +1417,17 @@ mod tests {
         };
         assert_eq!(
             custom_openrouter.resolved_model_id().unwrap(),
+            "vendor/custom-audio-model"
+        );
+
+        let custom_openrouter_prefixed = GeminiPipelineChoice {
+            provider: GeminiProvider::OpenRouter,
+            use_custom_model: true,
+            custom_model: " models/vendor/custom-audio-model ".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            custom_openrouter_prefixed.resolved_model_id().unwrap(),
             "vendor/custom-audio-model"
         );
     }

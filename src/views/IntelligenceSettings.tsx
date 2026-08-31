@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Check, Plus, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertCircle, Check, Loader2, Plus, Trash2, X } from "lucide-react";
 import {
   getContextPreferences, getOutputPolicyConfig, getSnippets, getVocabularySuggestions,
   resolveVocabularySuggestion, setContextPreferences, setOutputPolicyConfig, setSnippets,
@@ -17,22 +17,102 @@ const sourceLabels: Record<ContextSourceKind, string> = {
   selection: "Seleção", caret_context: "Texto próximo ao cursor", clipboard: "Clipboard",
 };
 const split = (value: string) => value.split(",").map((item) => item.trim()).filter(Boolean);
+type IntelligenceSnapshot = { context: ContextPreferences; policy: OutputPolicyConfig; snippets: VoiceSnippet[] };
+type SaveStatus = "idle" | "pending" | "saving" | "saved" | "invalid" | "error";
+const fingerprint = ({ context, policy, snippets }: IntelligenceSnapshot) => JSON.stringify({ context, policy, snippets });
+const validateSnapshot = ({ context, policy, snippets }: IntelligenceSnapshot) => {
+  if (!Number.isFinite(context.max_context_chars) || context.max_context_chars < 100 || context.max_context_chars > 4_000) return "O limite por fonte deve ficar entre 100 e 4.000 caracteres.";
+  const profileIds = new Set<string>();
+  for (const profile of policy.profiles) {
+    const id = profile.id.trim().toLowerCase();
+    if (!id || profileIds.has(id)) return "Cada style precisa ter um ID preenchido e exclusivo.";
+    if (!profile.name.trim()) return "Cada style precisa ter um nome.";
+    if ((profile.style_instruction?.length ?? 0) > 2_000) return "A instrução de style pode ter no máximo 2.000 caracteres.";
+    profileIds.add(id);
+  }
+  if (policy.temporary_override && !policy.profiles.some((profile) => profile.enabled && profile.id === policy.temporary_override)) return "O override temporário precisa apontar para um style ativo.";
+  const triggers = new Set<string>();
+  for (const snippet of snippets) {
+    const trigger = snippet.trigger.trim().toLowerCase().replace(/\s+/g, " ");
+    if (!snippet.id.trim() || !trigger || !snippet.expansion) return "Preencha o trigger e a expansão do novo snippet para salvá-lo.";
+    if (triggers.has(trigger)) return "Cada snippet precisa ter um trigger exclusivo.";
+    triggers.add(trigger);
+  }
+  return null;
+};
 
 export function IntelligenceSettings() {
   const [context, setContext] = useState<ContextPreferences | null>(null);
   const [policy, setPolicy] = useState<OutputPolicyConfig | null>(null);
   const [snippets, setSnippetItems] = useState<VoiceSnippet[]>([]);
   const [suggestions, setSuggestions] = useState<CorrectionEvent[]>([]);
-  const [saved, setSaved] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const hydrated = useRef(false);
+  const lastQueuedFingerprint = useRef("");
+  const latestFingerprint = useRef("");
+  const latestSnapshot = useRef<IntelligenceSnapshot | null>(null);
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const savedStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => { Promise.all([getContextPreferences(), getOutputPolicyConfig(), getSnippets(), getVocabularySuggestions()]).then(([c, p, s, l]) => { setContext(c); setPolicy(p); setSnippetItems(s); setSuggestions(l); }); }, []);
-  const save = async () => {
-    if (!context || !policy) return;
-    const [nextContext, nextPolicy, nextSnippets] = await Promise.all([
-      setContextPreferences(context), setOutputPolicyConfig(policy), setSnippets(snippets),
-    ]);
-    setContext(nextContext); setPolicy(nextPolicy); setSnippetItems(nextSnippets); setSaved(true); setTimeout(() => setSaved(false), 1600);
-  };
+  useEffect(() => { Promise.all([getContextPreferences(), getOutputPolicyConfig(), getSnippets(), getVocabularySuggestions()]).then(([c, p, s, l]) => {
+    const snapshot = { context: c, policy: p, snippets: s };
+    const initialFingerprint = fingerprint(snapshot);
+    latestSnapshot.current = snapshot;
+    latestFingerprint.current = initialFingerprint;
+    lastQueuedFingerprint.current = initialFingerprint;
+    setContext(c); setPolicy(p); setSnippetItems(s); setSuggestions(l); hydrated.current = true;
+  }).catch((error) => { setSaveStatus("error"); setSaveError(`Não foi possível carregar as preferências: ${String(error)}`); }); }, []);
+
+  const persistSnapshot = useCallback((snapshot: IntelligenceSnapshot, snapshotFingerprint: string) => {
+    if (snapshotFingerprint === lastQueuedFingerprint.current) return;
+    lastQueuedFingerprint.current = snapshotFingerprint;
+    saveQueue.current = saveQueue.current.catch(() => undefined).then(async () => {
+      if (latestFingerprint.current === snapshotFingerprint) setSaveStatus("saving");
+      try {
+        await Promise.all([
+          setContextPreferences(snapshot.context),
+          setOutputPolicyConfig(snapshot.policy),
+          setSnippets(snapshot.snippets),
+        ]);
+        if (latestFingerprint.current === snapshotFingerprint) {
+          setSaveError(null); setSaveStatus("saved");
+          if (savedStatusTimer.current) clearTimeout(savedStatusTimer.current);
+          savedStatusTimer.current = setTimeout(() => setSaveStatus("idle"), 1600);
+        }
+      } catch (error) {
+        if (latestFingerprint.current === snapshotFingerprint) {
+          setSaveStatus("error");
+          setSaveError(`Não foi possível salvar automaticamente: ${String(error)}`);
+        }
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated.current || !context || !policy) return;
+    const snapshot = { context, policy, snippets };
+    const snapshotFingerprint = fingerprint(snapshot);
+    latestSnapshot.current = snapshot;
+    latestFingerprint.current = snapshotFingerprint;
+    if (snapshotFingerprint === lastQueuedFingerprint.current) return;
+    const validationError = validateSnapshot(snapshot);
+    if (validationError) {
+      setSaveStatus("invalid"); setSaveError(validationError);
+      return;
+    }
+    setSaveStatus("pending"); setSaveError(null);
+    const timer = setTimeout(() => persistSnapshot(snapshot, snapshotFingerprint), 500);
+    return () => clearTimeout(timer);
+  }, [context, policy, snippets, persistSnapshot]);
+
+  useEffect(() => () => {
+    if (savedStatusTimer.current) clearTimeout(savedStatusTimer.current);
+    const snapshot = latestSnapshot.current;
+    if (hydrated.current && snapshot && !validateSnapshot(snapshot) && latestFingerprint.current !== lastQueuedFingerprint.current) {
+      persistSnapshot(snapshot, latestFingerprint.current);
+    }
+  }, [persistSnapshot]);
   if (!context || !policy) return <p className="text-[13px] text-muted">Carregando preferências…</p>;
   const updateProfile = (index: number, change: Partial<OutputProfile>) => setPolicy({ ...policy, profiles: policy.profiles.map((profile, i) => i === index ? { ...profile, ...change } : profile) });
 
@@ -114,7 +194,12 @@ export function IntelligenceSettings() {
         <div className="mt-3 divide-y divide-line border-y border-line">{suggestions.length === 0 ? <p className="py-5 text-[13px] text-muted">Nenhuma sugestão pendente.</p> : suggestions.map((event) => <div key={event.id} className="flex items-center justify-between gap-5 py-4"><p className="text-[13px] text-ink">“{event.before}” → <span className="font-medium">“{event.after}”</span><span className="ml-2 text-muted">{event.count}×</span></p><div className="flex gap-1"><Button size="sm" onClick={() => void resolveVocabularySuggestion(event.id, true).then(() => setSuggestions((items) => items.filter((item) => item.id !== event.id)))}><Check className="h-4 w-4" />Adicionar</Button><Button size="sm" variant="ghost" onClick={() => void resolveVocabularySuggestion(event.id, false).then(() => setSuggestions((items) => items.filter((item) => item.id !== event.id)))}><X className="h-4 w-4" />Ignorar</Button></div></div>)}</div>
       </section>
 
-      <div className="sticky bottom-4 flex justify-end"><Button variant="primary" onClick={() => void save()}>{saved ? <><Check className="h-4 w-4" />Salvo</> : "Salvar inteligência e privacidade"}</Button></div>
+      <div className="sticky bottom-4 flex justify-end" aria-live="polite">
+        <div className={`inline-flex min-h-9 items-center gap-2 rounded-[9px] border px-3 text-[12px] shadow-sm ${saveStatus === "error" ? "border-red-200 bg-red-50 text-red-700" : saveStatus === "invalid" ? "border-amber-200 bg-amber-50 text-amber-800" : "border-line bg-white text-muted"}`} title={saveError ?? undefined}>
+          {saveStatus === "pending" || saveStatus === "saving" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : saveStatus === "error" || saveStatus === "invalid" ? <AlertCircle className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
+          {saveStatus === "pending" ? "Aguardando alterações…" : saveStatus === "saving" ? "Salvando automaticamente…" : saveStatus === "invalid" ? "Complete os campos para salvar" : saveStatus === "error" ? "Falha no salvamento automático" : saveStatus === "saved" ? "Alterações salvas" : "Salvamento automático ativo"}
+        </div>
+      </div>
     </div>
   );
 }

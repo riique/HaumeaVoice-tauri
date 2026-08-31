@@ -2,7 +2,7 @@ use cpal::Stream;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -113,8 +113,214 @@ pub enum GadgetVisualState {
     Error,
 }
 
-/// Current work-area anchor in physical pixels. It starts from the cursor (or
-/// primary fallback) and is replaced when focus crosses to another monitor.
+/// Native presentation generation returned to the gadget frontend. The
+/// frontend acknowledges this exact generation after its visible pill has
+/// completed layout, allowing the native controller to reject stale paint
+/// reports and recover a renderer that stopped presenting frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GadgetPresentation {
+    pub visual_state: GadgetVisualState,
+    pub generation: u64,
+}
+
+/// Authoritative recording lifecycle phase shared with every frontend window.
+/// A session remains `stopping` until its transcription has finished, so a
+/// second capture cannot reuse the shared stream/buffer while the previous
+/// pipeline is still consuming them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingPhase {
+    #[default]
+    Idle,
+    Starting,
+    Recording,
+    Stopping,
+    Cancelling,
+}
+
+/// Monotonic backend truth sent with each recording lifecycle event.
+/// `revision` orders transitions even within the same session, closing the
+/// snapshot/listener race in React; `session_id` correlates pipeline results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingStatus {
+    pub generation: u64,
+    pub revision: u64,
+    pub session_id: Option<String>,
+    pub phase: RecordingPhase,
+    pub recording: bool,
+    pub busy: bool,
+}
+
+#[derive(Debug, Default)]
+struct RecordingLifecycle {
+    generation: u64,
+    revision: u64,
+    session_id: Option<String>,
+    phase: RecordingPhase,
+    capture_start_pending: bool,
+}
+
+impl RecordingLifecycle {
+    fn snapshot(&self) -> RecordingStatus {
+        RecordingStatus {
+            generation: self.generation,
+            revision: self.revision,
+            session_id: self.session_id.clone(),
+            phase: self.phase,
+            recording: matches!(
+                self.phase,
+                RecordingPhase::Starting | RecordingPhase::Recording
+            ),
+            busy: self.phase != RecordingPhase::Idle,
+        }
+    }
+
+    fn begin(&mut self, session_id: String) -> Option<RecordingStatus> {
+        if self.phase != RecordingPhase::Idle {
+            return None;
+        }
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.revision = self.revision.wrapping_add(1).max(1);
+        self.session_id = Some(session_id);
+        self.phase = RecordingPhase::Starting;
+        self.capture_start_pending = true;
+        Some(self.snapshot())
+    }
+
+    fn request_stop(&mut self) -> Option<RecordingStatus> {
+        if !matches!(
+            self.phase,
+            RecordingPhase::Starting | RecordingPhase::Recording
+        ) {
+            return None;
+        }
+        self.revision = self.revision.wrapping_add(1).max(1);
+        self.phase = RecordingPhase::Stopping;
+        Some(self.snapshot())
+    }
+
+    fn capture_ready(&mut self, generation: u64) -> Option<(bool, RecordingStatus)> {
+        if self.generation != generation || !self.capture_start_pending {
+            return None;
+        }
+        self.capture_start_pending = false;
+        self.revision = self.revision.wrapping_add(1).max(1);
+        let accepted = self.phase == RecordingPhase::Starting;
+        if accepted {
+            self.phase = RecordingPhase::Recording;
+        }
+        Some((accepted, self.snapshot()))
+    }
+
+    fn capture_failed(&mut self, generation: u64) -> Option<RecordingStatus> {
+        if self.generation != generation || !self.capture_start_pending {
+            return None;
+        }
+        self.capture_start_pending = false;
+        self.revision = self.revision.wrapping_add(1).max(1);
+        if matches!(
+            self.phase,
+            RecordingPhase::Starting | RecordingPhase::Cancelling
+        ) {
+            self.phase = RecordingPhase::Idle;
+            self.session_id = None;
+        }
+        Some(self.snapshot())
+    }
+
+    fn request_cancel(&mut self) -> RecordingStatus {
+        if matches!(
+            self.phase,
+            RecordingPhase::Starting | RecordingPhase::Recording
+        ) {
+            self.revision = self.revision.wrapping_add(1).max(1);
+            self.phase = RecordingPhase::Cancelling;
+        }
+        self.snapshot()
+    }
+
+    fn finish_cancel(&mut self, generation: u64) -> RecordingStatus {
+        if self.generation == generation
+            && self.phase == RecordingPhase::Cancelling
+            && !self.capture_start_pending
+        {
+            self.revision = self.revision.wrapping_add(1).max(1);
+            self.phase = RecordingPhase::Idle;
+            self.session_id = None;
+        }
+        self.snapshot()
+    }
+
+    fn finish_stop(&mut self, generation: u64) -> RecordingStatus {
+        if self.generation == generation && self.phase == RecordingPhase::Stopping {
+            self.revision = self.revision.wrapping_add(1).max(1);
+            self.phase = RecordingPhase::Idle;
+            self.session_id = None;
+            self.capture_start_pending = false;
+        }
+        self.snapshot()
+    }
+}
+
+#[cfg(test)]
+mod recording_lifecycle_tests {
+    use super::{RecordingLifecycle, RecordingPhase};
+
+    #[test]
+    fn rapid_restart_is_rejected_until_previous_pipeline_finishes() {
+        let mut lifecycle = RecordingLifecycle::default();
+        let started = lifecycle.begin("session-1".into()).unwrap();
+        assert_eq!(started.phase, RecordingPhase::Starting);
+        let generation = started.generation;
+
+        let stopping = lifecycle.request_stop().unwrap();
+        assert_eq!(stopping.phase, RecordingPhase::Stopping);
+        assert!(!stopping.recording);
+        assert!(stopping.busy);
+        assert!(lifecycle.begin("session-2".into()).is_none());
+
+        let (accepted, after_start_worker) = lifecycle.capture_ready(generation).unwrap();
+        assert!(!accepted);
+        assert_eq!(after_start_worker.phase, RecordingPhase::Stopping);
+        assert!(lifecycle.begin("session-2".into()).is_none());
+
+        let idle = lifecycle.finish_stop(generation);
+        assert_eq!(idle.phase, RecordingPhase::Idle);
+        assert!(!idle.busy);
+
+        let second = lifecycle.begin("session-2".into()).unwrap();
+        assert!(second.generation > generation);
+        assert!(second.revision > idle.revision);
+        assert!(lifecycle.capture_ready(generation).is_none());
+        assert_eq!(
+            lifecycle.snapshot().session_id.as_deref(),
+            Some("session-2")
+        );
+    }
+
+    #[test]
+    fn cancel_during_start_waits_for_start_worker_before_becoming_idle() {
+        let mut lifecycle = RecordingLifecycle::default();
+        let started = lifecycle.begin("session-1".into()).unwrap();
+        let cancelling = lifecycle.request_cancel();
+        assert_eq!(cancelling.phase, RecordingPhase::Cancelling);
+        assert!(lifecycle.finish_cancel(started.generation).busy);
+
+        let failed = lifecycle.capture_failed(started.generation).unwrap();
+        assert_eq!(failed.phase, RecordingPhase::Idle);
+        assert!(!failed.busy);
+    }
+}
+
+pub(crate) enum RecordingToggle {
+    Start(RecordingStatus),
+    Stop(RecordingStatus),
+    Busy(RecordingStatus),
+}
+
+/// Current work-area anchor in physical pixels. It starts from the foreground
+/// application's monitor (cursor/primary are fallbacks) and stays frozen for
+/// the active dictation session.
 #[derive(Debug, Clone)]
 pub struct GadgetSessionAnchor {
     pub display_name: Option<String>,
@@ -318,6 +524,7 @@ pub struct AppState {
     pub engine: RwLock<TranscriptionEngine>,
     pub sanitizer: RwLock<SanitizerModel>,
     pub recording: RwLock<bool>,
+    recording_lifecycle: Mutex<RecordingLifecycle>,
     pub api_keys: RwLock<ApiKeys>,
     pub audio_stream: Mutex<Option<Stream>>,
     pub audio_buffer: Mutex<Vec<i16>>,
@@ -337,10 +544,15 @@ pub struct AppState {
     pub compact_mode: RwLock<bool>,
     pub widget_visibility_mode: RwLock<WidgetVisibilityMode>,
     pub widget_dock: RwLock<WidgetDock>,
-    /// Current monitor anchor. A native watcher updates it only when the
-    /// foreground window crosses monitor boundaries.
+    /// Current monitor anchor. It is frozen during active dictation and may be
+    /// updated by the native watcher only while the always-visible idle pill
+    /// follows focus between monitors.
     pub gadget_session_anchor: Mutex<Option<GadgetSessionAnchor>>,
     pub gadget_visual_state: RwLock<GadgetVisualState>,
+    /// Monotonic native presentation id and the newest frontend-confirmed id.
+    /// They power paint acknowledgement and bounded WebView recovery.
+    pub gadget_presentation_generation: AtomicU64,
+    pub gadget_rendered_generation: AtomicU64,
     /// User-customisable global recording shortcuts (toggle/cancel).
     pub shortcuts: RwLock<ShortcutConfig>,
     /// Tauri `AppHandle` set once during `setup`. Held by the audio
@@ -407,6 +619,7 @@ impl AppState {
             engine: RwLock::new(TranscriptionEngine::default()),
             sanitizer: RwLock::new(SanitizerModel::default()),
             recording: RwLock::new(false),
+            recording_lifecycle: Mutex::new(RecordingLifecycle::default()),
             api_keys: RwLock::new(ApiKeys::default()),
             audio_stream: Mutex::new(None),
             audio_buffer: Mutex::new(Vec::new()),
@@ -419,6 +632,8 @@ impl AppState {
             widget_dock: RwLock::new(WidgetDock::Bottom),
             gadget_session_anchor: Mutex::new(None),
             gadget_visual_state: RwLock::new(GadgetVisualState::Hidden),
+            gadget_presentation_generation: AtomicU64::new(0),
+            gadget_rendered_generation: AtomicU64::new(0),
             shortcuts: RwLock::new(ShortcutConfig::default()),
             app_handle: RwLock::new(None),
             dual_engine: RwLock::new(false),
@@ -483,6 +698,90 @@ impl AppState {
         let mut guard = self.recording.write();
         *guard = value;
         value
+    }
+
+    pub(crate) fn toggle_recording_lifecycle(&self) -> RecordingToggle {
+        let mut lifecycle = self.recording_lifecycle.lock();
+        match lifecycle.phase {
+            RecordingPhase::Idle => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let session_id = format!("recording-session-{}-{}", now, lifecycle.generation + 1);
+                let status = lifecycle
+                    .begin(session_id)
+                    .expect("idle lifecycle must accept a recording start");
+                self.set_recording(true);
+                RecordingToggle::Start(status)
+            }
+            RecordingPhase::Starting | RecordingPhase::Recording => {
+                let status = lifecycle
+                    .request_stop()
+                    .expect("active lifecycle must accept a recording stop");
+                self.set_recording(false);
+                RecordingToggle::Stop(status)
+            }
+            RecordingPhase::Stopping | RecordingPhase::Cancelling => {
+                RecordingToggle::Busy(lifecycle.snapshot())
+            }
+        }
+    }
+
+    pub fn recording_status(&self) -> RecordingStatus {
+        self.recording_lifecycle.lock().snapshot()
+    }
+
+    pub(crate) fn install_recording_capture(
+        &self,
+        generation: u64,
+        stream: Stream,
+        session: crate::pipeline_run::RecordingSession,
+    ) -> Result<(), (Stream, crate::pipeline_run::RecordingSession)> {
+        let lifecycle = self.recording_lifecycle.lock();
+        if lifecycle.generation != generation || lifecycle.phase != RecordingPhase::Starting {
+            return Err((stream, session));
+        }
+        *self.audio_stream.lock() = Some(stream);
+        *self.recording_session.lock() = Some(session);
+        Ok(())
+    }
+
+    pub(crate) fn recording_capture_ready(
+        &self,
+        generation: u64,
+    ) -> Option<(bool, RecordingStatus)> {
+        let result = self.recording_lifecycle.lock().capture_ready(generation);
+        if matches!(result, Some((true, _))) {
+            self.set_recording(true);
+        }
+        result
+    }
+
+    pub(crate) fn recording_capture_failed(&self, generation: u64) -> Option<RecordingStatus> {
+        let status = self.recording_lifecycle.lock().capture_failed(generation);
+        self.set_recording(false);
+        status
+    }
+
+    pub(crate) fn recording_capture_start_pending(&self, generation: u64) -> bool {
+        let lifecycle = self.recording_lifecycle.lock();
+        lifecycle.generation == generation && lifecycle.capture_start_pending
+    }
+
+    pub(crate) fn finish_recording_stop(&self, generation: u64) -> RecordingStatus {
+        self.set_recording(false);
+        self.recording_lifecycle.lock().finish_stop(generation)
+    }
+
+    pub(crate) fn request_recording_cancel(&self) -> RecordingStatus {
+        self.set_recording(false);
+        self.recording_lifecycle.lock().request_cancel()
+    }
+
+    pub(crate) fn finish_recording_cancel(&self, generation: u64) -> RecordingStatus {
+        self.set_recording(false);
+        self.recording_lifecycle.lock().finish_cancel(generation)
     }
 
     /// Returns a snapshot of the current recording state.
@@ -583,20 +882,6 @@ unsafe impl Sync for AppState {}
 /// global shortcut handler can hold a cheap clone of the handle.
 pub type SharedState = Arc<AppState>;
 
-/// Serializable snapshot sent to the frontend via events so the UI
-/// can update the timer display and status string.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", tag = "type")]
-pub enum RecordingEvent {
-    /// Emitted when a recording session has started.
-    RecordingStarted,
-    /// Emitted when a recording session has been stopped normally.
-    RecordingStopped,
-    /// Emitted when the user cancelled (panic shortcut) a session in
-    /// progress. The frontend should reset the timer to 00:00.
-    RecordingCancelled,
-}
-
 /// Names of the events emitted to the frontend. Kept as a small
 /// module-level constant list to avoid magic strings drifting between
 /// the Rust and TypeScript sides of the codebase.
@@ -605,6 +890,7 @@ pub mod event_names {
     pub const RECORDING_STARTED: &str = "recording-started";
     pub const RECORDING_STOPPED: &str = "recording-stopped";
     pub const RECORDING_CANCELLED: &str = "recording-cancelled";
+    pub const RECORDING_IDLE: &str = "recording-idle";
     /// Emitted after a transcription has been produced and persisted to
     /// the history file. Payload is the full [`HistoryEntry`] snapshot.
     pub const TRANSCRIPTION_SAVED: &str = "transcription-saved";

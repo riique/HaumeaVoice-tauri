@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { normalizeAudioBytes, type BinaryIpcResponse } from "./audio-bytes";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /**
@@ -163,6 +164,27 @@ export async function cancelRecording(): Promise<void> {
 /** Returns the current recording flag from the backend. */
 export async function getRecordingState(): Promise<boolean> {
   return invoke<boolean>("get_recording_state");
+}
+
+export type RecordingPhase =
+  | "idle"
+  | "starting"
+  | "recording"
+  | "stopping"
+  | "cancelling";
+
+export interface RecordingStatus {
+  generation: number;
+  revision: number;
+  session_id?: string | null;
+  phase: RecordingPhase;
+  recording: boolean;
+  busy: boolean;
+}
+
+/** Monotonic recording lifecycle snapshot from the backend. */
+export async function getRecordingStatus(): Promise<RecordingStatus> {
+  return invoke<RecordingStatus>("get_recording_status");
 }
 
 /** Milliseconds elapsed since the current recording began (backend truth). */
@@ -398,9 +420,10 @@ export async function revealHistoryAudio(id: string): Promise<void> {
   await invoke<void>("reveal_history_audio", { id });
 }
 
-/** Reads the saved source audio as raw bytes for in-app playback. */
-export async function readHistoryAudio(id: string): Promise<ArrayBuffer> {
-  return invoke<ArrayBuffer>("read_history_audio", { id });
+/** Reads the saved source audio as normalized bytes for in-app playback. */
+export async function readHistoryAudio(id: string): Promise<Uint8Array<ArrayBuffer>> {
+  const response = await invoke<BinaryIpcResponse>("read_history_audio", { id });
+  return normalizeAudioBytes(response);
 }
 
 /** Regenerates a persisted transcription from its saved audio. */
@@ -545,6 +568,11 @@ export type GadgetVisualState =
   | "success"
   | "error";
 
+export interface GadgetPresentation {
+  visual_state: GadgetVisualState;
+  generation: number;
+}
+
 export async function getWidgetPreferences(): Promise<WidgetPreferences> {
   return invoke<WidgetPreferences>("get_widget_preferences");
 }
@@ -558,8 +586,8 @@ export async function setWidgetVisibilityMode(
 /** Applies state-derived native visibility, size and frozen-monitor placement. */
 export async function setGadgetVisualState(
   visualState: GadgetVisualState,
-): Promise<GadgetVisualState> {
-  return invoke<GadgetVisualState>("set_gadget_visual_state", { visualState });
+): Promise<GadgetPresentation> {
+  return invoke<GadgetPresentation>("set_gadget_visual_state", { visualState });
 }
 
 /** Visible-pill rectangle of the gadget overlay, in logical pixels relative to
@@ -569,6 +597,18 @@ export interface GadgetHitRect {
   y: number;
   width: number;
   height: number;
+}
+
+/**
+ * Confirms that React completed layout for the exact native presentation.
+ * The backend rejects stale generations and forces the WebView/native surface
+ * to repaint after the DOM dimensions are known.
+ */
+export async function acknowledgeGadgetRendered(
+  presentation: GadgetPresentation,
+  rect: GadgetHitRect,
+): Promise<boolean> {
+  return invoke<boolean>("acknowledge_gadget_rendered", { presentation, rect });
 }
 
 /**
@@ -585,13 +625,14 @@ export async function setGadgetHitRect(rect: GadgetHitRect): Promise<void> {
 export type RecordingEventType =
   | "recording-started"
   | "recording-stopped"
-  | "recording-cancelled";
+  | "recording-cancelled"
+  | "recording-idle";
 
 export function onRecordingEvent(
-  handler: (type: RecordingEventType) => void,
+  handler: (type: RecordingEventType, status: RecordingStatus) => void,
 ): Promise<UnlistenFn> {
   const subscribe = async (name: RecordingEventType) => {
-    return listen(name, () => handler(name));
+    return listen<RecordingStatus>(name, (event) => handler(name, event.payload));
   };
 
   // listen() resolves once per subscription; we wrap all three and return
@@ -601,6 +642,7 @@ export function onRecordingEvent(
       subscribe("recording-started"),
       subscribe("recording-stopped"),
       subscribe("recording-cancelled"),
+      subscribe("recording-idle"),
     ]);
     return () => unlisteners.forEach((u) => u());
   })();
@@ -657,9 +699,106 @@ export interface BackfillStatus {
   unavailable_audio: number;
   last_error?: string | null;
 }
+export interface VoiceEvidenceItem {
+  key: string;
+  title: string;
+  description: string;
+  count: number;
+  share: number;
+  confidence: number;
+}
+export interface VoiceSignature {
+  catchphrase?: string | null;
+  content_word?: string | null;
+  phrase?: string | null;
+  connector?: string | null;
+  opener?: string | null;
+}
+export interface VoiceProfileEvidence {
+  statistics: {
+    sessions: number;
+    words: number;
+    average_words_per_session?: number | null;
+    average_duration_seconds?: number | null;
+    average_wpm?: number | null;
+    typical_wpm?: [number, number] | null;
+    manual_corrections: number;
+    self_corrections_per_1000_words?: number | null;
+    vocabulary_variety_mattr?: number | null;
+  };
+  recurring_topics: VoiceEvidenceItem[];
+  recurring_intents: VoiceEvidenceItem[];
+  linguistic_patterns: VoiceEvidenceItem[];
+  signature_candidates: VoiceSignature & { corrected_expression?: string | null };
+  correction_patterns: VoiceEvidenceItem[];
+  application_patterns: VoiceEvidenceItem[];
+  workflow_patterns: VoiceEvidenceItem[];
+  acoustic_patterns: VoiceEvidenceItem[];
+  temporal_patterns: VoiceEvidenceItem[];
+  trends: VoiceEvidenceItem[];
+  coverage: {
+    level: "collecting" | "basic" | "archetype" | "rich" | "high_confidence";
+    overall_confidence: number;
+    session_coverage: number;
+    audio_coverage: number;
+    words: number;
+    sessions: number;
+    next_level_words: number;
+  };
+}
+export interface VoiceProfileAttempt {
+  provider: string;
+  model: string;
+  status: string;
+  duration_ms: number;
+  error?: string | null;
+  failure_type?: string | null;
+  request_ms?: number | null;
+  ttfb_ms?: number | null;
+  reported_total_tokens?: number | null;
+  reported_input_tokens?: number | null;
+  reported_output_tokens?: number | null;
+  reported_cost_usd?: number | null;
+  generation_id?: string | null;
+  bytes_sent?: number | null;
+  sanitized_response?: string | null;
+}
+export interface InterpretedVoicePattern {
+  title: string;
+  description: string;
+  confidence: number;
+  evidence_keys: string[];
+}
+export interface VoiceProfileTopic {
+  title: string;
+  description: string;
+  share: number;
+}
+export interface VoiceObservation extends InterpretedVoicePattern {
+  type: "language" | "usage" | "acoustic" | "temporal";
+}
 export interface VoiceProfile {
   title: string;
   description: string;
+  archetype: {
+    title: string;
+    subtitle: string;
+    description: string;
+    confidence: number;
+    evidence_keys: string[];
+  };
+  personal_portrait: {
+    summary: string;
+    confidence: number;
+    evidence_keys: string[];
+    distinctive_habits: InterpretedVoicePattern[];
+    usage_rhythms: InterpretedVoicePattern[];
+  };
+  signature: VoiceSignature;
+  communication_patterns: InterpretedVoicePattern[];
+  recurring_topics: VoiceProfileTopic[];
+  interesting_observations: VoiceObservation[];
+  suggested_experiments: InterpretedVoicePattern[];
   generated_at_ms: number;
   generated_at_word_count: number;
   next_update_word_count: number;
@@ -674,13 +813,18 @@ export interface VoiceProfile {
   reported_cost_usd?: number;
   generation_id?: string;
   bytes_sent: number;
-  attempts?: Array<{
-    provider: string;
-    model: string;
-    status: string;
-    duration_ms: number;
-    error?: string | null;
-  }>;
+  attempts?: VoiceProfileAttempt[];
+  evidence_bundle: VoiceProfileEvidence;
+  sanitized_prompt: string;
+  sanitized_response: string;
+  schema_validation: string;
+}
+export interface VoiceProfileGenerationTrace {
+  generated_at_ms: number;
+  evidence_bundle: VoiceProfileEvidence;
+  sanitized_prompt: string;
+  attempts: VoiceProfileAttempt[];
+  schema_validation: string;
 }
 export interface MetricTrend {
   metric: string;
@@ -729,10 +873,13 @@ export interface InsightsResponse {
     activity: Array<{ day: string; sessions: number; words: number }>;
   };
   trends: MetricTrend[];
+  voice_evidence: VoiceProfileEvidence;
   profile_enabled: boolean;
   profile?: VoiceProfile | null;
+  profile_generation?: VoiceProfileGenerationTrace | null;
   profile_progress_words: number;
   profile_required_words: number;
+  profile_generation_ready: boolean;
   backfill: BackfillStatus;
   generated_at_ms: number;
 }

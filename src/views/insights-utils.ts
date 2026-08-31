@@ -31,3 +31,18 @@ export function voiceProfileProgress(progressWords: number, requiredWords: numbe
   if (requiredWords <= 0) return 100;
   return Math.min(100, Math.max(0, progressWords / requiredWords * 100));
 }
+
+export function voiceProfileRemainingWords(progressWords: number, requiredWords: number) {
+  return Math.max(0, requiredWords - progressWords);
+}
+
+export function voiceEvidenceLevelLabel(level: string) {
+  const labels: Record<string, string> = {
+    collecting: "Coletando evidências",
+    basic: "Estatísticas básicas",
+    archetype: "Archetype inicial",
+    rich: "Perfil enriquecido",
+    high_confidence: "Alta confiança",
+  };
+  return labels[level] ?? "Em aprendizado";
+}

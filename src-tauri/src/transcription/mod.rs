@@ -16,7 +16,7 @@ pub use crate::pipeline_run::PipelineRun;
 pub use fallback::{coalesce_empty_final, pick_raw_acoustic, single_engine_slots};
 pub use legacy::{
     deepgram_from_live_or_posthoc, run_acoustic_file, run_acoustic_mic, run_dual_posthoc,
-    transcribe_bytes,
+    transcribe_bytes, transcribe_whisper_fallback_via_openrouter,
 };
 pub use modes::{
     mode_failed_history, mode_result_to_history, run_product_mode, run_product_mode_with_duration,

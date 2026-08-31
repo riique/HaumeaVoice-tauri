@@ -1,12 +1,39 @@
 //! Stage 1 acoustic STT for the legacy engine / dual / Deepgram paths.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::models::{AppState, TranscriptionEngine};
 use crate::transcription::fallback::{
     groq_err_to_message, resolve_dual_results, single_engine_slots,
 };
 use crate::transcription::types::AcousticOutcome;
+
+/// Runs the configured Whisper fallback through OpenRouter, pinning Whisper
+/// requests to Groq at the OpenRouter boundary. This keeps the fallback
+/// provider observable and avoids bypassing the user's OpenRouter credential.
+pub async fn transcribe_whisper_fallback_via_openrouter(
+    state: &Arc<AppState>,
+    bytes: &[u8],
+    ext: &str,
+) -> Result<(&'static str, crate::openrouter::OpenRouterGenerateResult), String> {
+    let model = state
+        .gemini_pipelines
+        .read()
+        .ultra_fast_whisper
+        .openrouter_id();
+    let api_key = state.next_openrouter_key().ok_or_else(|| {
+        "Chave do OpenRouter não configurada para o fallback Whisper.".to_string()
+    })?;
+    log::info!(
+        "transcription: dispatching Whisper fallback to OpenRouter model={} provider=groq",
+        model
+    );
+    let generated =
+        crate::openrouter::transcribe_audio(bytes, ext, model, &api_key, Duration::from_secs(120))
+            .await?;
+    Ok((model, generated))
+}
 
 /// Routes `bytes` to the cloud STT provider selected by `engine`.
 pub async fn transcribe_bytes(

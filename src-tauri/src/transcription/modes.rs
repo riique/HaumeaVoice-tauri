@@ -22,6 +22,13 @@ use crate::transcription::telemetry::{
 };
 use crate::transcription::types::AcousticOutcome;
 
+fn provider_history_label(provider: GeminiProvider) -> &'static str {
+    match provider {
+        GeminiProvider::GoogleAiStudio => "GoogleAIStudio",
+        GeminiProvider::OpenRouter => "OpenRouter",
+    }
+}
+
 fn emit_fallback_progress(state: &AppState, provider: &str, fallback_provider: &str, reason: &str) {
     crate::pipeline_run::emit_pipeline_progress(
         state,
@@ -258,6 +265,56 @@ async fn openrouter_audio_result(
     })
 }
 
+struct WhisperFallbackResult {
+    model: &'static str,
+    text: String,
+    generated: crate::openrouter::OpenRouterGenerateResult,
+}
+
+async fn run_openrouter_whisper_fallback(
+    state: &Arc<AppState>,
+    audio: &[u8],
+    ext: &str,
+) -> Result<WhisperFallbackResult, String> {
+    let (model, generated) =
+        crate::transcription::transcribe_whisper_fallback_via_openrouter(state, audio, ext).await?;
+    let text = generated.text.trim().to_string();
+    if text.is_empty() {
+        return Err("OpenRouter STT não retornou texto.".to_string());
+    }
+    Ok(WhisperFallbackResult {
+        model,
+        text,
+        generated,
+    })
+}
+
+fn openrouter_usage(out: &crate::openrouter::OpenRouterGenerateResult) -> UsageRecord {
+    UsageRecord {
+        audio_seconds: out.reported_audio_seconds,
+        input_tokens: out.reported_input_tokens.map(|value| value as u64),
+        output_tokens: out.reported_output_tokens.map(|value| value as u64),
+        total_tokens: out.reported_total_tokens.map(|value| value as u64),
+        bytes_sent: Some(out.bytes_sent),
+        cost: out
+            .reported_cost_usd
+            .map_or_else(CostRecord::default, |amount| CostRecord {
+                kind: CostKind::Actual,
+                amount_usd: Some(amount),
+                source: Some("openrouter_response_usage".into()),
+            }),
+        metadata: {
+            let mut metadata = std::collections::BTreeMap::new();
+            metadata.insert("request_ms".into(), out.request_ms.into());
+            if let Some(ttfb_ms) = out.ttfb_ms {
+                metadata.insert("ttfb_ms".into(), ttfb_ms.into());
+            }
+            metadata.insert("transport".into(), out.transport.as_str().into());
+            metadata
+        },
+    }
+}
+
 fn pipeline_debug_snapshot(result: &PipelineRun) -> SanitizerDebug {
     let mut user_parts = Vec::new();
     if let Some(w) = result.whisper_text.as_ref().filter(|s| !s.is_empty()) {
@@ -449,7 +506,7 @@ pub async fn run_fast_accurate(
     audio: Vec<u8>,
     ext: &str,
     file_name: &str,
-    mime: &str,
+    _mime: &str,
     duration_ms: Option<u64>,
 ) -> Result<PipelineRun, String> {
     let t0 = std::time::Instant::now();
@@ -467,8 +524,11 @@ pub async fn run_fast_accurate(
         glossary_with_style(state, crate::vocabulary::format_glossary_for_prompt(&vocab))
     };
     let file_tagging_enabled = *state.file_tagging_enabled.read();
+    let provider_label = provider_history_label(choice.provider);
     log::info!(
-        "modes: FastAccurate → Gemini hybrid (fallback_to_whisper={})",
+        "modes: FastAccurate → {} model={} (fallback_to_whisper={})",
+        provider_label,
+        model_id,
         fallback
     );
 
@@ -477,7 +537,7 @@ pub async fn run_fast_accurate(
     let mut fallback_reason = None;
     let mut whisper_text = None;
     let mut gemini_text = None;
-    let mut label = "FastAccurate/Gemini".to_string();
+    let mut label = format!("FastAccurate/{provider_label}");
     let mut result_meta = PipelineRun::default();
     let mut attempts = Vec::new();
     let gemini_provider = match choice.provider {
@@ -512,25 +572,44 @@ pub async fn run_fast_accurate(
             }
             used_fallback = true;
             fallback_reason = Some("gemini_missing_api_key".into());
-            emit_fallback_progress(state, "Gemini", "Whisper", "Chave do Gemini ausente");
-            label = "FastAccurate/WhisperFallback".into();
-            let tw = std::time::Instant::now();
-            let w_result = transcribe_bytes(
+            emit_fallback_progress(
                 state,
-                audio,
-                file_name,
-                mime,
-                TranscriptionEngine::GroqWhisper,
-            )
-            .await;
+                "Gemini",
+                "OpenRouter/Groq Whisper",
+                "Chave do provedor selecionado ausente",
+            );
+            label = "FastAccurate/WhisperFallback/OpenRouter-Groq".into();
+            let tw = std::time::Instant::now();
+            let w_result = run_openrouter_whisper_fallback(state, &audio, ext).await;
             let w = match w_result {
-                Ok(text) => text,
+                Ok(outcome) => {
+                    let whisper_ms = tw.elapsed().as_millis() as u64;
+                    let mut attempt = completed_attempt(
+                        "attempt-2",
+                        "openrouter/groq",
+                        outcome.model,
+                        outcome.generated.transport,
+                        whisper_ms,
+                        outcome.text.len(),
+                        outcome.generated.bytes_sent as usize,
+                    );
+                    attempt.usage = openrouter_usage(&outcome.generated);
+                    attempts.push(attempt);
+                    result_meta.whisper_ms = Some(whisper_ms);
+                    stages.push("whisper_fallback:openrouter/groq".into());
+                    whisper_text = Some(outcome.text.clone());
+                    (outcome.text, outcome.model.to_string())
+                }
                 Err(error) => {
                     let whisper_ms = tw.elapsed().as_millis() as u64;
                     attempts.push(failed_attempt(
                         "attempt-2",
-                        "groq",
-                        "whisper-large-v3-turbo",
+                        "openrouter/groq",
+                        state
+                            .gemini_pipelines
+                            .read()
+                            .ultra_fast_whisper
+                            .openrouter_id(),
                         AudioTransport::Multipart,
                         whisper_ms,
                         "provider_error",
@@ -549,20 +628,7 @@ pub async fn run_fast_accurate(
                     return Err(message);
                 }
             };
-            let whisper_ms = tw.elapsed().as_millis() as u64;
-            result_meta.whisper_ms = Some(whisper_ms);
-            attempts.push(completed_attempt(
-                "attempt-2",
-                "groq",
-                "whisper-large-v3-turbo",
-                AudioTransport::Multipart,
-                whisper_ms,
-                w.len(),
-                audio_len,
-            ));
-            stages.push("whisper_fallback".into());
-            whisper_text = Some(w.clone());
-            (w, "whisper-large-v3-turbo".to_string())
+            w
         }
         Some(key) => {
             stages.push(format!(
@@ -652,25 +718,44 @@ pub async fn run_fast_accurate(
                     }
                     used_fallback = true;
                     fallback_reason = Some("gemini_empty".into());
-                    emit_fallback_progress(state, "Gemini", "Whisper", "Resposta vazia do Gemini");
-                    label = "FastAccurate/WhisperFallback".into();
-                    let tw = std::time::Instant::now();
-                    let w_result = transcribe_bytes(
+                    emit_fallback_progress(
                         state,
-                        audio,
-                        file_name,
-                        mime,
-                        TranscriptionEngine::GroqWhisper,
-                    )
-                    .await;
+                        "Gemini",
+                        "OpenRouter/Groq Whisper",
+                        "Resposta vazia do provedor selecionado",
+                    );
+                    label = "FastAccurate/WhisperFallback/OpenRouter-Groq".into();
+                    let tw = std::time::Instant::now();
+                    let w_result = run_openrouter_whisper_fallback(state, &audio, ext).await;
                     let w = match w_result {
-                        Ok(text) => text,
+                        Ok(outcome) => {
+                            let whisper_ms = tw.elapsed().as_millis() as u64;
+                            let mut attempt = completed_attempt(
+                                "attempt-2",
+                                "openrouter/groq",
+                                outcome.model,
+                                outcome.generated.transport,
+                                whisper_ms,
+                                outcome.text.len(),
+                                outcome.generated.bytes_sent as usize,
+                            );
+                            attempt.usage = openrouter_usage(&outcome.generated);
+                            attempts.push(attempt);
+                            result_meta.whisper_ms = Some(whisper_ms);
+                            stages.push("whisper_fallback:openrouter/groq".into());
+                            whisper_text = Some(outcome.text.clone());
+                            (outcome.text, outcome.model.to_string())
+                        }
                         Err(error) => {
                             let whisper_ms = tw.elapsed().as_millis() as u64;
                             attempts.push(failed_attempt(
                                 "attempt-2",
-                                "groq",
-                                "whisper-large-v3-turbo",
+                                "openrouter/groq",
+                                state
+                                    .gemini_pipelines
+                                    .read()
+                                    .ultra_fast_whisper
+                                    .openrouter_id(),
                                 AudioTransport::Multipart,
                                 whisper_ms,
                                 "provider_error",
@@ -690,20 +775,7 @@ pub async fn run_fast_accurate(
                             return Err(message);
                         }
                     };
-                    let whisper_ms = tw.elapsed().as_millis() as u64;
-                    result_meta.whisper_ms = Some(whisper_ms);
-                    attempts.push(completed_attempt(
-                        "attempt-2",
-                        "groq",
-                        "whisper-large-v3-turbo",
-                        AudioTransport::Multipart,
-                        whisper_ms,
-                        w.len(),
-                        audio_len,
-                    ));
-                    stages.push("whisper_fallback".into());
-                    whisper_text = Some(w.clone());
-                    (w, "whisper-large-v3-turbo".to_string())
+                    w
                 }
                 Err(e) => {
                     attempts.push(failed_attempt(
@@ -729,25 +801,39 @@ pub async fn run_fast_accurate(
                     }
                     used_fallback = true;
                     fallback_reason = Some(format!("gemini_error: {}", e));
-                    emit_fallback_progress(state, "Gemini", "Whisper", &e);
-                    label = "FastAccurate/WhisperFallback".into();
+                    emit_fallback_progress(state, "Gemini", "OpenRouter/Groq Whisper", &e);
+                    label = "FastAccurate/WhisperFallback/OpenRouter-Groq".into();
                     let tw = std::time::Instant::now();
-                    let w_result = transcribe_bytes(
-                        state,
-                        audio,
-                        file_name,
-                        mime,
-                        TranscriptionEngine::GroqWhisper,
-                    )
-                    .await;
+                    let w_result = run_openrouter_whisper_fallback(state, &audio, ext).await;
                     let w = match w_result {
-                        Ok(text) => text,
+                        Ok(outcome) => {
+                            let whisper_ms = tw.elapsed().as_millis() as u64;
+                            let mut attempt = completed_attempt(
+                                "attempt-2",
+                                "openrouter/groq",
+                                outcome.model,
+                                outcome.generated.transport,
+                                whisper_ms,
+                                outcome.text.len(),
+                                outcome.generated.bytes_sent as usize,
+                            );
+                            attempt.usage = openrouter_usage(&outcome.generated);
+                            attempts.push(attempt);
+                            result_meta.whisper_ms = Some(whisper_ms);
+                            stages.push("whisper_fallback:openrouter/groq".into());
+                            whisper_text = Some(outcome.text.clone());
+                            (outcome.text, outcome.model.to_string())
+                        }
                         Err(whisper_error) => {
                             let whisper_ms = tw.elapsed().as_millis() as u64;
                             attempts.push(failed_attempt(
                                 "attempt-2",
-                                "groq",
-                                "whisper-large-v3-turbo",
+                                "openrouter/groq",
+                                state
+                                    .gemini_pipelines
+                                    .read()
+                                    .ultra_fast_whisper
+                                    .openrouter_id(),
                                 AudioTransport::Multipart,
                                 whisper_ms,
                                 "provider_error",
@@ -765,20 +851,7 @@ pub async fn run_fast_accurate(
                             return Err(message);
                         }
                     };
-                    let whisper_ms = tw.elapsed().as_millis() as u64;
-                    result_meta.whisper_ms = Some(whisper_ms);
-                    attempts.push(completed_attempt(
-                        "attempt-2",
-                        "groq",
-                        "whisper-large-v3-turbo",
-                        AudioTransport::Multipart,
-                        whisper_ms,
-                        w.len(),
-                        audio_len,
-                    ));
-                    stages.push("whisper_fallback".into());
-                    whisper_text = Some(w.clone());
-                    (w, "whisper-large-v3-turbo".to_string())
+                    w
                 }
             }
         }

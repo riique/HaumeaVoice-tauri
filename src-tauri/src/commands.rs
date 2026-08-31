@@ -441,6 +441,13 @@ pub fn get_recording_state(state: State<'_, SharedState>) -> bool {
     state.is_recording()
 }
 
+/// Versioned recording lifecycle snapshot used to reconcile event listeners
+/// without allowing an older async response to overwrite a newer transition.
+#[tauri::command]
+pub fn get_recording_status(state: State<'_, SharedState>) -> crate::models::RecordingStatus {
+    state.recording_status()
+}
+
 /// `get_history`
 ///
 /// Returns the full persisted transcription history, newest first. The
@@ -692,9 +699,16 @@ pub async fn get_insights(
     period: crate::insights::InsightPeriod,
 ) -> Result<crate::insights::InsightsResponse, CommandError> {
     let vocabulary = state.vocabulary.read().clone();
-    tokio::task::spawn_blocking(move || crate::insights::snapshot(period, &vocabulary))
-        .await
-        .map_err(|error| CommandError::Internal(error.to_string()))
+    let developer_mode = crate::settings::load_dev_mode();
+    tokio::task::spawn_blocking(move || {
+        let mut response = crate::insights::snapshot(period, &vocabulary);
+        if !developer_mode {
+            response.redact_developer_details();
+        }
+        response
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))
 }
 
 #[tauri::command]
@@ -963,17 +977,29 @@ pub fn set_gadget_visual_state(
     app: tauri::AppHandle,
     state: State<'_, SharedState>,
     visual_state: GadgetVisualState,
-) -> Result<GadgetVisualState, CommandError> {
+) -> Result<crate::models::GadgetPresentation, CommandError> {
     crate::present_gadget(&app, state.inner(), visual_state).map_err(CommandError::Internal)
+}
+
+/// Confirms that the frontend laid out the exact native presentation returned
+/// by `set_gadget_visual_state`. Acknowledgement also forces a native repaint,
+/// closing the WebView2 gap where DOM frames exist but are not presented.
+#[tauri::command]
+pub fn acknowledge_gadget_rendered(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+    presentation: crate::models::GadgetPresentation,
+    rect: crate::models::GadgetHitRect,
+) -> Result<bool, CommandError> {
+    crate::acknowledge_gadget_rendered(&app, state.inner(), presentation, rect)
+        .map_err(CommandError::Internal)
 }
 
 /// `set_gadget_hit_rect`
 ///
-/// Reported by the gadget overlay whenever its visible pill changes size or
-/// state. Stores the pill's rectangle (logical pixels, relative to the gadget
-/// window's top-left) so the background cursor watcher can make the overlay
-/// window click-through everywhere except over the pill — eliminating the
-/// invisible dead-zone that used to swallow clicks around the gadget.
+/// Compatibility path for older frontend bundles. Current bundles use
+/// `acknowledge_gadget_rendered`, which couples this rectangle to a native
+/// presentation generation and repaint.
 #[tauri::command]
 pub fn set_gadget_hit_rect(state: State<'_, SharedState>, rect: crate::models::GadgetHitRect) {
     *state.gadget_hit_rect.write() = Some(rect);

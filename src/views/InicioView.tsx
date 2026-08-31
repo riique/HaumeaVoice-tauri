@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   ArrowRight,
@@ -12,13 +12,14 @@ import { PageHeader, SkeletonRows } from "../components/ui/Surface";
 import {
   getHistory,
   getModeConfig,
-  getRecordingState,
+  getRecordingStatus,
   getShortcuts,
   onRecordingEvent,
   type HistoryEntry,
   type ModeConfigSnapshot,
   type ShortcutConfig,
 } from "../lib/tauri";
+import { shouldApplyRecordingStatus } from "../recording/status";
 import type { ViewKey } from "./index";
 
 const MODE_LABELS: Record<string, string> = {
@@ -64,6 +65,7 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
   const [shortcuts, setShortcutsState] = useState<ShortcutConfig>({ toggle: "Control+B", cancel: "Control+Q" });
   const [recording, setRecording] = useState(false);
   const [loading, setLoading] = useState(true);
+  const latestRecordingRevision = useRef(-1);
 
   const refresh = async () => {
     try {
@@ -78,14 +80,31 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
   };
 
   useEffect(() => {
+    let mounted = true;
+    let unlistenRecording: (() => void) | undefined;
+    const applyRecordingStatus = (status: Awaited<ReturnType<typeof getRecordingStatus>>) => {
+      if (!mounted || !shouldApplyRecordingStatus(latestRecordingRevision.current, status)) return;
+      latestRecordingRevision.current = status.revision;
+      setRecording(status.recording);
+    };
+
     void refresh();
     getShortcuts().then(setShortcutsState).catch(() => {});
-    getRecordingState().then(setRecording).catch(() => {});
     const saved = listen("transcription-saved", refresh);
-    const recordingEvents = onRecordingEvent((type) => setRecording(type === "recording-started"));
+    void onRecordingEvent((_type, status) => applyRecordingStatus(status))
+      .then(async (unlisten) => {
+        if (!mounted) {
+          unlisten();
+          return;
+        }
+        unlistenRecording = unlisten;
+        applyRecordingStatus(await getRecordingStatus());
+      })
+      .catch((error) => console.error("Failed to sync recording status:", error));
     return () => {
+      mounted = false;
       saved.then((unlisten) => unlisten());
-      recordingEvents.then((unlisten) => unlisten());
+      unlistenRecording?.();
     };
   }, []);
 

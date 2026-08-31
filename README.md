@@ -2,7 +2,7 @@
 
 Aplicativo desktop de **digitação por voz** para Windows. Grave com um atalho global, o app transcreve com motores em nuvem, opcionalmente refina o texto e cola no campo focado (`Ctrl+V`).
 
-**Versão:** 1.0.19 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
+**Versão:** 1.0.25 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
 
 ---
 

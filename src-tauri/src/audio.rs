@@ -103,6 +103,8 @@ pub enum AudioError {
     StreamBuild(String),
     #[error("failed to start the input stream: {0}")]
     StreamPlay(String),
+    #[error("recording start was superseded by a stop or cancel request")]
+    Superseded,
 }
 
 /// Builds a 44-byte canonical RIFF/WAVE header followed by the
@@ -169,7 +171,11 @@ pub fn create_wav_buffer(samples: &[i16]) -> Vec<u8> {
 /// working. Samples are down-mixed to mono `i16` inside the data callback
 /// and the native rate is stored in `state.capture_rate` so `stop_capture`
 /// can resample to 16 kHz when building the final WAV.
-pub fn start_capture(state: &Arc<AppState>) -> Result<(), AudioError> {
+pub fn start_capture(
+    state: &Arc<AppState>,
+    generation: u64,
+    session_id: &str,
+) -> Result<(), AudioError> {
     state.clear_audio_buffer();
     let started_at_ms = crate::pipeline_run::epoch_ms();
     let context_preferences = state.context_preferences.read().clone();
@@ -187,7 +193,7 @@ pub fn start_capture(state: &Arc<AppState>) -> Result<(), AudioError> {
     profile.allow_context_to_cloud &= context_preferences.allow_context_to_cloud;
     let formatting_level = profile.formatting_level;
     let pending_session = crate::pipeline_run::RecordingSession {
-        id: format!("recording-session-{started_at_ms}"),
+        id: session_id.to_string(),
         started_at_ms,
         context,
         profile,
@@ -294,8 +300,9 @@ pub fn start_capture(state: &Arc<AppState>) -> Result<(), AudioError> {
         .play()
         .map_err(|e| AudioError::StreamPlay(e.to_string()))?;
 
-    *state.audio_stream.lock() = Some(stream);
-    *state.recording_session.lock() = Some(pending_session);
+    state
+        .install_recording_capture(generation, stream, pending_session)
+        .map_err(|_| AudioError::Superseded)?;
 
     // When streaming_final is selected and Deepgram is in the path, open the
     // WebSocket now and process audio during capture (not only after stop).

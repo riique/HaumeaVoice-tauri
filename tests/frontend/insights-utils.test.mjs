@@ -4,7 +4,9 @@ import {
   adjacentInsightsTab,
   buildActivityCells,
   formatInsightNumber,
+  voiceEvidenceLevelLabel,
   voiceProfileProgress,
+  voiceProfileRemainingWords,
 } from "../../src/views/insights-utils.ts";
 
 test("activity projection covers 91 days and preserves real counts", () => {
@@ -18,6 +20,11 @@ test("activity projection covers 91 days and preserves real counts", () => {
   assert.deepEqual(cells.at(-2), { key: "2026-08-25", count: 3 });
   assert.deepEqual(cells.at(-1), { key: "2026-08-26", count: 2 });
   assert.equal(cells.filter((cell) => cell.count > 0).length, 2);
+});
+
+test("voice profile remaining words never becomes negative", () => {
+  assert.equal(voiceProfileRemainingWords(500, 2_000), 1_500);
+  assert.equal(voiceProfileRemainingWords(2_100, 2_000), 0);
 });
 
 test("tab keyboard navigation follows the WAI-ARIA tab order", () => {
@@ -38,4 +45,10 @@ test("voice profile progress is bounded and handles an empty threshold", () => {
 test("numbers use the product pt-BR formatter", () => {
   assert.equal(formatInsightNumber(1234), "1.234");
   assert.equal(formatInsightNumber(4.25, 1), "4,3");
+});
+
+test("progressive evidence levels are presented in product language", () => {
+  assert.equal(voiceEvidenceLevelLabel("rich"), "Perfil enriquecido");
+  assert.equal(voiceEvidenceLevelLabel("high_confidence"), "Alta confiança");
+  assert.equal(voiceEvidenceLevelLabel("unexpected"), "Em aprendizado");
 });
