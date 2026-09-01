@@ -594,6 +594,10 @@ pub struct RecordingSession {
     pub formatting_level: FormattingLevel,
     #[serde(default)]
     pub destination: DictationDestination,
+    /// Window selected for final delivery. Initialized from the start context
+    /// and refreshed from the foreground window at the exact stop shortcut.
+    #[serde(default)]
+    pub delivery_target: crate::context::ForegroundTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -792,6 +796,8 @@ impl PipelineRun {
             destination: session.destination,
             delivery: DeliveryRecord {
                 destination: session.destination,
+                target_hwnd: session.delivery_target.hwnd,
+                target_process_id: session.delivery_target.process_id,
                 ..DeliveryRecord::default()
             },
             ..Self::default()
@@ -1200,5 +1206,24 @@ mod tests {
         assert_eq!(run.attempts.len(), 2);
         assert_eq!(run.attempts[0].status, AttemptStatus::Failed);
         assert_eq!(run.attempts[1].status, AttemptStatus::Success);
+    }
+
+    #[test]
+    fn stop_time_delivery_target_is_carried_into_the_pipeline_run() {
+        let session = RecordingSession {
+            id: "session-across-monitors".into(),
+            delivery_target: crate::context::ForegroundTarget {
+                hwnd: Some(4242),
+                process_id: Some(77),
+            },
+            ..RecordingSession::default()
+        };
+        let run = PipelineRun::new(
+            "run-across-monitors",
+            &session,
+            TranscriptionMode::UltraFast,
+        );
+        assert_eq!(run.delivery.target_hwnd, Some(4242));
+        assert_eq!(run.delivery.target_process_id, Some(77));
     }
 }

@@ -583,7 +583,7 @@ export async function setWidgetVisibilityMode(
   return invoke<WidgetPreferences>("set_widget_visibility_mode", { mode });
 }
 
-/** Applies state-derived native visibility, size and frozen-monitor placement. */
+/** Applies state-derived native visibility, size and focus-following monitor placement. */
 export async function setGadgetVisualState(
   visualState: GadgetVisualState,
 ): Promise<GadgetPresentation> {

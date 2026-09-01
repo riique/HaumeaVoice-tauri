@@ -195,6 +195,7 @@ pub fn start_capture(
     let pending_session = crate::pipeline_run::RecordingSession {
         id: session_id.to_string(),
         started_at_ms,
+        delivery_target: crate::context::ForegroundTarget::from_snapshot(&context),
         context,
         profile,
         formatting_level,
@@ -387,7 +388,13 @@ fn maybe_start_deepgram_live(state: &Arc<AppState>) {
 
 /// Stops the active capture stream, builds WAV, runs the legacy transcription
 /// pipeline ([`crate::transcription`]), then clipboard + history.
-pub async fn stop_capture(state: &Arc<AppState>) -> Option<String> {
+pub async fn stop_capture(
+    state: &Arc<AppState>,
+    delivery_target: crate::context::ForegroundTarget,
+) -> Option<String> {
+    if !state.set_recording_delivery_target(delivery_target) {
+        log::warn!("audio: stop target captured before recording session became available");
+    }
     if let Some(handle) = state.app_handle.read().as_ref() {
         emit_transcribing(handle, true);
     }
@@ -779,10 +786,14 @@ async fn deliver_pipeline_result(run: &mut crate::pipeline_run::PipelineRun) {
 
     let started = std::time::Instant::now();
     let text = run.final_text.clone();
+    let expected_target = crate::context::ForegroundTarget {
+        hwnd: run.delivery.target_hwnd,
+        process_id: run.delivery.target_process_id,
+    };
     let mut delivery = DeliveryRecord {
         destination: run.destination,
-        target_hwnd: run.context.foreground_hwnd,
-        target_process_id: run.context.process_id,
+        target_hwnd: expected_target.hwnd,
+        target_process_id: expected_target.process_id,
         delivered_at_ms: Some(crate::pipeline_run::epoch_ms()),
         ..Default::default()
     };
@@ -810,7 +821,7 @@ async fn deliver_pipeline_result(run: &mut crate::pipeline_run::PipelineRun) {
             run.timings.clipboard_ms = Some(clipboard_started.elapsed().as_millis() as u64);
             delivery.clipboard_ok = result.is_ok();
             result.and_then(|()| {
-                if !crate::context::foreground_target_matches(&run.context) {
+                if !crate::context::foreground_delivery_target_matches(expected_target) {
                     return Err("delivery target changed; text kept on clipboard".into());
                 }
                 delivery.paste_attempted = true;
@@ -1013,6 +1024,7 @@ pub async fn retry_transcription_handler_with_strategy(
             *state.recording_session.lock() = Some(crate::pipeline_run::RecordingSession {
                 id: format!("retry-session-{}", crate::pipeline_run::epoch_ms()),
                 started_at_ms: crate::pipeline_run::epoch_ms(),
+                delivery_target: crate::context::ForegroundTarget::from_snapshot(&context),
                 context,
                 formatting_level: profile.formatting_level,
                 profile,

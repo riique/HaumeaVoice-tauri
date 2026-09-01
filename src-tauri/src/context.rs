@@ -299,32 +299,87 @@ pub struct ContextSnapshot {
     pub cloud_context_allowed: bool,
 }
 
-/// Verifies that a delivery target is still the exact foreground window and
-/// process captured when recording started. Missing Windows metadata degrades
-/// conservatively instead of allowing a blind paste into another field.
-pub fn foreground_target_matches(snapshot: &ContextSnapshot) -> bool {
+/// Minimal, privacy-preserving identity of the window that should receive the
+/// final paste. It is captured when recording stops, independently from the
+/// richer context snapshot collected when recording starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForegroundTarget {
+    #[serde(default)]
+    pub hwnd: Option<isize>,
+    #[serde(default)]
+    pub process_id: Option<u32>,
+}
+
+impl ForegroundTarget {
+    pub fn from_snapshot(snapshot: &ContextSnapshot) -> Self {
+        Self {
+            hwnd: snapshot.foreground_hwnd,
+            process_id: snapshot.process_id,
+        }
+    }
+}
+
+fn delivery_targets_match(expected: ForegroundTarget, current: ForegroundTarget) -> bool {
+    matches!(
+        (
+            expected.hwnd,
+            expected.process_id,
+            current.hwnd,
+            current.process_id,
+        ),
+        (Some(expected_hwnd), Some(expected_pid), Some(current_hwnd), Some(current_pid))
+            if expected_hwnd == current_hwnd && expected_pid == current_pid
+    )
+}
+
+/// Captures only the current foreground HWND and process id. No title,
+/// selection, clipboard, browser or document content is read.
+pub fn capture_foreground_target() -> ForegroundTarget {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::UI::WindowsAndMessaging::{
             GetForegroundWindow, GetWindowThreadProcessId,
         };
-        let (Some(expected_hwnd), Some(expected_pid)) =
-            (snapshot.foreground_hwnd, snapshot.process_id)
-        else {
-            return false;
-        };
+
         unsafe {
             let hwnd = GetForegroundWindow();
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            hwnd.0 as isize == expected_hwnd && pid == expected_pid
+            if hwnd.0.is_null() {
+                return ForegroundTarget::default();
+            }
+            let mut process_id = 0_u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+            ForegroundTarget {
+                hwnd: Some(hwnd.0 as isize),
+                process_id: (process_id != 0).then_some(process_id),
+            }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = snapshot;
+        ForegroundTarget::default()
+    }
+}
+
+/// Verifies that the exact window selected at recording stop is still active
+/// when the paste is dispatched. Moving that window to another monitor keeps
+/// the same HWND and remains valid; switching applications fails closed.
+pub fn foreground_delivery_target_matches(expected: ForegroundTarget) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        delivery_targets_match(expected, capture_foreground_target())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = expected;
         true
     }
+}
+
+/// Verifies that a delivery target is still the exact foreground window and
+/// process captured when recording started. Missing Windows metadata degrades
+/// conservatively instead of allowing a blind paste into another field.
+pub fn foreground_target_matches(snapshot: &ContextSnapshot) -> bool {
+    foreground_delivery_target_matches(ForegroundTarget::from_snapshot(snapshot))
 }
 
 impl ContextSnapshot {
@@ -838,5 +893,32 @@ mod tests {
             process: Some("Code.exe".into()),
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn delivery_target_survives_monitor_moves_but_rejects_other_windows() {
+        let expected = ForegroundTarget {
+            hwnd: Some(101),
+            process_id: Some(7),
+        };
+        assert!(delivery_targets_match(expected, expected));
+        assert!(!delivery_targets_match(
+            expected,
+            ForegroundTarget {
+                hwnd: Some(202),
+                process_id: Some(7),
+            }
+        ));
+        assert!(!delivery_targets_match(
+            expected,
+            ForegroundTarget {
+                hwnd: Some(101),
+                process_id: Some(8),
+            }
+        ));
+        assert!(!delivery_targets_match(
+            expected,
+            ForegroundTarget::default()
+        ));
     }
 }

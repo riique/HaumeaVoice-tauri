@@ -161,7 +161,22 @@ fn select_gadget_anchor(
     cursor: Option<GadgetSessionAnchor>,
     primary: Option<GadgetSessionAnchor>,
 ) -> Option<GadgetSessionAnchor> {
-    configured.or(foreground).or(cursor).or(primary)
+    foreground.or(configured).or(cursor).or(primary)
+}
+
+fn gadget_tracks_foreground_monitor(state: GadgetVisualState) -> bool {
+    state != GadgetVisualState::Hidden
+}
+
+fn rectangles_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    a.0 < a.2
+        && a.1 < a.3
+        && b.0 < b.2
+        && b.1 < b.3
+        && a.0 < b.2
+        && a.2 > b.0
+        && a.1 < b.3
+        && a.3 > b.1
 }
 
 fn choose_gadget_anchor(app: &tauri::AppHandle) -> Option<GadgetSessionAnchor> {
@@ -246,11 +261,152 @@ fn redraw_gadget_surface(window: &tauri::WebviewWindow) {
 #[cfg(not(target_os = "windows"))]
 fn redraw_gadget_surface(_window: &tauri::WebviewWindow) {}
 
+/// Reinsert the gadget at the front of the Windows topmost band without
+/// activating it. `set_always_on_top(true)` preserves `WS_EX_TOPMOST`, but is
+/// effectively a no-op once that style is already set; other windows can then
+/// remain ahead of the gadget in the Z-order and cover it until they are
+/// minimized. An explicit `SetWindowPos(HWND_TOPMOST)` promotes the existing
+/// HWND again on every visible presentation while `SWP_NOACTIVATE` preserves
+/// focus in the application receiving dictation.
+#[cfg(target_os = "windows")]
+fn raise_gadget_topmost(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    };
+
+    let tauri_hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    let hwnd = HWND(tauri_hwnd.0 as *mut _);
+
+    // SAFETY: the HWND belongs to the live gadget window. The flags prohibit
+    // geometry and activation changes; only visibility and Z-order are
+    // reaffirmed.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn raise_gadget_topmost(_window: &tauri::WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
+
+/// Returns true when a visible, non-minimized top-level window ahead of the
+/// gadget intersects its native footprint. The probe is entirely read-only and
+/// can run off the Tauri event loop.
+#[cfg(target_os = "windows")]
+fn win32_gadget_is_obscured(hwnd_raw: isize) -> bool {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindow, GetWindowRect, IsIconic, IsWindowVisible, GW_HWNDPREV,
+    };
+
+    if hwnd_raw == 0 {
+        return false;
+    }
+
+    // SAFETY: every handle is either the cached live gadget HWND or a top-level
+    // window returned by GetWindow. Failed/stale handles terminate or skip the
+    // probe without mutating OS state.
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let mut gadget_rect = RECT::default();
+        if GetWindowRect(hwnd, &mut gadget_rect).is_err() {
+            return false;
+        }
+        let gadget_bounds = (
+            gadget_rect.left,
+            gadget_rect.top,
+            gadget_rect.right,
+            gadget_rect.bottom,
+        );
+
+        let mut above = match GetWindow(hwnd, GW_HWNDPREV) {
+            Ok(window) => window,
+            Err(_) => return false,
+        };
+        while !above.0.is_null() {
+            if IsWindowVisible(above).as_bool() && !IsIconic(above).as_bool() {
+                let mut rect = RECT::default();
+                if GetWindowRect(above, &mut rect).is_ok()
+                    && rectangles_overlap(
+                        gadget_bounds,
+                        (rect.left, rect.top, rect.right, rect.bottom),
+                    )
+                {
+                    return true;
+                }
+            }
+            above = match GetWindow(above, GW_HWNDPREV) {
+                Ok(window) => window,
+                Err(_) => break,
+            };
+        }
+    }
+    false
+}
+
+/// Keeps the visible gadget ahead of every overlapping desktop application.
+/// The worker only queues a main-thread mutation when a read-only Win32 probe
+/// detects a real obstruction, avoiding unconditional SetWindowPos traffic.
+#[cfg(target_os = "windows")]
+fn spawn_gadget_z_order_guardian(app: tauri::AppHandle, state: SharedState) {
+    let promotion_pending = Arc::new(AtomicBool::new(false));
+    std::thread::Builder::new()
+        .name("haumea-gadget-z-order".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if *state.gadget_visual_state.read() == GadgetVisualState::Hidden {
+                continue;
+            }
+            let hwnd_raw = GADGET_HWND.load(Ordering::Acquire);
+            if !win32_gadget_is_obscured(hwnd_raw) || promotion_pending.swap(true, Ordering::AcqRel)
+            {
+                continue;
+            }
+
+            let app_for_promotion = app.clone();
+            let state_for_promotion = state.clone();
+            let pending_for_promotion = promotion_pending.clone();
+            let pending_for_error = promotion_pending.clone();
+            let queued = app.run_on_main_thread(move || {
+                if *state_for_promotion.gadget_visual_state.read() != GadgetVisualState::Hidden {
+                    if let Some(window) = app_for_promotion.get_webview_window("gadget") {
+                        if let Err(error) = raise_gadget_topmost(&window) {
+                            log::warn!("gadget: z-order promotion failed: {}", error);
+                        } else {
+                            cache_gadget_hwnd(&window);
+                            log::debug!("gadget: promoted above an overlapping window");
+                        }
+                    }
+                }
+                pending_for_promotion.store(false, Ordering::Release);
+            });
+            if queued.is_err() {
+                pending_for_error.store(false, Ordering::Release);
+            }
+        })
+        .expect("failed to spawn gadget Z-order guardian");
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_gadget_z_order_guardian(_app: tauri::AppHandle, _state: SharedState) {}
+
 fn refresh_gadget_surface(window: &tauri::WebviewWindow) -> Result<(), String> {
     window.show().map_err(|error| error.to_string())?;
     window
         .set_always_on_top(true)
         .map_err(|error| error.to_string())?;
+    raise_gadget_topmost(window)?;
     cache_gadget_hwnd(window);
     redraw_gadget_surface(window);
     Ok(())
@@ -429,11 +585,11 @@ fn apply_gadget_presentation(
     }
 
     let anchor = {
-        let mut frozen = state.gadget_session_anchor.lock();
-        if frozen.is_none() {
-            *frozen = choose_gadget_anchor(app);
+        let mut current = state.gadget_session_anchor.lock();
+        if current.is_none() {
+            *current = choose_gadget_anchor(app);
         }
-        frozen.clone()
+        current.clone()
     }
     .ok_or_else(|| "no display is available for the gadget".to_string())?;
 
@@ -476,9 +632,7 @@ fn apply_gadget_presentation(
 
 pub(crate) fn begin_gadget_session(app: &tauri::AppHandle, state: &SharedState) {
     let mut anchor = state.gadget_session_anchor.lock();
-    if anchor.is_none() {
-        *anchor = choose_gadget_anchor(app);
-    }
+    *anchor = choose_gadget_anchor(app);
     drop(anchor);
     if let Err(error) = apply_gadget_presentation(app, state, GadgetVisualState::Appearing) {
         log::warn!("gadget: failed to begin session: {}", error);
@@ -822,10 +976,7 @@ fn spawn_gadget_focus_monitor_watcher(app: tauri::AppHandle, state: SharedState)
             continue;
         };
         let current_state = *state.gadget_visual_state.read();
-        if !matches!(
-            current_state,
-            GadgetVisualState::Idle | GadgetVisualState::Hover
-        ) {
+        if !gadget_tracks_foreground_monitor(current_state) {
             continue;
         }
         let unchanged = state
@@ -850,10 +1001,7 @@ fn spawn_gadget_focus_monitor_watcher(app: tauri::AppHandle, state: SharedState)
         let pending_for_error = pending_move.clone();
         let queued = app.run_on_main_thread(move || {
             let current_state = *state_for_move.gadget_visual_state.read();
-            if matches!(
-                current_state,
-                GadgetVisualState::Idle | GadgetVisualState::Hover
-            ) {
+            if gadget_tracks_foreground_monitor(current_state) {
                 *state_for_move.gadget_session_anchor.lock() = Some(next_anchor);
                 if let Err(error) =
                     apply_gadget_presentation(&app_for_move, &state_for_move, current_state)
@@ -1317,6 +1465,7 @@ pub fn run() {
                 // no longer eats clicks that land near (but not on) the gadget.
                 spawn_gadget_cursor_watcher_safe(app.handle().clone(), state.clone());
                 spawn_gadget_focus_monitor_watcher(app.handle().clone(), state.clone());
+                spawn_gadget_z_order_guardian(app.handle().clone(), state.clone());
 
                 // If not launched via autostart, show the main window.
                 let is_autostart = std::env::args().any(|arg| arg == "--autostart");
@@ -1446,7 +1595,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod gadget_placement_tests {
-    use super::{bottom_center_placement, gadget_geometry, gadget_hit_rect, select_gadget_anchor};
+    use super::{
+        bottom_center_placement, gadget_geometry, gadget_hit_rect,
+        gadget_tracks_foreground_monitor, rectangles_overlap, select_gadget_anchor,
+    };
     use crate::models::{GadgetSessionAnchor, GadgetVisualState};
 
     fn anchor(name: &str, work_x: i32) -> GadgetSessionAnchor {
@@ -1461,7 +1613,7 @@ mod gadget_placement_tests {
     }
 
     #[test]
-    fn configured_monitor_wins_anchor_selection() {
+    fn foreground_monitor_wins_even_when_a_display_is_configured() {
         let selected = select_gadget_anchor(
             Some(anchor("configured", 1)),
             Some(anchor("foreground", 2)),
@@ -1469,7 +1621,7 @@ mod gadget_placement_tests {
             Some(anchor("primary", 4)),
         )
         .unwrap();
-        assert_eq!(selected.display_name.as_deref(), Some("configured"));
+        assert_eq!(selected.display_name.as_deref(), Some("foreground"));
     }
 
     #[test]
@@ -1574,5 +1726,35 @@ mod gadget_placement_tests {
             assert!(((rect.y * 2.0 + rect.height) - geometry.height).abs() < f64::EPSILON);
         }
         assert!(gadget_hit_rect(Hidden).is_none());
+    }
+
+    #[test]
+    fn z_order_guard_only_treats_real_area_intersection_as_obscured() {
+        let gadget = (900, 980, 1_020, 1_040);
+        assert!(rectangles_overlap(gadget, (0, 0, 1_920, 1_080)));
+        assert!(rectangles_overlap(gadget, (1_000, 1_000, 1_200, 1_100)));
+        assert!(!rectangles_overlap(gadget, (0, 0, 900, 1_080)));
+        assert!(!rectangles_overlap(gadget, (0, 1_040, 1_920, 1_080)));
+        assert!(!rectangles_overlap(gadget, (0, 0, 0, 0)));
+    }
+
+    #[test]
+    fn every_visible_gadget_state_follows_the_foreground_monitor() {
+        use GadgetVisualState::*;
+        assert!(!gadget_tracks_foreground_monitor(Hidden));
+        for state in [
+            Idle,
+            Hover,
+            Appearing,
+            Initializing,
+            Recording,
+            Stopping,
+            Processing,
+            ProcessingLong,
+            Success,
+            Error,
+        ] {
+            assert!(gadget_tracks_foreground_monitor(state), "{state:?}");
+        }
     }
 }

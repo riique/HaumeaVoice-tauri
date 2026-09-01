@@ -318,9 +318,9 @@ pub(crate) enum RecordingToggle {
     Busy(RecordingStatus),
 }
 
-/// Current work-area anchor in physical pixels. It starts from the foreground
-/// application's monitor (cursor/primary are fallbacks) and stays frozen for
-/// the active dictation session.
+/// Current work-area anchor in physical pixels. It follows the foreground
+/// application's monitor while the gadget is visible; configured display,
+/// cursor and primary monitor are fallbacks.
 #[derive(Debug, Clone)]
 pub struct GadgetSessionAnchor {
     pub display_name: Option<String>,
@@ -544,9 +544,8 @@ pub struct AppState {
     pub compact_mode: RwLock<bool>,
     pub widget_visibility_mode: RwLock<WidgetVisibilityMode>,
     pub widget_dock: RwLock<WidgetDock>,
-    /// Current monitor anchor. It is frozen during active dictation and may be
-    /// updated by the native watcher only while the always-visible idle pill
-    /// follows focus between monitors.
+    /// Current monitor anchor. The native watcher updates it whenever the
+    /// visible gadget's foreground target moves between monitors.
     pub gadget_session_anchor: Mutex<Option<GadgetSessionAnchor>>,
     pub gadget_visual_state: RwLock<GadgetVisualState>,
     /// Monotonic native presentation id and the newest frontend-confirmed id.
@@ -767,6 +766,18 @@ impl AppState {
     pub(crate) fn recording_capture_start_pending(&self, generation: u64) -> bool {
         let lifecycle = self.recording_lifecycle.lock();
         lifecycle.generation == generation && lifecycle.capture_start_pending
+    }
+
+    pub(crate) fn set_recording_delivery_target(
+        &self,
+        target: crate::context::ForegroundTarget,
+    ) -> bool {
+        let mut session = self.recording_session.lock();
+        let Some(session) = session.as_mut() else {
+            return false;
+        };
+        session.delivery_target = target;
+        true
     }
 
     pub(crate) fn finish_recording_stop(&self, generation: u64) -> RecordingStatus {

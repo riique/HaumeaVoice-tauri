@@ -95,8 +95,8 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
                 status.generation,
                 status.session_id.as_deref().unwrap_or("-")
             );
-            // Seed the session from the foreground application's monitor. A saved
-            // display still wins; cursor and primary monitor are only fallbacks.
+            // Seed the session from the foreground application's monitor. The
+            // native watcher keeps following focus for the entire visible flow.
             crate::begin_gadget_session(app, state);
             if let Err(e) = app.emit(event_names::RECORDING_INITIALIZING, &status) {
                 log::warn!(
@@ -194,6 +194,10 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
                 status.session_id.as_deref().unwrap_or("-")
             );
             state.clear_recording_start();
+            // A global shortcut does not activate Haumea, so this captures the
+            // exact app/window where the user requested stop. Delivery remains
+            // tied to this HWND even when it lives on another monitor.
+            let delivery_target = crate::context::capture_foreground_target();
             if let Err(e) = app.emit(event_names::RECORDING_STOPPED, &status) {
                 log::warn!("failed to emit {}: {}", event_names::RECORDING_STOPPED, e);
             }
@@ -204,7 +208,7 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
                 while state_clone.recording_capture_start_pending(generation) {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                let _ = stop_capture(&state_clone).await;
+                let _ = stop_capture(&state_clone, delivery_target).await;
                 let finished = state_clone.finish_recording_stop(generation);
                 if let Err(error) = app_clone.emit(event_names::RECORDING_IDLE, &finished) {
                     log::warn!("failed to emit {}: {}", event_names::RECORDING_IDLE, error);
