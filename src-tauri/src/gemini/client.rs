@@ -80,9 +80,14 @@ pub fn adaptive_generate_timeout(duration_ms: Option<u64>, audio_bytes: usize) -
     )
 }
 
+pub fn is_transcribe_model(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    lower.contains("transcribe")
+}
+
 /* --------------------------- generateContent shapes --------------------------- */
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GenerateContentRequest {
     /// Stable behavioral policy, kept separate from request-specific evidence.
     #[serde(skip_serializing_if = "Option::is_none", rename = "systemInstruction")]
@@ -93,7 +98,7 @@ pub struct GenerateContentRequest {
     pub generation_config: Option<GenerationConfig>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GenerationConfig {
     /// Sampling parameters are omitted for Gemini 3.5+ compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,7 +107,7 @@ pub struct GenerationConfig {
     pub thinking_config: Option<ThinkingConfig>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ThinkingConfig {
     #[serde(rename = "thinkingLevel")]
     pub thinking_level: &'static str,
@@ -146,12 +151,12 @@ impl GenerateContentRequest {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Content {
     pub parts: Vec<Part>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Part {
     Text {
@@ -167,16 +172,108 @@ pub enum Part {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InlineData {
     pub mime_type: String,
     pub data: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileData {
     pub mime_type: String,
     pub file_uri: String,
+}
+
+/* ---------------------------- Interactions API shapes ---------------------------- */
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractionRequest {
+    pub model: String,
+    pub input: Vec<InteractionInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_config: Option<InteractionGenerationConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InteractionInput {
+    Text {
+        text: String,
+    },
+    Audio {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uri: Option<String>,
+        mime_type: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct InteractionGenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcription_config: Option<InteractionTranscriptionConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct InteractionTranscriptionConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_codes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_vocabulary: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<InteractionTranscriptionMode>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractionTranscriptionMode {
+    #[serde(rename = "type")]
+    pub mode_type: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InteractionResponse {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<InteractionStep>,
+    #[serde(default)]
+    pub usage: Option<InteractionUsage>,
+    #[serde(default)]
+    pub error: Option<ApiErrorBody>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InteractionStep {
+    #[serde(default, rename = "type")]
+    pub step_type: String,
+    #[serde(default)]
+    pub content: Option<Vec<InteractionContentPart>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InteractionContentPart {
+    #[serde(default, rename = "type")]
+    #[allow(dead_code)]
+    pub part_type: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InteractionUsage {
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_thought_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,10 +386,23 @@ pub async fn generate_content_with_model(
     let url = generate_url(model, api_key);
     let t0 = std::time::Instant::now();
 
+    // If a dedicated transcribe model is called via generateContent, strip unsupported fields.
+    let mut sanitized_body;
+    let effective_body = if is_transcribe_model(model) {
+        sanitized_body = body.clone();
+        sanitized_body.system_instruction = None;
+        if let Some(ref mut gc) = sanitized_body.generation_config {
+            gc.thinking_config = None;
+        }
+        &sanitized_body
+    } else {
+        body
+    };
+
     let request = async {
         let response = client
             .post(url)
-            .json(body)
+            .json(effective_body)
             .send()
             .await
             .map_err(|e| format!("falha na requisição ao Gemini: {}", e))?;
@@ -343,6 +453,100 @@ pub async fn generate_content_with_model(
     })
 }
 
+pub fn interactions_url(api_key: &str) -> String {
+    format!("{}/interactions?key={}", API_ROOT, api_key)
+}
+
+/// POST to the Gemini Interactions API (/v1beta/interactions).
+/// This is the primary, first-class surface for `gemini-3.5-transcribe`.
+pub async fn interact_with_model(
+    api_key: &str,
+    body: &InteractionRequest,
+    timeout: Duration,
+) -> Result<GenerateContentOutcome, String> {
+    require_api_key(api_key)?;
+    let client = http_client()?;
+    let url = interactions_url(api_key);
+    let t0 = std::time::Instant::now();
+
+    let request = async {
+        let response = client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("falha na requisição ao Gemini (interactions): {}", e))?;
+        let status = response.status().as_u16();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| format!("falha ao ler a resposta do Gemini (interactions): {}", e))?;
+        Ok::<_, String>((status, body_text))
+    };
+
+    let (status, body_text) = tokio::time::timeout(timeout, request).await.map_err(|_| {
+        format!(
+            "timeout ao aguardar resposta do Gemini (interactions) ({}s)",
+            timeout.as_secs()
+        )
+    })??;
+    let generate_ms = t0.elapsed().as_millis() as u64;
+    if status != 200 {
+        return Err(format!("Gemini retornou status {}: {}", status, body_text));
+    }
+
+    let parsed: InteractionResponse = serde_json::from_str(&body_text).map_err(|e| {
+        format!(
+            "falha ao interpretar resposta do Gemini (interactions): {}",
+            e
+        )
+    })?;
+
+    if let Some(err) = parsed.error {
+        let msg = err.message.unwrap_or_else(|| "erro desconhecido".into());
+        return Err(format!(
+            "Gemini API error{}: {}",
+            err.code.map(|c| format!(" ({c})")).unwrap_or_default(),
+            msg
+        ));
+    }
+
+    let text = parsed
+        .steps
+        .into_iter()
+        .filter(|s| s.step_type == "model_output")
+        .filter_map(|s| s.content)
+        .flat_map(|parts| parts.into_iter().filter_map(|p| p.text))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    let usage = parsed
+        .usage
+        .as_ref()
+        .map(|u| {
+            let mut rec = crate::pipeline_run::UsageRecord {
+                input_tokens: u.total_input_tokens,
+                output_tokens: u.total_output_tokens,
+                total_tokens: u.total_tokens,
+                ..Default::default()
+            };
+            if let Some(thoughts) = u.total_thought_tokens {
+                rec.metadata
+                    .insert("thoughts_tokens".into(), thoughts.into());
+            }
+            rec
+        })
+        .unwrap_or_default();
+
+    Ok(GenerateContentOutcome {
+        text,
+        duration_ms: generate_ms,
+        usage,
+    })
+}
+
 /// Build generateContent body with a real system instruction + user text + inline audio.
 pub fn build_inline_request(
     system_instruction: &str,
@@ -383,6 +587,80 @@ pub fn build_file_request(
         },
     ])
     .with_system_instruction(system_instruction)
+}
+
+/// Build an Interactions API request with inline audio.
+pub fn build_interaction_inline_request(
+    model: &str,
+    mime: &str,
+    base64_data: &str,
+    text_prompt: Option<&str>,
+    custom_vocabulary: Option<Vec<String>>,
+) -> InteractionRequest {
+    let mut input = Vec::new();
+    if let Some(text) = text_prompt {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            input.push(InteractionInput::Text {
+                text: trimmed.to_string(),
+            });
+        }
+    }
+    input.push(InteractionInput::Audio {
+        data: Some(base64_data.to_string()),
+        uri: None,
+        mime_type: mime.to_string(),
+    });
+
+    InteractionRequest {
+        model: model.to_string(),
+        input,
+        generation_config: Some(InteractionGenerationConfig {
+            transcription_config: Some(InteractionTranscriptionConfig {
+                // None enables native automatic language identification and code-switching
+                language_codes: None,
+                custom_vocabulary,
+                mode: Some(InteractionTranscriptionMode { mode_type: "smart" }),
+            }),
+        }),
+    }
+}
+
+/// Build an Interactions API request with Files API remote audio.
+pub fn build_interaction_file_request(
+    model: &str,
+    mime: &str,
+    file_uri: &str,
+    text_prompt: Option<&str>,
+    custom_vocabulary: Option<Vec<String>>,
+) -> InteractionRequest {
+    let mut input = Vec::new();
+    if let Some(text) = text_prompt {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            input.push(InteractionInput::Text {
+                text: trimmed.to_string(),
+            });
+        }
+    }
+    input.push(InteractionInput::Audio {
+        data: None,
+        uri: Some(file_uri.to_string()),
+        mime_type: mime.to_string(),
+    });
+
+    InteractionRequest {
+        model: model.to_string(),
+        input,
+        generation_config: Some(InteractionGenerationConfig {
+            transcription_config: Some(InteractionTranscriptionConfig {
+                // None enables native automatic language identification and code-switching
+                language_codes: None,
+                custom_vocabulary,
+                mode: Some(InteractionTranscriptionMode { mode_type: "smart" }),
+            }),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -462,5 +740,82 @@ mod tests {
             Some(&serde_json::Value::String("minimal".into()))
         );
         assert!(json.pointer("/generationConfig/temperature").is_none());
+    }
+
+    #[test]
+    fn detects_transcribe_model_properly() {
+        assert!(is_transcribe_model("gemini-3.5-transcribe"));
+        assert!(is_transcribe_model("models/gemini-3.5-transcribe"));
+        assert!(is_transcribe_model("google/gemini-3.5-transcribe"));
+        assert!(!is_transcribe_model("gemini-3.5-flash-lite"));
+        assert!(!is_transcribe_model("gemini-3.6-flash"));
+    }
+
+    #[test]
+    fn interaction_request_serializes_with_transcription_config() {
+        let req = build_interaction_inline_request(
+            "gemini-3.5-transcribe",
+            "audio/wav",
+            "AQID",
+            Some("estilo confiável"),
+            Some(vec!["Haumea".into(), "Tauri".into()]),
+        );
+        let val = serde_json::to_value(&req).unwrap();
+
+        assert_eq!(val["model"], "gemini-3.5-transcribe");
+        assert_eq!(val["input"][0]["type"], "text");
+        assert_eq!(val["input"][0]["text"], "estilo confiável");
+        assert_eq!(val["input"][1]["type"], "audio");
+        assert_eq!(val["input"][1]["data"], "AQID");
+        assert_eq!(val["input"][1]["mime_type"], "audio/wav");
+
+        assert!(val["generation_config"]["transcription_config"]["language_codes"].is_null());
+        assert_eq!(
+            val["generation_config"]["transcription_config"]["custom_vocabulary"],
+            serde_json::json!(["Haumea", "Tauri"])
+        );
+        assert_eq!(
+            val["generation_config"]["transcription_config"]["mode"]["type"],
+            "smart"
+        );
+    }
+
+    #[test]
+    fn interaction_response_extracts_model_output_text() {
+        let json = r#"{
+            "id": "interaction-123",
+            "status": "completed",
+            "steps": [
+                {
+                    "type": "thought",
+                    "signature": "sig"
+                },
+                {
+                    "type": "model_output",
+                    "content": [
+                        { "type": "text", "text": "Transcrição de alta fidelidade" }
+                    ]
+                }
+            ],
+            "usage": {
+                "total_tokens": 30,
+                "total_input_tokens": 25,
+                "total_output_tokens": 5
+            }
+        }"#;
+
+        let parsed: InteractionResponse = serde_json::from_str(json).unwrap();
+        let text = parsed
+            .steps
+            .into_iter()
+            .filter(|s| s.step_type == "model_output")
+            .filter_map(|s| s.content)
+            .flat_map(|parts| parts.into_iter().filter_map(|p| p.text))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+
+        assert_eq!(text, "Transcrição de alta fidelidade");
     }
 }

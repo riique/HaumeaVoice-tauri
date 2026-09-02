@@ -54,7 +54,13 @@ function routeDetails(config: ModeConfigSnapshot | null) {
   const route = config.gemini_pipelines[key];
   return {
     engine: config.mode === "fast-accurate" ? "Gemini com áudio" : config.mode === "precise" ? "Whisper + Gemini" : "Whisper + validador + Gemini",
-    model: route.use_custom_model ? route.custom_model || "Modelo customizado" : route.model === "flash36" ? "Gemini 3.6 Flash" : "Gemini 3.5 Flash-Lite",
+    model: route.use_custom_model
+      ? route.custom_model || "Modelo customizado"
+      : route.model === "transcribe35"
+        ? "Gemini 3.5 Transcribe"
+        : route.model === "flash36"
+          ? "Gemini 3.6 Flash"
+          : "Gemini 3.5 Flash-Lite",
     provider: route.provider === "open-router" ? "OpenRouter" : "Google AI Studio",
   };
 }

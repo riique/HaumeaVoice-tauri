@@ -1303,10 +1303,15 @@ fn paste_into_focused_field() -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     let modifier = Key::Control;
 
+    #[cfg(target_os = "windows")]
+    let v_key = Key::V;
+    #[cfg(not(target_os = "windows"))]
+    let v_key = Key::Unicode('v');
+
     enigo
         .key(modifier, Press)
         .map_err(|e| format!("failed to press modifier: {}", e))?;
-    let press_v = enigo.key(Key::Unicode('v'), Click);
+    let press_v = enigo.key(v_key, Click);
     // Always release the modifier, even if the 'v' press failed, so we never
     // leave Ctrl/Cmd stuck down for the user.
     let release = enigo.key(modifier, Release);

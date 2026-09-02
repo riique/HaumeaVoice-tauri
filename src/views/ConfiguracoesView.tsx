@@ -132,11 +132,11 @@ export function ConfiguracoesView() {
   const currentTab = TABS.find((item) => item.key === tab)!;
 
   return (
-    <div className="space-y-8">
+    <div className="settings-page space-y-7">
       <PageHeader title="Configurações" description="Ajuste o Haumea para o seu fluxo de trabalho." />
-      <div className="grid grid-cols-[220px_minmax(0,1fr)] gap-10 max-[1180px]:grid-cols-1 max-[1180px]:gap-6">
+      <div className="settings-layout">
       <nav
-        className="space-y-1 self-start max-[1180px]:flex max-[1180px]:overflow-x-auto max-[1180px]:border-b max-[1180px]:border-line max-[1180px]:pb-3"
+        className="settings-nav scrollbar-thin"
         aria-label="Seções de configuração"
       >
         {TABS.map((t) => (
@@ -145,7 +145,7 @@ export function ConfiguracoesView() {
             aria-current={tab === t.key ? "page" : undefined}
             onClick={() => setTab(t.key)}
             className={
-              "group flex w-full items-center gap-3 rounded-[9px] px-3 py-2.5 text-left transition-colors max-[1180px]:w-auto max-[1180px]:shrink-0 " +
+              "settings-nav__item group gap-3 rounded-[9px] px-3 py-2.5 transition-colors " +
               (tab === t.key
                 ? "bg-[#e9e9e4] text-ink"
                 : "text-[#65665f] hover:bg-[#efefeb] hover:text-ink")
@@ -154,13 +154,13 @@ export function ConfiguracoesView() {
             <t.Icon className="h-4 w-4 shrink-0" aria-hidden />
             <span className="min-w-0 flex-1">
               <span className="block text-[13px] font-medium">{t.label}</span>
-              <span className="mt-0.5 block truncate text-[11px] text-muted max-[1180px]:hidden">{t.description}</span>
+              <span className="settings-nav__description mt-0.5 block truncate text-[11px] text-muted">{t.description}</span>
             </span>
-            <ChevronRight className="h-3.5 w-3.5 text-[#a0a19a] max-[1180px]:hidden" aria-hidden />
+            <ChevronRight className="settings-nav__chevron h-3.5 w-3.5 text-[#a0a19a]" aria-hidden />
           </button>
         ))}
       </nav>
-      <section className="min-w-0" aria-labelledby={`settings-${tab}`}>
+      <section className="settings-content" aria-labelledby={`settings-${tab}`}>
         <header className="mb-7 border-b border-line pb-5">
           <h2 id={`settings-${tab}`} className="text-[20px] font-semibold tracking-[-0.02em] text-ink">{currentTab.label}</h2>
           <p className="mt-1 text-[13px] text-muted">{currentTab.description}</p>
@@ -512,6 +512,14 @@ function PipelinesTab() {
 
   const selected = MODE_CARDS.find((c) => c.id === mode)!;
   const SelectedIcon = selected.Icon;
+  const selectedRouteKey =
+    mode === "fast-accurate"
+      ? "fast_accurate"
+      : mode === "precise"
+        ? "precise"
+        : mode === "ultra-precise"
+          ? "ultra_precise"
+          : null;
 
   const selectMode = (id: TranscriptionMode) => {
     setMode(id);
@@ -532,112 +540,98 @@ function PipelinesTab() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="surface-subtle p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <p className="meta-label">
-              Pipeline ativa
-            </p>
-            <h2 className="mt-1 flex items-center gap-2.5 text-[17px] font-semibold text-ink">
-              <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-line bg-white text-[#4f504b]">
-                <SelectedIcon className="h-4 w-4" aria-hidden />
-              </span>
-              {selected.title}
-            </h2>
-            <p className="mt-1 text-[13px] text-muted">
-              {selected.engine} · {selected.blurb}
-            </p>
-          </div>
-          {status && (
-            <span className="inline-flex items-center gap-1.5 text-xs text-[#25613f]">
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              {status}
-            </span>
-          )}
-        </div>
-      </div>
-
+    <div className="space-y-8">
       <div>
         <h3 className="mb-3 text-[14px] font-medium text-ink">
           Escolha um modo
         </h3>
-        <div
-          className="grid grid-cols-1 sm:grid-cols-2 gap-3"
-          role="group"
-          aria-label="Modo de transcrição"
-        >
-          {MODE_CARDS.map((card) => {
-            const active = mode === card.id;
-            const Icon = card.Icon;
-            const routeKey =
-              card.id === "fast-accurate"
-                ? "fast_accurate"
-                : card.id === "precise"
-                  ? "precise"
-                  : card.id === "ultra-precise"
-                    ? "ultra_precise"
-                    : null;
-            return (
-              <div
-                key={card.id}
-                className={
-                  "overflow-hidden rounded-[10px] border transition-colors duration-150 " +
-                  (active
-                    ? "border-[#5c5d57] bg-[#f0f0eb]"
-                    : "border-line bg-white hover:border-line-strong")
-                }
-              >
+        <div className="pipeline-workbench">
+          <div className="pipeline-mode-list" role="group" aria-label="Modo de transcrição">
+            {MODE_CARDS.map((card) => {
+              const active = mode === card.id;
+              const Icon = card.Icon;
+              return (
                 <button
+                  key={card.id}
                   type="button"
                   aria-pressed={active}
                   onClick={() => selectMode(card.id)}
-                  className="w-full p-4 text-left"
+                  className={
+                    "w-full rounded-[10px] border px-3 py-3 text-left transition-colors duration-150 " +
+                    (active
+                      ? "border-[#5c5d57] bg-[#f0f0eb]"
+                      : "border-line bg-white hover:border-line-strong hover:bg-[#fafaf7]")
+                  }
                 >
-                  <div className="flex items-start justify-between gap-3">
-                  <div
-                    className={
-                      "flex h-10 w-10 items-center justify-center rounded-xl " +
-                      (active
-                        ? "bg-[#22221f] text-white"
-                        : "bg-[#eeeeea] text-[#65665f]")
-                    }
-                  >
-                    <Icon className="h-5 w-5" aria-hidden />
-                  </div>
-                  <div className="flex flex-wrap justify-end gap-1.5">
-                    {card.badge && (
-                      <span className="rounded-[6px] bg-[#f5ecd9] px-2 py-0.5 text-[10px] font-medium text-[#80551a]">
-                        {card.badge}
+                  <span className="flex items-start gap-3">
+                    <span
+                      className={
+                        "flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] " +
+                        (active
+                          ? "bg-[#22221f] text-white"
+                          : "bg-[#eeeeea] text-[#65665f]")
+                      }
+                    >
+                      <Icon className="h-[18px] w-[18px]" aria-hidden />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="text-[13px] font-medium text-ink">{card.title}</span>
+                        {active && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[#4f504b]" aria-hidden />}
                       </span>
-                    )}
-                    {active && (
-                      <span className="text-[10px] font-medium text-[#4f504b]">
-                        Selecionado
-                      </span>
-                    )}
-                  </div>
-                  </div>
-                  <div className="mt-3 text-[14px] font-medium text-ink">{card.title}</div>
-                  <div className="mt-1 text-[11px] font-medium text-[#555650]">{card.engine}</div>
-                  <p className="mt-1 text-[12px] leading-5 text-muted">{card.blurb}</p>
+                      <span className="mt-0.5 block text-[11px] font-medium leading-4 text-[#555650]">{card.engine}</span>
+                      <span className="mt-0.5 block text-[11px] leading-4 text-muted">{card.blurb}</span>
+                      {card.badge && (
+                        <span className="mt-1.5 inline-flex rounded-[6px] bg-[#f5ecd9] px-2 py-0.5 text-[10px] font-medium text-[#80551a]">
+                          {card.badge}
+                        </span>
+                      )}
+                    </span>
+                  </span>
                 </button>
-                {routeKey && active && (
-                  <div className="grid gap-3 border-t border-line px-4 py-4 sm:grid-cols-2">
+              );
+            })}
+          </div>
+
+          <section className="min-w-0 rounded-[12px] border border-line bg-[#f4f4ef]" aria-labelledby="active-pipeline-title">
+            <header className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] border border-line bg-white text-[#4f504b]">
+                  <SelectedIcon className="h-[18px] w-[18px]" aria-hidden />
+                </span>
+                <div className="min-w-0">
+                  <h3 id="active-pipeline-title" className="text-[17px] font-semibold tracking-[-0.015em] text-ink">
+                    Configurar {selected.title}
+                  </h3>
+                  <p className="mt-0.5 text-[12px] leading-5 text-muted">
+                    {selected.engine} · {selected.blurb}
+                  </p>
+                </div>
+              </div>
+              {status && (
+                <span className="inline-flex items-center gap-1.5 pt-1 text-xs text-[#25613f]" role="status">
+                  <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+                  {status}
+                </span>
+              )}
+            </header>
+
+            {selectedRouteKey ? (
+              <div className="grid gap-4 rounded-b-[11px] border-t border-line bg-white px-5 py-5 sm:grid-cols-2">
                     <label className="space-y-1.5 text-[12px] text-[#555650]">
                       <span>Modelo</span>
                       <select
-                        name={`${routeKey}-gemini-model`}
-                        value={geminiPipelines[routeKey].use_custom_model ? "custom" : geminiPipelines[routeKey].model}
+                        name={`${selectedRouteKey}-gemini-model`}
+                        value={geminiPipelines[selectedRouteKey].use_custom_model ? "custom" : geminiPipelines[selectedRouteKey].model}
                         onChange={(e) => {
                           if (e.target.value === "custom") {
                             updateGeminiRoute(
-                              routeKey,
+                              selectedRouteKey,
                               { use_custom_model: true },
-                              Boolean(geminiPipelines[routeKey].custom_model.trim()),
+                              Boolean(geminiPipelines[selectedRouteKey].custom_model.trim()),
                             );
                           } else {
-                            updateGeminiRoute(routeKey, {
+                            updateGeminiRoute(selectedRouteKey, {
                               model: e.target.value as GeminiModel,
                               use_custom_model: false,
                             });
@@ -645,47 +639,74 @@ function PipelinesTab() {
                         }}
                         className="h-10 w-full rounded-[9px] border border-line bg-white px-3 text-[12px] text-ink outline-none"
                       >
-                        <option value="flash-lite35">Gemini 3.5 Flash-Lite</option>
-                        <option value="flash36">Gemini 3.6 Flash</option>
+                        {geminiPipelines[selectedRouteKey].provider === "meta" ? (
+                          <option value="muse-voice-transcribe-1.0">Muse Voice Transcribe (1.0)</option>
+                        ) : (
+                          <>
+                            <option value="flash-lite35">Gemini 3.5 Flash-Lite</option>
+                            <option value="flash36">Gemini 3.6 Flash</option>
+                            {selectedRouteKey === "fast_accurate" && (
+                              <option value="transcribe35">Gemini 3.5 Transcribe (Dedicado STT)</option>
+                            )}
+                          </>
+                        )}
                         <option value="custom">ID customizado…</option>
                       </select>
                     </label>
                     <label className="space-y-1.5 text-[12px] text-[#555650]">
                       <span>Provedor</span>
                       <select
-                        name={`${routeKey}-gemini-provider`}
-                        value={geminiPipelines[routeKey].provider}
+                        name={`${selectedRouteKey}-gemini-provider`}
+                        value={geminiPipelines[selectedRouteKey].provider}
                         onChange={(e) => {
                           const provider = e.target.value as GeminiProvider;
-                          updateGeminiRoute(routeKey, { provider });
+                          if (provider === "meta") {
+                            updateGeminiRoute(selectedRouteKey, {
+                              provider,
+                              model: "muse-voice-transcribe-1.0",
+                              use_custom_model: false,
+                            });
+                          } else {
+                            updateGeminiRoute(selectedRouteKey, {
+                              provider,
+                              model: geminiPipelines[selectedRouteKey].model === "muse-voice-transcribe-1.0"
+                                ? "flash-lite35"
+                                : geminiPipelines[selectedRouteKey].model,
+                            });
+                          }
                         }}
                         className="h-10 w-full rounded-[9px] border border-line bg-white px-3 text-[12px] text-ink outline-none"
                       >
                         <option value="google-ai-studio">Google AI Studio</option>
                         <option value="open-router">OpenRouter</option>
+                        {selectedRouteKey === "fast_accurate" && (
+                          <option value="meta">Meta</option>
+                        )}
                       </select>
                     </label>
-                    {geminiPipelines[routeKey].use_custom_model && (
+                    {geminiPipelines[selectedRouteKey].use_custom_model && (
                       <label className="space-y-1.5 text-[12px] text-[#555650] sm:col-span-2">
                         <span>ID do modelo customizado</span>
                         <Input
-                          name={`${routeKey}-custom-model`}
-                          value={geminiPipelines[routeKey].custom_model}
+                          name={`${selectedRouteKey}-custom-model`}
+                          value={geminiPipelines[selectedRouteKey].custom_model}
                           placeholder={
-                            geminiPipelines[routeKey].provider === "open-router"
+                            geminiPipelines[selectedRouteKey].provider === "meta"
+                              ? "ex.: muse-voice-transcribe-1.0"
+                              : geminiPipelines[selectedRouteKey].provider === "open-router"
                               ? "ex.: google/chirp-3 ou google/gemini-3.7-flash"
                               : "ex.: gemini-3.7-flash"
                           }
                           onChange={(e) =>
                             updateGeminiRoute(
-                              routeKey,
+                              selectedRouteKey,
                               { custom_model: e.target.value },
                               false,
                             )
                           }
                           onBlur={(e) => {
                             if (e.currentTarget.value.trim()) {
-                              updateGeminiRoute(routeKey, {
+                              updateGeminiRoute(selectedRouteKey, {
                                 custom_model: e.currentTarget.value.trim(),
                                 use_custom_model: true,
                               });
@@ -694,7 +715,69 @@ function PipelinesTab() {
                         />
                       </label>
                     )}
-                    {geminiPipelines[routeKey].provider === "open-router" ? (
+                    {geminiPipelines[selectedRouteKey].provider === "meta" && (
+                      <div className="space-y-2 sm:col-span-2">
+                        <span className="text-[12px] font-medium text-[#555650]">
+                          Idiomas da transcrição (Language Biasing & Code-Switching)
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                          {[
+                            { id: "Portuguese", label: "Português" },
+                            { id: "English", label: "Inglês" },
+                            { id: "Spanish", label: "Espanhol" },
+                            { id: "French", label: "Francês" },
+                            { id: "Italian", label: "Italiano" },
+                            { id: "German", label: "Alemão" },
+                            { id: "Japanese", label: "Japonês" },
+                          ].map((lang) => {
+                            const currentLangs =
+                              geminiPipelines[selectedRouteKey].meta_languages &&
+                              geminiPipelines[selectedRouteKey].meta_languages!.length > 0
+                                ? geminiPipelines[selectedRouteKey].meta_languages!
+                                : ["Portuguese", "English"];
+                            const isSelected = currentLangs.includes(lang.id);
+                            return (
+                              <button
+                                key={lang.id}
+                                type="button"
+                                aria-pressed={isSelected}
+                                onClick={() => {
+                                  let nextLangs: string[];
+                                  if (isSelected) {
+                                    if (currentLangs.length === 1) return;
+                                    nextLangs = currentLangs.filter((l) => l !== lang.id);
+                                  } else {
+                                    nextLangs = [...currentLangs, lang.id];
+                                  }
+                                  updateGeminiRoute(selectedRouteKey, { meta_languages: nextLangs });
+                                }}
+                                className={
+                                  "inline-flex min-h-8 items-center gap-1.5 rounded-[7px] border px-2.5 py-1 text-[11px] font-medium transition-colors " +
+                                  (isSelected
+                                    ? "border-[#5c5d57] bg-[#e8e8e3] text-ink font-semibold"
+                                    : "border-line bg-white text-[#666] hover:bg-[#f4f4f0]")
+                                }
+                              >
+                                {isSelected ? (
+                                  <CheckCircle2 className="h-3 w-3" aria-hidden />
+                                ) : (
+                                  <Plus className="h-3 w-3" aria-hidden />
+                                )}
+                                {lang.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[11px] leading-4 text-muted">
+                          Focar em Português e Inglês evita que o modelo confunda fonemas e alucine palavras em Francês ou Espanhol, permitindo alternar livremente entre os dois idiomas na mesma fala.
+                        </p>
+                      </div>
+                    )}
+                    {geminiPipelines[selectedRouteKey].provider === "meta" ? (
+                      <p className="text-[11px] leading-5 text-muted sm:col-span-2">
+                        Meta Model API usa o modelo Muse Voice Transcribe 1.0 (ASR) com alta velocidade, reconhecimento nativo multilingue e vocabulário personalizado.
+                      </p>
+                    ) : geminiPipelines[selectedRouteKey].provider === "open-router" ? (
                       <p className="text-[11px] leading-5 text-muted sm:col-span-2">
                         A rota é automática: modelos dedicados como Chirp, Whisper e Transcribe usam Speech-to-Text; modelos com áudio usam Chat Completions.
                       </p>
@@ -703,11 +786,10 @@ function PipelinesTab() {
                         O Google AI Studio usa modelos multimodais com áudio via Gemini API. Modelos STT dedicados do Google Cloud exigem outra API e outra credencial.
                       </p>
                     )}
-                  </div>
-                )}
-                {card.id === "ultra-fast" && active && (
-                  <div className="border-t border-line px-4 py-4">
-                    <label className="space-y-1.5 text-[12px] text-[#555650]">
+              </div>
+            ) : (
+              <div className="rounded-b-[11px] border-t border-line bg-white px-5 py-5">
+                <label className="block max-w-2xl space-y-1.5 text-[12px] text-[#555650]">
                       <span>Modelo Whisper via OpenRouter</span>
                       <select
                         name="ultra-fast-whisper-model"
@@ -720,20 +802,18 @@ function PipelinesTab() {
                           setGeminiPipelines(next);
                           persistMode({ gemini_pipelines: next });
                         }}
-                        className="mt-1.5 h-10 w-full rounded-[9px] border border-line bg-white px-3 text-[12px] text-ink outline-none"
+                    className="h-10 w-full rounded-[9px] border border-line bg-white px-3 text-[12px] text-ink outline-none"
                       >
                         <option value="large-v3-turbo">openai/whisper-large-v3-turbo</option>
                         <option value="large-v3">openai/whisper-large-v3</option>
                       </select>
                     </label>
-                    <p className="mt-2 text-[11px] leading-5 text-muted">
-                      Usa somente o endpoint de transcrição do OpenRouter, com o provedor Groq fixo e sem fallback para outro provedor.
-                    </p>
-                  </div>
-                )}
+                <p className="mt-2 max-w-[72ch] text-[11px] leading-5 text-muted">
+                  Usa somente o endpoint de transcrição do OpenRouter, com o provedor Groq fixo e sem fallback para outro provedor.
+                </p>
               </div>
-            );
-          })}
+            )}
+          </section>
         </div>
       </div>
 
@@ -846,7 +926,7 @@ function PipelinesTab() {
 
 /* --------------------------- Provedores e APIs --------------------------- */
 
-type KeyId = "groq" | "google" | "deepgram" | "openrouter";
+type KeyId = "groq" | "google" | "deepgram" | "openrouter" | "meta";
 
 function ProvedoresTab() {
   const [keys, setKeys] = useState({
@@ -854,6 +934,7 @@ function ProvedoresTab() {
     google: [] as string[],
     deepgram: [] as string[],
     openrouter: [] as string[],
+    meta: [] as string[],
   });
   const [visible, setVisible] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState<KeyId | null>(null);
@@ -869,6 +950,7 @@ function ProvedoresTab() {
           google: k.google ?? [],
           deepgram: k.deepgram ?? [],
           openrouter: k.openrouter ?? [],
+          meta: k.meta ?? [],
         }),
       )
       .catch(console.error);
@@ -902,6 +984,13 @@ function ProvedoresTab() {
       help: "Executa o Whisper do Ultrarrápido e os modelos customizados selecionados nos pipelines.",
       requiredFor: "Ultrarrápido e rotas OpenRouter dos demais pipelines",
     },
+    {
+      id: "meta",
+      name: "Meta (Model API)",
+      placeholder: "Chave de API da Meta (dev.meta.ai)",
+      help: "Modelo Muse Voice Transcribe 1.0 (ASR) no pipeline Rápido e preciso.",
+      requiredFor: "Rápido e preciso (com provedor Meta)",
+    },
   ];
 
   const statusFor = (id: KeyId) => {
@@ -918,6 +1007,7 @@ function ProvedoresTab() {
         google: keys.google,
         deepgram: keys.deepgram,
         openrouter: keys.openrouter,
+        meta: keys.meta,
       });
       setSaved(id);
       window.setTimeout(() => setSaved((c) => (c === id ? null : c)), 2000);

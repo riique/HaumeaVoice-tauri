@@ -278,11 +278,12 @@ pub async fn save_api_keys(
     payload: ApiKeysPayload,
 ) -> Result<(), CommandError> {
     log::info!(
-        "save_api_keys: groq={} google={} deepgram={} openrouter={}",
+        "save_api_keys: groq={} google={} deepgram={} openrouter={} meta={}",
         payload.groq.len(),
         payload.google.len(),
         payload.deepgram.len(),
         payload.openrouter.len(),
+        payload.meta.len(),
     );
 
     // Treat provider credentials as opaque. Do not reject valid keys based on
@@ -292,6 +293,7 @@ pub async fn save_api_keys(
         ("google", &payload.google),
         ("deepgram", &payload.deepgram),
         ("openrouter", &payload.openrouter),
+        ("meta", &payload.meta),
     ] {
         for key in keys {
             validate_api_key(provider, key.trim()).map_err(CommandError::InvalidPayload)?;
@@ -305,6 +307,7 @@ pub async fn save_api_keys(
             google: payload.google,
             deepgram: payload.deepgram,
             openrouter: payload.openrouter,
+            meta: payload.meta,
         }
         .normalized();
 

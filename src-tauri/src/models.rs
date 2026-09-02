@@ -380,6 +380,8 @@ pub struct ApiKeys {
     pub deepgram: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_key_list")]
     pub openrouter: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_key_list")]
+    pub meta: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -419,6 +421,7 @@ impl ApiKeys {
             google: normalized_keys(self.google),
             deepgram: normalized_keys(self.deepgram),
             openrouter: normalized_keys(self.openrouter),
+            meta: normalized_keys(self.meta),
         }
     }
 }
@@ -453,6 +456,27 @@ mod api_keys_tests {
         assert_eq!(AppState::next_key(&keys, &cursor).as_deref(), Some("one"));
         assert_eq!(AppState::next_key(&keys, &cursor).as_deref(), Some("two"));
         assert_eq!(AppState::next_key(&keys, &cursor).as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn serializes_and_rotates_meta_keys() {
+        let json = r#"{"meta":["meta-key-1", "meta-key-2"]}"#;
+        let keys: ApiKeys = serde_json::from_str(json).unwrap();
+        assert_eq!(keys.meta, vec!["meta-key-1", "meta-key-2"]);
+
+        let cursor = AtomicUsize::new(0);
+        assert_eq!(
+            AppState::next_key(&keys.meta, &cursor).as_deref(),
+            Some("meta-key-1")
+        );
+        assert_eq!(
+            AppState::next_key(&keys.meta, &cursor).as_deref(),
+            Some("meta-key-2")
+        );
+        assert_eq!(
+            AppState::next_key(&keys.meta, &cursor).as_deref(),
+            Some("meta-key-1")
+        );
     }
 }
 
@@ -510,6 +534,8 @@ pub struct ApiKeysPayload {
     pub deepgram: Vec<String>,
     #[serde(default)]
     pub openrouter: Vec<String>,
+    #[serde(default)]
+    pub meta: Vec<String>,
 }
 
 /// Global application state guarded by locks for safe concurrent
@@ -610,6 +636,7 @@ pub struct AppState {
     google_key_cursor: AtomicUsize,
     deepgram_key_cursor: AtomicUsize,
     openrouter_key_cursor: AtomicUsize,
+    meta_key_cursor: AtomicUsize,
 }
 
 impl AppState {
@@ -661,6 +688,7 @@ impl AppState {
             google_key_cursor: AtomicUsize::new(0),
             deepgram_key_cursor: AtomicUsize::new(0),
             openrouter_key_cursor: AtomicUsize::new(0),
+            meta_key_cursor: AtomicUsize::new(0),
         }
     }
 
@@ -689,6 +717,10 @@ impl AppState {
             &self.api_keys.read().openrouter,
             &self.openrouter_key_cursor,
         )
+    }
+
+    pub fn next_meta_key(&self) -> Option<String> {
+        Self::next_key(&self.api_keys.read().meta, &self.meta_key_cursor)
     }
 
     /// Convenience helper used by the panic shortcut and the toggle

@@ -21,7 +21,7 @@ export default function App() {
       <Sidebar current={view} onSelect={setView} />
 
       <main id="main-content" tabIndex={-1} className="scrollbar-thin min-w-0 flex-1 overflow-y-auto">
-        <div className="page-shell">
+        <div className={view === "configuracoes" ? "page-shell max-w-[1540px]" : "page-shell"}>
           {view === "inicio" && <InicioView onNavigate={setView} />}
           {view === "transcricao" && <TranscricaoView />}
           {view === "historico" && <HistoricoView />}

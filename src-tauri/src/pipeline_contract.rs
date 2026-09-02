@@ -154,6 +154,10 @@ pub enum GeminiModel {
     #[default]
     FlashLite35,
     Flash36,
+    #[serde(alias = "gemini-3.5-transcribe", alias = "transcribe-35")]
+    Transcribe35,
+    #[serde(alias = "muse-voice-transcribe-1.0", alias = "muse-voice-transcribe")]
+    MuseVoiceTranscribe,
 }
 
 impl GeminiModel {
@@ -161,6 +165,8 @@ impl GeminiModel {
         match self {
             Self::FlashLite35 => "gemini-3.5-flash-lite",
             Self::Flash36 => "gemini-3.6-flash",
+            Self::Transcribe35 => "gemini-3.5-transcribe",
+            Self::MuseVoiceTranscribe => "gemini-3.5-flash-lite",
         }
     }
 
@@ -168,7 +174,13 @@ impl GeminiModel {
         match self {
             Self::FlashLite35 => "google/gemini-3.5-flash-lite",
             Self::Flash36 => "google/gemini-3.6-flash",
+            Self::Transcribe35 => "google/gemini-3.5-transcribe",
+            Self::MuseVoiceTranscribe => "meta/muse-voice-transcribe-1.0",
         }
+    }
+
+    pub fn meta_id(self) -> &'static str {
+        "muse-voice-transcribe-1.0"
     }
 }
 
@@ -178,6 +190,7 @@ pub enum GeminiProvider {
     #[default]
     GoogleAiStudio,
     OpenRouter,
+    Meta,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +206,12 @@ pub struct GeminiPipelineChoice {
     /// which is normalized by resolved_model_id).
     #[serde(default)]
     pub custom_model: String,
+    #[serde(default = "default_meta_languages")]
+    pub meta_languages: Vec<String>,
+}
+
+fn default_meta_languages() -> Vec<String> {
+    vec!["Portuguese".to_string(), "English".to_string()]
 }
 
 impl GeminiPipelineChoice {
@@ -202,6 +221,7 @@ impl GeminiPipelineChoice {
             match self.provider {
                 GeminiProvider::GoogleAiStudio => self.model.google_id().to_string(),
                 GeminiProvider::OpenRouter => self.model.openrouter_id().to_string(),
+                GeminiProvider::Meta => self.model.meta_id().to_string(),
             }
         } else {
             custom.strip_prefix("models/").unwrap_or(custom).to_string()
@@ -1441,6 +1461,57 @@ mod tests {
         assert_eq!(
             OpenRouterWhisperModel::LargeV3.openrouter_id(),
             "openai/whisper-large-v3"
+        );
+    }
+
+    #[test]
+    fn gemini_transcribe_preset_resolves_and_deserializes() {
+        assert_eq!(
+            GeminiModel::Transcribe35.google_id(),
+            "gemini-3.5-transcribe"
+        );
+        assert_eq!(
+            GeminiModel::Transcribe35.openrouter_id(),
+            "google/gemini-3.5-transcribe"
+        );
+
+        let parsed: GeminiModel = serde_json::from_str(r#""transcribe35""#).unwrap();
+        assert_eq!(parsed, GeminiModel::Transcribe35);
+
+        let parsed_alias: GeminiModel = serde_json::from_str(r#""gemini-3.5-transcribe""#).unwrap();
+        assert_eq!(parsed_alias, GeminiModel::Transcribe35);
+
+        let choice = GeminiPipelineChoice {
+            model: GeminiModel::Transcribe35,
+            provider: GeminiProvider::GoogleAiStudio,
+            use_custom_model: false,
+            ..Default::default()
+        };
+        assert_eq!(choice.resolved_model_id().unwrap(), "gemini-3.5-transcribe");
+    }
+
+    #[test]
+    fn meta_muse_voice_transcribe_resolves_and_deserializes() {
+        assert_eq!(
+            GeminiModel::MuseVoiceTranscribe.meta_id(),
+            "muse-voice-transcribe-1.0"
+        );
+
+        let parsed: GeminiModel = serde_json::from_str(r#""muse-voice-transcribe-1.0""#).unwrap();
+        assert_eq!(parsed, GeminiModel::MuseVoiceTranscribe);
+
+        let parsed_provider: GeminiProvider = serde_json::from_str(r#""meta""#).unwrap();
+        assert_eq!(parsed_provider, GeminiProvider::Meta);
+
+        let choice = GeminiPipelineChoice {
+            model: GeminiModel::MuseVoiceTranscribe,
+            provider: GeminiProvider::Meta,
+            use_custom_model: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            choice.resolved_model_id().unwrap(),
+            "muse-voice-transcribe-1.0"
         );
     }
 }

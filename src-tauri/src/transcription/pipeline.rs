@@ -80,6 +80,8 @@ fn legacy_success_run(
         run.formatting_level = session.formatting_level;
         run.destination = session.destination;
         run.delivery.destination = session.destination;
+        run.delivery.target_hwnd = session.delivery_target.hwnd;
+        run.delivery.target_process_id = session.delivery_target.process_id;
     }
 
     let (provider, model, transport) = provider_identity(engine);

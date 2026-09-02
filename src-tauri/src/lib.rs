@@ -10,6 +10,7 @@ pub mod history;
 pub mod insights;
 pub mod insights_intelligence;
 pub mod learning;
+pub mod meta_asr;
 pub mod mic_control;
 pub mod models;
 pub mod native_messaging;

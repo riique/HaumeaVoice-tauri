@@ -80,6 +80,8 @@ pub struct TranscribeRequest {
     pub glossary_block: String,
     /// Enables prompt-only `@file.ext` mentions in clear coding contexts.
     pub file_tagging_enabled: bool,
+    /// Native custom vocabulary terms for dedicated speech models (acoustic biasing).
+    pub custom_vocabulary: Vec<String>,
     /// Explicitly authorized, delimited context. Always treated as untrusted
     /// data by the prompt and omitted unless both privacy opt-ins are active.
     pub untrusted_context: Option<String>,

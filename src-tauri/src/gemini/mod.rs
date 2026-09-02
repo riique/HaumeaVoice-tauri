@@ -36,7 +36,7 @@ pub use types::{
 };
 
 pub(crate) use client::adaptive_generate_timeout;
-pub use client::mime_for_ext;
+pub use client::{is_transcribe_model, mime_for_ext};
 pub use files::{spawn_cleanup, upload_and_wait, RemoteFileGuard, UploadTiming};
 pub(crate) use prompts::{
     fast_accurate_transcription_prompt, precise_refinement_prompt, transcription_prompt,

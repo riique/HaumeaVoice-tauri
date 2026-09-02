@@ -25,8 +25,7 @@ use tauri::Emitter;
 
 pub const INSIGHTS_SCHEMA_VERSION: u32 = 7;
 pub const ANALYSIS_VERSION: u32 = 5;
-pub const VOICE_PROFILE_MODEL: &str = "google/gemini-3.7-flash";
-pub const VOICE_PROFILE_FALLBACK_MODEL: &str = "meta/muse-spark-1.2-contributor";
+pub const VOICE_PROFILE_MODEL: &str = "meta/muse-spark-1.2-contributor";
 const PROFILE_MIN_WORDS: u64 = BASIC_WORDS;
 const PROFILE_REFRESH_WORDS: u64 = 10_000;
 const MIN_TREND_SESSIONS: u64 = 3;
@@ -2840,43 +2839,35 @@ pub async fn generate_voice_profile(state: &AppState) -> Result<VoiceProfile, St
     let mut selected_model = None;
     let mut selected_result = None;
     let mut selected_profile = None;
-    for model in [VOICE_PROFILE_MODEL, VOICE_PROFILE_FALLBACK_MODEL] {
-        let started = std::time::Instant::now();
-        match crate::openrouter::generate_text(
-            system,
-            &user,
-            model,
-            &api_key,
-            Duration::from_secs(45),
-        )
+    let model = VOICE_PROFILE_MODEL;
+    let started = std::time::Instant::now();
+    match crate::openrouter::generate_text(system, &user, model, &api_key, Duration::from_secs(45))
         .await
-        {
-            Ok(result) => match validate_profile_result(
-                model,
-                &result,
-                &evidence,
-                started.elapsed().as_millis() as u64,
-                &api_key,
-            ) {
-                Ok((generated, attempt)) => {
-                    attempts.push(attempt);
-                    selected_model = Some(model);
-                    selected_result = Some(result);
-                    selected_profile = Some(generated);
-                    break;
-                }
-                Err(attempt) => attempts.push(*attempt),
-            },
-            Err(error) => attempts.push(profile_attempt(
-                model,
-                "failed",
-                started.elapsed().as_millis() as u64,
-                Some(sanitize_profile_debug(&error, &api_key, 800)),
-                Some("transport".into()),
-                None,
-                None,
-            )),
-        }
+    {
+        Ok(result) => match validate_profile_result(
+            model,
+            &result,
+            &evidence,
+            started.elapsed().as_millis() as u64,
+            &api_key,
+        ) {
+            Ok((generated, attempt)) => {
+                attempts.push(attempt);
+                selected_model = Some(model);
+                selected_result = Some(result);
+                selected_profile = Some(generated);
+            }
+            Err(attempt) => attempts.push(*attempt),
+        },
+        Err(error) => attempts.push(profile_attempt(
+            model,
+            "failed",
+            started.elapsed().as_millis() as u64,
+            Some(sanitize_profile_debug(&error, &api_key, 800)),
+            Some("transport".into()),
+            None,
+            None,
+        )),
     }
     let generated_at_ms = epoch_ms();
     let trace = VoiceProfileGenerationTrace {
@@ -2897,10 +2888,7 @@ pub async fn generate_voice_profile(state: &AppState) -> Result<VoiceProfile, St
         let mut store = read_store_unlocked();
         store.last_profile_generation = Some(trace);
         let _ = write_store_unlocked(&store);
-        return Err(
-            "Voice Profile: o modelo principal e o fallback falharam; consulte os detalhes técnicos."
-                .into(),
-        );
+        return Err("Voice Profile: o Muse Spark falhou; consulte os detalhes técnicos.".into());
     };
     let GeneratedVoiceProfile {
         archetype,
@@ -3613,18 +3601,26 @@ mod tests {
     }
 
     #[test]
-    fn invalid_primary_json_is_failed_and_valid_fallback_is_accepted() {
+    fn muse_spark_is_the_voice_profile_model() {
+        assert_eq!(VOICE_PROFILE_MODEL, "meta/muse-spark-1.2-contributor");
+    }
+
+    #[test]
+    fn invalid_json_is_failed_and_valid_muse_spark_json_is_accepted() {
         let evidence = profile_evidence();
-        let primary = validate_profile_result(
+        let invalid_attempt = validate_profile_result(
             VOICE_PROFILE_MODEL,
             &profile_result("not json"),
             &evidence,
             12,
             "test-secret",
         )
-        .expect_err("invalid Gemini JSON must fail the attempt");
-        assert_eq!(primary.status, "failed");
-        assert_eq!(primary.failure_type.as_deref(), Some("schema_validation"));
+        .expect_err("invalid Muse Spark JSON must fail the attempt");
+        assert_eq!(invalid_attempt.status, "failed");
+        assert_eq!(
+            invalid_attempt.failure_type.as_deref(),
+            Some("schema_validation")
+        );
 
         let valid = r#"{
           "archetype":{"title":"Iterative Builder","subtitle":"Refina software em voz alta","description":"O ditado é usado para construir e refinar instruções de software.","confidence":0.75,"evidence_keys":["topic:software:0.60","pattern:iterative_refinement:0.40"]},
@@ -3635,16 +3631,16 @@ mod tests {
           "interesting_observations":[{"title":"Software em construção","description":"O tema técnico aparece junto de refinamento iterativo.","type":"usage","confidence":0.70,"evidence_keys":["topic:software:0.60","pattern:iterative_refinement:0.40"]}],
           "suggested_experiments":[{"title":"Feche com critérios","description":"Experimente terminar ditados técnicos com uma frase curta de validação para complementar o refinamento em etapas.","confidence":0.68,"evidence_keys":["pattern:iterative_refinement:0.40"]}]
         }"#;
-        let (_, fallback) = validate_profile_result(
-            VOICE_PROFILE_FALLBACK_MODEL,
+        let (_, attempt) = validate_profile_result(
+            VOICE_PROFILE_MODEL,
             &profile_result(valid),
             &evidence,
             14,
             "test-secret",
         )
-        .expect("valid Muse Spark fallback must be accepted");
-        assert_eq!(fallback.status, "success");
-        assert_eq!(fallback.model, VOICE_PROFILE_FALLBACK_MODEL);
+        .expect("valid Muse Spark JSON must be accepted");
+        assert_eq!(attempt.status, "success");
+        assert_eq!(attempt.model, VOICE_PROFILE_MODEL);
     }
 
     #[test]

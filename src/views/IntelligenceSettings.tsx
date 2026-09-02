@@ -195,10 +195,12 @@ export function IntelligenceSettings() {
       </section>
 
       <div className="sticky bottom-4 flex justify-end" aria-live="polite">
-        <div className={`inline-flex min-h-9 items-center gap-2 rounded-[9px] border px-3 text-[12px] shadow-sm ${saveStatus === "error" ? "border-red-200 bg-red-50 text-red-700" : saveStatus === "invalid" ? "border-amber-200 bg-amber-50 text-amber-800" : "border-line bg-white text-muted"}`} title={saveError ?? undefined}>
-          {saveStatus === "pending" || saveStatus === "saving" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : saveStatus === "error" || saveStatus === "invalid" ? <AlertCircle className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
-          {saveStatus === "pending" ? "Aguardando alterações…" : saveStatus === "saving" ? "Salvando automaticamente…" : saveStatus === "invalid" ? "Complete os campos para salvar" : saveStatus === "error" ? "Falha no salvamento automático" : saveStatus === "saved" ? "Alterações salvas" : "Salvamento automático ativo"}
-        </div>
+        {saveStatus !== "idle" && (
+          <div className={`inline-flex min-h-9 items-center gap-2 rounded-[9px] border px-3 text-[12px] shadow-sm ${saveStatus === "error" ? "border-red-200 bg-red-50 text-red-700" : saveStatus === "invalid" ? "border-amber-200 bg-amber-50 text-amber-800" : "border-line bg-white text-muted"}`} title={saveError ?? undefined}>
+            {saveStatus === "pending" || saveStatus === "saving" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : saveStatus === "error" || saveStatus === "invalid" ? <AlertCircle className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
+            {saveStatus === "pending" ? "Aguardando alterações…" : saveStatus === "saving" ? "Salvando automaticamente…" : saveStatus === "invalid" ? "Complete os campos para salvar" : saveStatus === "error" ? "Falha no salvamento automático" : "Alterações salvas"}
+          </div>
+        )}
       </div>
     </div>
   );

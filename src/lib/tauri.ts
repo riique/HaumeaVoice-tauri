@@ -45,14 +45,15 @@ export interface EngineConfigSnapshot {
   deepgram_mode: DeepgramMode;
 }
 
-export type GeminiModel = "flash-lite35" | "flash36";
-export type GeminiProvider = "google-ai-studio" | "open-router";
+export type GeminiModel = "flash-lite35" | "flash36" | "transcribe35" | "muse-voice-transcribe-1.0";
+export type GeminiProvider = "google-ai-studio" | "open-router" | "meta";
 export type OpenRouterWhisperModel = "large-v3-turbo" | "large-v3";
 export interface GeminiPipelineChoice {
   model: GeminiModel;
   provider: GeminiProvider;
   use_custom_model: boolean;
   custom_model: string;
+  meta_languages?: string[];
 }
 export interface GeminiPipelineConfig {
   ultra_fast_whisper: OpenRouterWhisperModel;
@@ -94,6 +95,7 @@ export interface ApiKeysPayload {
   google: string[];
   deepgram: string[];
   openrouter: string[];
+  meta: string[];
 }
 
 export async function updateEngineConfig(

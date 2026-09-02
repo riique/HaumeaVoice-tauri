@@ -26,6 +26,7 @@ fn provider_history_label(provider: GeminiProvider) -> &'static str {
     match provider {
         GeminiProvider::GoogleAiStudio => "GoogleAIStudio",
         GeminiProvider::OpenRouter => "OpenRouter",
+        GeminiProvider::Meta => "Meta",
     }
 }
 
@@ -517,6 +518,7 @@ pub async fn run_fast_accurate(
     let api_key = match choice.provider {
         GeminiProvider::GoogleAiStudio => state.next_google_key(),
         GeminiProvider::OpenRouter => state.next_openrouter_key(),
+        GeminiProvider::Meta => state.next_meta_key(),
     };
     let context_block = authorized_context_block(state);
     let glossary_block = {
@@ -543,6 +545,7 @@ pub async fn run_fast_accurate(
     let gemini_provider = match choice.provider {
         GeminiProvider::GoogleAiStudio => "google-ai-studio",
         GeminiProvider::OpenRouter => "openrouter",
+        GeminiProvider::Meta => "meta",
     };
 
     let (final_text, model) = match api_key {
@@ -633,26 +636,82 @@ pub async fn run_fast_accurate(
         Some(key) => {
             stages.push(format!(
                 "model_api:{}",
-                if choice.provider == GeminiProvider::OpenRouter {
+                if choice.provider == GeminiProvider::Meta {
+                    "meta-asr"
+                } else if choice.provider == GeminiProvider::OpenRouter {
                     "automatic"
+                } else if crate::gemini::is_transcribe_model(&model_id) {
+                    "google-interactions"
                 } else {
                     "google-generate-content"
                 }
             ));
-            stages.push("gemini_transcribe".into());
+            if choice.provider == GeminiProvider::Meta {
+                stages.push("meta_transcribe".into());
+            } else {
+                stages.push("gemini_transcribe".into());
+            }
+            let custom_vocabulary: Vec<String> = {
+                let vocab = state.vocabulary.read();
+                vocab
+                    .iter()
+                    .filter(|t| t.enabled)
+                    .flat_map(|t| std::iter::once(t.canonical.clone()).chain(t.aliases.clone()))
+                    .take(1000)
+                    .collect()
+            };
             let req = TranscribeRequest {
                 audio_bytes: audio.clone(),
                 ext: ext.to_string(),
-                api_key: key,
+                api_key: key.clone(),
                 model: model_id.clone(),
                 display_name: file_name.to_string(),
                 duration_ms,
                 glossary_block,
                 file_tagging_enabled,
+                custom_vocabulary: custom_vocabulary.clone(),
                 untrusted_context: context_block.clone(),
             };
             let provider_started = std::time::Instant::now();
-            let generated = if choice.provider == GeminiProvider::OpenRouter {
+            let generated = if choice.provider == GeminiProvider::Meta {
+                let language_bias = if choice.meta_languages.is_empty() {
+                    Some(vec!["Portuguese".to_string(), "English".to_string()])
+                } else {
+                    Some(choice.meta_languages.clone())
+                };
+                let meta_res = crate::meta_asr::transcribe(
+                    &audio,
+                    &key,
+                    Some(&model_id),
+                    (!custom_vocabulary.is_empty()).then_some(custom_vocabulary),
+                    language_bias,
+                )
+                .await;
+                match meta_res {
+                    Ok(outcome) => Ok(GeminiGenerateResult {
+                        operation: GeminiOperation::Transcribe,
+                        text: outcome.text,
+                        model: outcome.model,
+                        prompt_version: "meta-asr-1.0".to_string(),
+                        latency_ms: outcome.latency_ms,
+                        remote_file_name: None,
+                        transport: None,
+                        timing: GeminiStageTiming {
+                            base64_ms: None,
+                            files_upload_ms: None,
+                            files_poll_ms: None,
+                            files_poll_count: None,
+                            generate_ms: Some(outcome.latency_ms),
+                            delete_ms: None,
+                        },
+                        usage: UsageRecord {
+                            bytes_sent: Some(outcome.bytes_sent as u64),
+                            ..Default::default()
+                        },
+                    }),
+                    Err(e) => Err(e),
+                }
+            } else if choice.provider == GeminiProvider::OpenRouter {
                 let prompt = with_authorized_context(
                     state,
                     fast_accurate_transcription_prompt(
@@ -903,6 +962,7 @@ pub async fn run_precise(
     let api_key = match choice.provider {
         GeminiProvider::GoogleAiStudio => state.next_google_key(),
         GeminiProvider::OpenRouter => state.next_openrouter_key(),
+        GeminiProvider::Meta => state.next_meta_key(),
     };
     let Some(api_key) = api_key else {
         return Err(
@@ -1412,6 +1472,7 @@ pub async fn run_ultra_precise(
     let api_key = match choice.provider {
         GeminiProvider::GoogleAiStudio => state.next_google_key(),
         GeminiProvider::OpenRouter => state.next_openrouter_key(),
+        GeminiProvider::Meta => state.next_meta_key(),
     };
     let context_block = authorized_context_block(state);
     let glossary_block = {
@@ -2086,6 +2147,8 @@ pub(crate) fn finalize_product_result(
             .unwrap_or(result.content_hint);
         result.destination = session.destination;
         result.delivery.destination = session.destination;
+        result.delivery.target_hwnd = session.delivery_target.hwnd;
+        result.delivery.target_process_id = session.delivery_target.process_id;
     }
     synthesize_provider_attempts(state, &mut result);
     if !result.attempts.is_empty()
@@ -2275,6 +2338,7 @@ fn synthesize_provider_attempts(state: &AppState, result: &mut PipelineRun) {
     let provider = match choice.provider {
         GeminiProvider::GoogleAiStudio => "google-ai-studio",
         GeminiProvider::OpenRouter => "openrouter",
+        GeminiProvider::Meta => "meta",
     };
     let model = choice
         .resolved_model_id()
