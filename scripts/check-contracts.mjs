@@ -8,7 +8,7 @@ const [pkg, lock, config, cargo, cargoLock, lib, build, main, gadget] = await Pr
 ]);
 assert.equal(pkg.version, lock.version); assert.equal(pkg.version, lock.packages[""].version); assert.equal(pkg.version, config.version);
 assert.equal(pkg.version, cargo.match(/^version = "([^"]+)"/m)[1]);
-assert.equal(pkg.version, cargoLock.match(/name = "haumea-voice"\r?\nversion = "([^"]+)"/)[1]);
+assert.equal(pkg.version, cargoLock.match(/name = "sonora"\r?\nversion = "([^"]+)"/)[1]);
 const handlers = [...lib.split("tauri::generate_handler![")[1].split("]")[0].matchAll(/commands::(\w+)/g)].map((match) => match[1]);
 const declared = [...build.matchAll(/^\s+"(\w+)",?$/gm)].map((match) => match[1]);
 assert.deepEqual([...handlers].sort(), [...declared].sort(), "Custom commands must be declared in AppManifest");

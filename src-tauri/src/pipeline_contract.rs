@@ -1058,14 +1058,14 @@ mod tests {
             "sanitizer_enabled": true,
             "reasoning_enabled": false,
             "reasoning_effort": "medium",
-            "custom_words": ["Haumea", "Tokio"]
+            "custom_words": ["Sonora", "Tokio"]
         }"#;
         let snap: LegacySettingsSnapshot = serde_json::from_str(old).unwrap();
         assert_eq!(snap.engine, Some(TranscriptionEngine::GroqWhisper));
         assert_eq!(snap.sanitizer, Some(SanitizerModel::Llama70b));
         assert!(snap.dual_engine);
         assert_eq!(snap.deepgram_mode, DeepgramMode::StreamingFinal);
-        assert_eq!(snap.custom_words, vec!["Haumea", "Tokio"]);
+        assert_eq!(snap.custom_words, vec!["Sonora", "Tokio"]);
         assert!(snap.transcription_mode.is_none());
         assert_eq!(snap.effective_mode(), TranscriptionMode::Precise);
         // Round-trip keeps vocabulary and dual.
@@ -1119,7 +1119,7 @@ mod tests {
                 reasoning_enabled: true,
                 reasoning_effort: ("high").into(),
                 system_prompt: ("system").into(),
-                custom_words: vec!["Haumea".into()],
+                custom_words: vec!["Sonora".into()],
                 source: ("mic").into(),
                 duration_ms: 1500,
                 copy_to_clipboard: true,
@@ -1130,7 +1130,7 @@ mod tests {
         assert_eq!(req.deepgram_mode, DeepgramMode::StreamingFinal);
         assert_eq!(req.sanitizer, SanitizerModel::GptOss120b);
         assert_eq!(req.reasoning_effort, "high");
-        assert_eq!(req.custom_words, vec!["Haumea"]);
+        assert_eq!(req.custom_words, vec!["Sonora"]);
         assert_eq!(req.mode, TranscriptionMode::Precise);
         // audio_bytes skipped in serde but present in memory
         assert_eq!(req.audio_bytes.len(), 3);
@@ -1162,9 +1162,9 @@ mod tests {
 
     #[test]
     fn strip_sanitizer_header_and_glossary() {
-        let raw = "# Texto final\nHere is the cleaned text:\nOlá, Haumea.\n\nGlossário:\n- foo";
+        let raw = "# Texto final\nHere is the cleaned text:\nOlá, Sonora.\n\nGlossário:\n- foo";
         let cleaned = strip_sanitizer_artifacts(raw);
-        assert!(cleaned.contains("Olá, Haumea"));
+        assert!(cleaned.contains("Olá, Sonora"));
         assert!(!cleaned.to_ascii_lowercase().contains("gloss"));
         assert!(!cleaned.contains("Here is"));
     }

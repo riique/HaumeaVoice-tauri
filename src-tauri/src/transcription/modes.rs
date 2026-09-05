@@ -996,7 +996,7 @@ pub async fn run_precise(
     let vocab_snapshot = state.vocabulary.read().clone();
     let file_tagging_enabled = *state.file_tagging_enabled.read();
     let display = if file_name.trim().is_empty() {
-        format!("haumea-precise.{}", ext)
+        format!("sonora-precise.{}", ext)
     } else {
         file_name.to_string()
     };
@@ -1515,7 +1515,7 @@ pub async fn run_ultra_precise(
     let vocab_snapshot = state.vocabulary.read().clone();
     let file_tagging_enabled = *state.file_tagging_enabled.read();
     let display = if file_name.trim().is_empty() {
-        format!("haumea-ultraprecise.{}", ext)
+        format!("sonora-ultraprecise.{}", ext)
     } else {
         file_name.to_string()
     };

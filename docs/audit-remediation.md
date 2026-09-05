@@ -1,4 +1,4 @@
-# Auditoria implementada — Haumea Voice 1.0.34
+# Auditoria implementada — Sonora 1.0.34
 
 Base: `e99b7a33513371a4b961ef7b4662989c4fa1cc07`, versão 1.0.33. Implementação local em `codex/audit-remediation-1.0.34`, solicitada em 2026-09-04. Sem commit, push ou publicação remota.
 
@@ -41,7 +41,7 @@ O benchmark não chama modelos nem demonstra ordenação de qualidade entre os m
 - npm audit: zero vulnerabilidades. cargo audit: zero entradas de vulnerabilidade e 17 avisos informativos. Doze pacotes GTK/glib/proc-macro-error não alcançam Windows; cinco UNIC sem manutenção permanecem via urlpattern/tauri-utils. O aviso unsound de glib está entre os excluídos do target Windows. Nenhum aviso foi silenciado.
 - NSIS: exit code 0. Executável/registro: 1.0.34. Processo reaberto, setup completo e sem linhas ERROR no smoke. Segunda abertura: exit code 0, uma instância.
 - AppData: 105 arquivos anteriores, 108 após upgrade; nenhum ausente, 101 idênticos por SHA-256. Quatro alterações esperadas: credenciais DPAPI, endpoint efêmero, cache Insights e log. Credenciais, Voice Profile e consentimento comparados e preservados.
-- Backups DPAPI completos e instalador anterior em `F:\Dev-Backup\HaumeaVoice\2026-09-04-1.0.34`. Rollback documentado; nenhum downgrade executado.
+- Backups DPAPI completos e instalador anterior em `F:\Dev-Backup\Sonora\2026-09-04-1.0.34`. Rollback documentado; nenhum downgrade executado.
 
 Evidências: [pasta de qualificação](C:/Users/Henrique/.codex/visualizations/2026/09/04/01a06ebd-005b-75e2-a480-ea7b3d495324/implementation-1.0.34). Procedimentos: [dados e distribuição](recovery-and-release.md).
 

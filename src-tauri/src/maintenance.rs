@@ -504,7 +504,7 @@ pub fn archive_audio(id: &str, destination: &Path) -> Result<String, String> {
         .canonicalize()
         .map_err(|e| e.to_string())?
         .join(format!(
-            "haumea-archive-{}.{}",
+            "sonora-archive-{}.{}",
             crate::pipeline_run::epoch_ms(),
             extension
         ));
@@ -526,7 +526,7 @@ mod tests {
     use super::*;
     #[test]
     fn portable_backup_keeps_audio_association_and_rejects_bad_media() {
-        let root = std::env::temp_dir().join(format!("haumea-backup-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("sonora-backup-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let audio = root.join("source.wav");
         fs::write(&audio, crate::audio::create_wav_buffer(&[1, 2, -3])).unwrap();

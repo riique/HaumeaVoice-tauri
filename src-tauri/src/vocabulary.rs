@@ -194,40 +194,34 @@ pub fn canonical_list(terms: &[VocabularyTerm]) -> Vec<String> {
         .collect()
 }
 
-/// Built-in product term: protects "Haumea Voice" against common ASR confusions.
-pub fn default_haumea_voice_term() -> VocabularyTerm {
+/// Product hint for recognizers. "sonora" is also an ordinary Portuguese
+/// adjective, so do not force replacements in phrases such as "trilha sonora".
+pub fn default_sonora_term() -> VocabularyTerm {
     VocabularyTerm {
-        canonical: "Haumea Voice".into(),
-        aliases: vec![
-            "Homey Voice".into(),
-            "HowMeia Voice".into(),
-            "Homeia Voice".into(),
-            "Raumea Voice".into(),
-        ],
+        canonical: "Sonora".into(),
+        aliases: vec![],
         category: VocabularyCategory::Application,
-        strict: true,
+        strict: false,
         enabled: true,
     }
 }
 
-/// Ensures the default Haumea Voice strict term exists (merge, no overwrite of user edits).
+/// Add the product hint without overwriting user vocabulary or disabled terms.
 pub fn ensure_default_product_terms(mut terms: Vec<VocabularyTerm>) -> Vec<VocabularyTerm> {
-    let needle = "haumea voice";
+    let needle = "sonora";
     let has = terms
         .iter()
         .any(|t| t.canonical.eq_ignore_ascii_case(needle));
     if !has {
-        // Also accept legacy single-word "Haumea" without blocking the full phrase term.
-        terms.insert(0, default_haumea_voice_term());
+        // Keep legacy product terms as the user saved them.
+        terms.insert(0, default_sonora_term());
     } else {
-        // Merge missing aliases into existing term if user already has "Haumea Voice".
+        // Merge missing aliases into existing term if user already has "Sonora".
         if let Some(t) = terms
             .iter_mut()
             .find(|t| t.canonical.eq_ignore_ascii_case(needle))
         {
-            t.strict = true;
-            t.enabled = true;
-            let defaults = default_haumea_voice_term();
+            let defaults = default_sonora_term();
             for a in defaults.aliases {
                 if !t.aliases.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
                     t.aliases.push(a);
@@ -386,14 +380,14 @@ mod tests {
     #[test]
     fn migrate_legacy_strings_no_loss() {
         let words = vec![
-            "Haumea".into(),
+            "Sonora".into(),
             "  ".into(),
             "Tokio".into(),
-            "haumea".into(), // dup case
+            "sonora".into(), // dup case
         ];
         let terms = migrate_from_strings(&words);
         assert_eq!(terms.len(), 2);
-        assert_eq!(terms[0].canonical, "Haumea");
+        assert_eq!(terms[0].canonical, "Sonora");
         assert_eq!(terms[1].canonical, "Tokio");
         assert!(terms.iter().all(|t| t.enabled && !t.strict));
     }
@@ -456,15 +450,18 @@ mod tests {
     }
 
     #[test]
-    fn haumea_voice_aliases_and_code_preserved() {
-        let terms = vec![default_haumea_voice_term()];
-        let (a, _) = apply_strict_literals("Use o Homey Voice agora", &terms);
-        assert!(a.contains("Haumea Voice"));
-        let (b, _) = apply_strict_literals("Haumea Voice", &terms);
-        assert_eq!(b, "Haumea Voice");
+    fn sonora_aliases_and_code_preserved() {
+        let terms = vec![default_sonora_term()];
+        let (a, _) = apply_strict_literals("Ouça a trilha sonora agora", &terms);
+        assert_eq!(a, "Ouça a trilha sonora agora");
+        let (b, _) = apply_strict_literals("Sonora", &terms);
+        assert_eq!(b, "Sonora");
         let (c, _) = apply_strict_literals("Homeia Voice e HowMeia Voice", &terms);
-        assert!(!c.to_lowercase().contains("homeia"));
-        assert!(!c.to_lowercase().contains("howmeia"));
+        assert!(
+            c.to_lowercase().contains("homeia"),
+            "Legacy names must not be rewritten as Sonora"
+        );
+        assert!(c.to_lowercase().contains("howmeia"));
         // Must not rewrite code-like tokens without alias match.
         let code = "provider-routing.json provider.only allow_fallbacks sanitizeTranscript()";
         let (d, _) = apply_strict_literals(code, &terms);
@@ -474,7 +471,7 @@ mod tests {
     #[test]
     fn non_strict_does_not_auto_replace() {
         let terms = vec![VocabularyTerm {
-            canonical: "Haumea".into(),
+            canonical: "Sonora".into(),
             aliases: vec!["HowMeia".into()],
             category: VocabularyCategory::Application,
             strict: false,

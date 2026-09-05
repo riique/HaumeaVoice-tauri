@@ -569,6 +569,7 @@ export type GadgetVisualState =
   | "processing"
   | "processing_long"
   | "success"
+  | "no_speech"
   | "error";
 
 export interface GadgetPresentation {

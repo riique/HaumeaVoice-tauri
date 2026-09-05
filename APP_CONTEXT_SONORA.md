@@ -1,6 +1,8 @@
-# APP_CONTEXT_HAUMEA_VOICE.md
+# APP_CONTEXT_SONORA.md
 
-Relatório técnico do estado atual do **Haumea Voice** (v1.0.3), gerado por inspeção estática do repositório.  
+> Referência histórica da arquitetura 1.x, renomeada com o produto. Para o estado atual do Sonora v2.0, use [README](README.md), [mudanças da versão 2.0](docs/SONORA_2.0.md) e o código. Descrições antigas de armazenamento, chaves em texto e captura anteriores à auditoria foram superadas pela versão 1.0.34.
+
+Relatório técnico do estado atual do **Sonora** (v1.0.3), gerado por inspeção estática do repositório.
 Nenhuma alteração de código, instalação de dependências ou chamada de API foi feita.
 
 **Data da análise:** 2026-07-18  
@@ -25,7 +27,7 @@ Aplicativo desktop de **digitação por voz**: o usuário grava áudio (atalho g
 |--------|------------|
 | Shell desktop | **Tauri 2** |
 | Frontend | **React 18** + **TypeScript** + **Vite 5** + **Tailwind CSS 3** |
-| Backend nativo | **Rust 2021** (crate `haumea_voice_lib`) |
+| Backend nativo | **Rust 2021** (crate `sonora_lib`) |
 | Áudio | **cpal** 0.15 |
 | HTTP | **reqwest** 0.12 (multipart + JSON) |
 | WebSocket | **tokio-tungstenite** 0.26 (Deepgram live) |
@@ -53,9 +55,9 @@ Não há servidor próprio. O “backend” é o processo Rust Tauri que:
 
 ## Empacotamento
 
-- `tauri.conf.json` → bundle `targets: "all"`, productName `"Haumea Voice"`
+- `tauri.conf.json` → bundle `targets: "all"`, productName `"Sonora"`
 - Build: `npm run tauri build` (ou `npm run build` + cargo)
-- Artefato documentado: `src-tauri/target/release/haumea-voice.exe` (`BUILD.md`)
+- Artefato documentado: `src-tauri/target/release/sonora.exe` (`BUILD.md`)
 
 ## Como iniciar
 
@@ -66,7 +68,7 @@ npm run dev            # só Vite (UI sem backend completo)
 cargo tauri dev        # via CLI (beforeDevCommand = npm run dev)
 ```
 
-Autostart Windows: registry `HKCU\...\Run\HaumeaVoice` com `"exe" --autostart` (janela main oculta no autostart).
+Autostart Windows: registry `HKCU\...\Run\Sonora` com `"exe" --autostart` (janela main oculta no autostart).
 
 ## Como compilar
 
@@ -78,8 +80,8 @@ npm run tauri build    # frontend + Rust release
 ## Estrutura geral do repositório
 
 ```text
-HaumeaVoice-tauri/
-├── package.json              # haumea-voice 1.0.3, scripts dev/build/tauri
+Sonora/
+├── package.json              # sonora 1.0.3, scripts dev/build/tauri
 ├── vite.config.ts
 ├── tailwind.config.js
 ├── index.html
@@ -96,7 +98,7 @@ HaumeaVoice-tauri/
     ├── tauri.conf.json
     ├── capabilities/default.json
     └── src/
-        ├── main.rs           # entry → haumea_voice_lib::run()
+        ├── main.rs           # entry → sonora_lib::run()
         ├── lib.rs            # setup tray, gadget, logging, IPC handler
         ├── commands.rs       # todos os #[tauri::command]
         ├── models.rs         # estado, enums, HistoryEntry
@@ -441,7 +443,7 @@ Parâmetros batch (query):
   punctuate=true
   numerals=true
   paragraphs=false
-  keyterm=Haumea
+  keyterm=Sonora
 Parâmetros streaming (query):
   encoding=linear16, sample_rate=<nativo ou 16000>, channels=1
   interim_results=false, endpointing=300
@@ -461,7 +463,7 @@ Status atual: IMPLEMENTADO
 Exemplo batch sanitizado:
 
 ```http
-POST https://api.deepgram.com/v1/listen?model=nova-3&language=pt-BR&punctuate=true&numerals=true&paragraphs=false&keyterm=Haumea
+POST https://api.deepgram.com/v1/listen?model=nova-3&language=pt-BR&punctuate=true&numerals=true&paragraphs=false&keyterm=Sonora
 Authorization: Token ********-****-****-****-************
 Content-Type: audio/wav
 
@@ -521,7 +523,7 @@ Default: `Llama70b`.
 ## Prompt
 
 - Base: `settings::DEFAULT_SYSTEM_PROMPT` (constante longa em `settings.rs`).
-- Persistido em `settings.json` como `system_prompt`; auto-upgrade se faltar marker `"HowMeia" → "Haumea"`.
+- Persistido em `settings.json` como `system_prompt`; auto-upgrade se faltar marker `"HowMeia" → "Sonora"`.
 - Comandos `get_system_prompt` / `save_system_prompt` existem no backend.
 - **UI para editar o system prompt: NÃO ENCONTRADA** (só API IPC).
 
@@ -571,10 +573,10 @@ Onde salva: settings.json → custom_words: string[]
 Formato: lista simples de strings
 Aliases: NÃO
 Categorias: NÃO
-Termos rígidos: glossário embutido no DEFAULT_SYSTEM_PROMPT (ChatGPT, Claude, Haumea, etc.)
+Termos rígidos: glossário embutido no DEFAULT_SYSTEM_PROMPT (ChatGPT, Claude, Sonora, etc.)
                + custom_words no final do system prompt
 Uso Whisper: NÃO (não há prompt/hotwords Whisper)
-Uso Deepgram: apenas keyterm fixo "Haumea" (não usa custom_words)
+Uso Deepgram: apenas keyterm fixo "Sonora" (não usa custom_words)
 Uso Gemini avaliação: NÃO
 Uso sanitizer: SIM — substituições decididas pelo modelo (conservador)
 Substituições automáticas determinísticas: NÃO (só LLM)
@@ -584,7 +586,7 @@ Exemplo real de estrutura (sem dados sensíveis):
 
 ```json
 {
-  "custom_words": ["Haumea", "Kubernetes", "PostgreSQL"]
+  "custom_words": ["Sonora", "Kubernetes", "PostgreSQL"]
 }
 ```
 
@@ -982,7 +984,7 @@ Ultrapreciso:     audio → Whisper → Sanitizer → Gemini → out
 
 ## Estado atual
 
-Haumea Voice 1.0.3 é um app **Tauri 2 + React + Rust** para Windows que grava o microfone (ou aceita arquivo), envia áudio a **Groq Whisper** e/ou **Deepgram Nova-3**, opcionalmente **sanitiza** com LLMs Groq, cola o texto no app focado e guarda histórico/áudio localmente. Há overlay gadget sofisticado, atalhos globais, vocabulário no sanitizer e avaliação de pronúncia via **Gemini 3.5 Flash**. Não há OpenRouter. Gemini **não** transcreve no pipeline atual. Testes automatizados do app são quase só placement do gadget.
+Sonora 1.0.3 é um app **Tauri 2 + React + Rust** para Windows que grava o microfone (ou aceita arquivo), envia áudio a **Groq Whisper** e/ou **Deepgram Nova-3**, opcionalmente **sanitiza** com LLMs Groq, cola o texto no app focado e guarda histórico/áudio localmente. Há overlay gadget sofisticado, atalhos globais, vocabulário no sanitizer e avaliação de pronúncia via **Gemini 3.5 Flash**. Não há OpenRouter. Gemini **não** transcreve no pipeline atual. Testes automatizados do app são quase só placement do gadget.
 
 ## O que já funciona
 
@@ -1083,7 +1085,7 @@ Haumea Voice 1.0.3 é um app **Tauri 2 + React + Rust** para Windows que grava o
 
 | Campo | Valor |
 |-------|-------|
-| Arquivo | `APP_CONTEXT_HAUMEA_VOICE.md` (raiz do repositório) |
+| Arquivo | `APP_CONTEXT_SONORA.md` (raiz do repositório) |
 | Arquivos de app analisados | 35 |
 | Testes/comandos executados | Nenhum (`cargo test` / build / APIs **não** rodados) |
 | Limitações | Análise estática apenas; sem execução do app; segredos não lidos; vendor/target ignorados |

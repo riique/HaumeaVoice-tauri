@@ -15,7 +15,7 @@ function connect() {
         if (!window.focused) return;
         const [tab] = await chrome.tabs.query({ active: true, windowId: window.id });
         if (!tab?.id) return;
-        const result = await chrome.tabs.sendMessage(tab.id, { type: "haumea-capture", request });
+        const result = await chrome.tabs.sendMessage(tab.id, { type: "sonora-capture", request });
         const afterWindow = await chrome.windows.getLastFocused();
         const [afterTab] = await chrome.tabs.query({ active: true, windowId: window.id });
         if (!afterWindow.focused || afterWindow.id !== window.id || afterTab?.id !== tab.id || !result?.document_focused || Date.now() > request.expires_at_ms) return;

@@ -67,7 +67,7 @@ fn start_browser_context_listener(endpoint_path: PathBuf) -> Result<(), String> 
     std::fs::write(endpoint_path, encoded).map_err(|error| error.to_string())?;
 
     std::thread::Builder::new()
-        .name("haumea-browser-context".into())
+        .name("sonora-browser-context".into())
         .spawn(move || {
             for connection in listener.incoming() {
                 match connection {
@@ -378,7 +378,7 @@ fn delivery_targets_match(expected: ForegroundTarget, current: ForegroundTarget)
     )
 }
 
-/// Captures only the current foreground HWND and process id. No title,
+/// Captures the foreground window, process and opaque focused-control identity. No title,
 /// selection, clipboard, browser or document content is read.
 pub fn capture_foreground_target() -> ForegroundTarget {
     #[cfg(target_os = "windows")]
@@ -394,9 +394,15 @@ pub fn capture_foreground_target() -> ForegroundTarget {
             }
             let mut process_id = 0_u32;
             GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+            let focus_id = focused_control_identity();
+            // UIA may cross process boundaries. Do not combine one window's
+            // identity with a field captured after the user changed windows.
+            if GetForegroundWindow() != hwnd {
+                return ForegroundTarget::default();
+            }
             ForegroundTarget {
                 hwnd: Some(hwnd.0 as isize),
-                focus_id: focused_control_identity(),
+                focus_id,
                 process_id: (process_id != 0).then_some(process_id),
             }
         }
@@ -921,54 +927,95 @@ unsafe fn capture_uia_text(
     result
 }
 
-/// Hashes UI Automation runtime identity, without reading field text or names.
+/// Keep the UIA client and COM apartment alive between stop and delivery.
+/// Recreating a client on the UI/shortcut thread and disposing its apartment
+/// immediately can invalidate Chromium's accessibility provider identities.
+/// All focus queries use one bounded, windowless MTA worker; a stalled or
+/// unavailable provider still fails closed. No field text or names are read.
 #[cfg(windows)]
-unsafe fn focused_control_identity() -> Option<u64> {
-    use windows::Win32::{
-        System::{
-            Com::{
-                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-                COINIT_APARTMENTTHREADED,
-            },
-            Ole::*,
-        },
-        UI::Accessibility::{CUIAutomation, IUIAutomation},
+fn focused_control_identity() -> Option<u64> {
+    use std::sync::mpsc::{self, SyncSender};
+    use std::time::Instant;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_MULTITHREADED,
     };
-    let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-    let result = (|| {
-        let automation: IUIAutomation =
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
-        let element = automation.GetFocusedElement().ok()?;
-        if element.CurrentIsPassword().ok()?.as_bool() {
-            return None;
-        }
-        let array = element.GetRuntimeId().ok()?;
-        if array.is_null() {
-            return None;
-        }
-        let identity = (|| {
-            let lower = SafeArrayGetLBound(array, 1).ok()?;
-            let upper = SafeArrayGetUBound(array, 1).ok()?;
-            let len = usize::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()?;
-            if len == 0 || len > 128 {
-                return None;
-            }
-            let mut data = std::ptr::null_mut();
-            SafeArrayAccessData(array, &mut data).ok()?;
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            for part in std::slice::from_raw_parts(data.cast::<i32>(), len) {
-                hash.write_i32(*part);
-            }
-            let _ = SafeArrayUnaccessData(array);
-            Some(hash.finish())
-        })();
-        let _ = SafeArrayDestroy(array);
-        identity
-    })();
-    if initialized {
-        CoUninitialize();
+    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
+
+    struct FocusRequest {
+        expires_at: Instant,
+        reply: SyncSender<Option<u64>>,
     }
-    result
+    static READER: OnceLock<Option<SyncSender<FocusRequest>>> = OnceLock::new();
+    let reader = READER
+        .get_or_init(|| {
+            let (send, receive) = mpsc::sync_channel::<FocusRequest>(1);
+            std::thread::Builder::new()
+                .name("sonora-focus-reader".into())
+                .spawn(move || unsafe {
+                    if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
+                        return;
+                    }
+                    {
+                        let automation: windows::core::Result<IUIAutomation> =
+                            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+                        if let Ok(automation) = automation {
+                            while let Ok(request) = receive.recv() {
+                                let identity = (Instant::now() < request.expires_at)
+                                    .then(|| hash_focused_control(&automation))
+                                    .flatten();
+                                let _ = request.reply.try_send(identity);
+                            }
+                        }
+                    }
+                    CoUninitialize();
+                })
+                .ok()?;
+            Some(send)
+        })
+        .as_ref()?;
+    let timeout = Duration::from_millis(700);
+    let (reply, receive) = mpsc::sync_channel(1);
+    reader
+        .try_send(FocusRequest {
+            expires_at: Instant::now() + timeout,
+            reply,
+        })
+        .ok()?;
+    receive.recv_timeout(timeout).ok().flatten()
+}
+
+#[cfg(windows)]
+unsafe fn hash_focused_control(
+    automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+) -> Option<u64> {
+    use windows::Win32::System::Ole::*;
+    let element = automation.GetFocusedElement().ok()?;
+    if element.CurrentIsPassword().ok()?.as_bool() {
+        return None;
+    }
+    let array = element.GetRuntimeId().ok()?;
+    if array.is_null() {
+        return None;
+    }
+    let identity = (|| {
+        let lower = SafeArrayGetLBound(array, 1).ok()?;
+        let upper = SafeArrayGetUBound(array, 1).ok()?;
+        let len = usize::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()?;
+        if len == 0 || len > 128 {
+            return None;
+        }
+        let mut data = std::ptr::null_mut();
+        SafeArrayAccessData(array, &mut data).ok()?;
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for part in std::slice::from_raw_parts(data.cast::<i32>(), len) {
+            hash.write_i32(*part);
+        }
+        let _ = SafeArrayUnaccessData(array);
+        Some(hash.finish())
+    })();
+    let _ = SafeArrayDestroy(array);
+    identity
 }
 
 #[cfg(test)]
@@ -1060,5 +1107,96 @@ mod tests {
             expected,
             ForegroundTarget::default()
         ));
+        assert!(!delivery_targets_match(
+            expected,
+            ForegroundTarget {
+                focus_id: Some(2),
+                ..expected
+            }
+        ));
+        assert!(!delivery_targets_match(
+            expected,
+            ForegroundTarget {
+                focus_id: None,
+                ..expected
+            }
+        ));
+        assert!(!delivery_targets_match(
+            ForegroundTarget {
+                focus_id: None,
+                ..expected
+            },
+            ForegroundTarget {
+                focus_id: None,
+                ..expected
+            }
+        ));
+    }
+
+    #[test]
+    fn switching_apps_while_recording_keeps_start_context_but_delivers_to_stop_field() {
+        use crate::pipeline_run::{PipelineRun, RecordingSession};
+        let chrome = ContextSnapshot {
+            foreground_hwnd: Some(101),
+            process_id: Some(7),
+            ..Default::default()
+        };
+        let codex = ForegroundTarget {
+            hwnd: Some(202),
+            process_id: Some(8),
+            focus_id: Some(99),
+        };
+        let mut session = RecordingSession {
+            context: chrome.clone(),
+            delivery_target: ForegroundTarget::from_snapshot(&chrome),
+            ..Default::default()
+        };
+        session.delivery_target = codex;
+        let run = PipelineRun::new(
+            "switch-apps",
+            &session,
+            crate::pipeline_contract::TranscriptionMode::UltraFast,
+        );
+        assert_eq!(run.context.foreground_hwnd, chrome.foreground_hwnd);
+        let delivered_to = ForegroundTarget {
+            hwnd: run.delivery.target_hwnd,
+            process_id: run.delivery.target_process_id,
+            focus_id: run.delivery.target_focus_id,
+        };
+        assert!(delivery_targets_match(delivered_to, codex));
+        assert!(!delivery_targets_match(
+            delivered_to,
+            ForegroundTarget::from_snapshot(&chrome)
+        ));
+        assert!(!delivery_targets_match(
+            delivered_to,
+            ForegroundTarget {
+                focus_id: Some(100),
+                ..codex
+            }
+        ));
+    }
+
+    /// Run explicitly with a non-password field focused and leave focus there.
+    /// This reads opaque identities only: no microphone, clipboard or provider.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an interactive Windows desktop with a stable focused field"]
+    fn windows_focus_identity_survives_repeated_queries_from_different_threads() {
+        let initial = capture_foreground_target();
+        assert!(
+            initial.focus_id.is_some(),
+            "focus a normal editable field before running"
+        );
+        for _ in 0..8 {
+            std::thread::sleep(Duration::from_millis(250));
+            let current = std::thread::spawn(capture_foreground_target)
+                .join()
+                .unwrap();
+            assert!(
+                delivery_targets_match(initial, current),
+                "keep the same field focused during this check"
+            );
+        }
     }
 }

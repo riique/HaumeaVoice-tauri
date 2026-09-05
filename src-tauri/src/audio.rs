@@ -10,6 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use tauri::{Emitter, Manager};
 
 use crate::models::{AppState, DeepgramMode, TranscriptionEngine};
 
@@ -338,9 +339,8 @@ pub fn start_capture(
         .install_recording_capture(generation, stream, pending_session)
         .map_err(|_| AudioError::Superseded)?;
 
-    // When streaming_final is selected and Deepgram is in the path, open the
-    // WebSocket now and process audio during capture (not only after stop).
-    maybe_start_deepgram_live(state);
+    // Keep capture local until the silence check at stop. The legacy streaming
+    // transport opens only after audio has been admitted.
 
     Ok(())
 }
@@ -451,13 +451,14 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
     let _recording_session_guard = RecordingSessionGuard(state.clone());
     let _ = state.drop_audio_stream();
 
-    let live_session = state.deepgram_live.lock().take();
     let spool = state.capture_spool.lock().take();
+    let mut captured_path = None;
     let raw_samples = if let Some(spool) = spool {
-        match spool
-            .finish()
-            .and_then(|path| crate::capture_spool::read_pcm(&path))
-        {
+        match spool.finish().and_then(|path| {
+            let samples = crate::capture_spool::read_pcm(&path)?;
+            captured_path = Some(path);
+            Ok(samples)
+        }) {
             Ok(samples) => samples,
             Err(error) => {
                 log::error!("capture: {error}");
@@ -468,18 +469,34 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
         state.drain_audio_buffer()
     };
     state.clear_audio_buffer();
-    if let Some(ref session) = live_session {
-        session.catch_up_from_buffer(&raw_samples);
-    }
-    if raw_samples.is_empty() || raw_samples.iter().all(|sample| sample.unsigned_abs() <= 1) {
-        log::warn!("audio: stop requested but buffer was empty");
-        if let Some(session) = live_session {
+    let capture_rate = *state.capture_rate.read();
+    if crate::speech_presence::is_clearly_silent(&raw_samples, capture_rate) {
+        // Only this just-finished empty capture is disposable. Never sweep
+        // previous recovery audio or user history when reporting silence.
+        if let Some(path) = captured_path {
+            if let Err(error) = std::fs::remove_file(path) {
+                log::warn!("audio: could not retire empty capture: {error}");
+            }
+        }
+        if let Some(session) = state.deepgram_live.lock().take() {
             session.abort();
         }
+        if let Some(handle) = state.app_handle.read().as_ref() {
+            if let Some(gadget) = handle.get_webview_window("gadget") {
+                let _ = gadget.emit("recording-no-speech", state.recording_status());
+            }
+        }
+        log::info!("audio: locally skipped silent microphone capture");
         return None;
     }
 
-    let capture_rate = *state.capture_rate.read();
+    if !crate::transcription::should_use_product_mode(state) {
+        maybe_start_deepgram_live(state);
+    }
+    let live_session = state.deepgram_live.lock().take();
+    if let Some(ref session) = live_session {
+        session.catch_up_from_buffer(&raw_samples);
+    }
     let raw_count = raw_samples.len();
     let duration_ms = (raw_count as u64 * 1000) / capture_rate as u64;
 
@@ -914,7 +931,9 @@ async fn deliver_pipeline_result(state: &AppState, run: &mut crate::pipeline_run
             delivery.clipboard_ok = result.is_ok();
             result.and_then(|()| {
                 if !crate::context::foreground_delivery_target_matches(expected_target) {
-                    return Err("delivery target changed; text kept on clipboard".into());
+                    return Err(
+                        "O campo de destino mudou. O texto foi copiado; cole com Ctrl+V.".into(),
+                    );
                 }
                 delivery.paste_attempted = true;
                 paste_into_focused_field(expected_target, Some(&state.operations))

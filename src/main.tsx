@@ -25,13 +25,21 @@ if (isGadget) {
   document.body.style.background = "transparent";
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+async function renderApp() {
+  let content = isGadget ? <GadgetApp /> : isGadgetPreview ? <GadgetPreviewApp /> : <App />;
+  if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("insightsPreview")) {
+    const { InsightsPreview } = await import("./dev/InsightsPreview");
+    content = <InsightsPreview />;
+  }
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>
-      {isGadget ? <GadgetApp /> : isGadgetPreview ? <GadgetPreviewApp /> : <App />}
+      {content}
     </ErrorBoundary>
   </React.StrictMode>,
 );
+}
+void renderApp();
 
 if (import.meta.env.PROD) {
   document.addEventListener("contextmenu", (e) => e.preventDefault());

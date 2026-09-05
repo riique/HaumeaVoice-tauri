@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn journal_replays_delete_restore_and_preserves_incomplete_original() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("haumea-history-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sonora-history-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("history.json");
         crate::storage::write_json(&file, &vec![legacy_entry()]).unwrap();

@@ -1,8 +1,17 @@
-# Haumea Voice
+# Sonora
 
 Aplicativo desktop de **digitação por voz** para Windows. Grave com um atalho global, o app transcreve com motores em nuvem, opcionalmente refina o texto e cola no campo focado (`Ctrl+V`).
 
-**Versão:** 1.0.34 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
+**Versão:** 2.0.0 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
+
+## Sonora v2.0
+
+- **Sua voz, mais simples:** um retrato curto, expressões e hábitos de fala, com medições e configurações disponíveis nos detalhes.
+- **Silêncio tratado no computador:** uma gravação claramente sem voz mostra “Nenhuma voz encontrada” na barra e encerra sem enviar áudio ou colar texto. Falas curtas e baixas são preservadas por uma verificação conservadora.
+- **Troca de aplicativo:** o ditado usa o campo em foco ao parar, com identificação estável entre a gravação e a entrega e orientação em português quando o campo muda depois.
+- **Nova identidade:** Sonora na interface, no executável e nos instaladores. Seus dados e perfis existentes continuam disponíveis.
+
+[Mudanças, compatibilidade e atualização da instalação anterior](docs/SONORA_2.0.md). [Código no GitHub](https://github.com/riique/Sonora).
 
 ---
 
@@ -131,7 +140,7 @@ npm run tauri build
 
 **Artefatos típicos:**
 
-- Executável: `src-tauri/target/release/haumea-voice.exe`
+- Executável: `src-tauri/target/release/sonora.exe`
 - Instaladores: `src-tauri/target/release/bundle/nsis/` e `bundle/msi/`
 
 Detalhes: [`BUILD.md`](BUILD.md).
@@ -151,6 +160,8 @@ Detalhes: [`BUILD.md`](BUILD.md).
 - Gravação pelo mic **cola** no campo focado; upload de arquivo **não** cola automaticamente.
 - Arquivos de áudio grandes (> ~50 MB) são rejeitados.
 - Dados locais (histórico, settings, chaves, áudios): `%APPDATA%\com.haumeavoice.app\`
+
+O identificador interno de dados mantém o nome legado para preservar sua instalação. Para atualizar a instalação anterior para a pasta Sonora com backup e verificação de dados, siga [o procedimento Windows](docs/SONORA_2.0.md#instalação-windows).
 
 ---
 
@@ -193,4 +204,4 @@ Checklist manual: [`docs/MANUAL_TEST_CHECKLIST.md`](docs/MANUAL_TEST_CHECKLIST.m
 
 ## Licença
 
-Consulte o repositório para a licença aplicável. Chaves de API e dados de uso são de responsabilidade do usuário; as chaves são armazenadas em texto no AppData da aplicação (migração para Credential Manager é melhoria futura).
+Consulte o repositório para a licença aplicável. Chaves de API e dados de uso são de responsabilidade do usuário; as chaves são protegidas pelo DPAPI da conta Windows; a interface recebe apenas referências opacas.

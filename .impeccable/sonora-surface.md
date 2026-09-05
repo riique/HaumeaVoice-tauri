@@ -1,10 +1,10 @@
 ## Scope and mode
 
-Replacement visual world for the complete Haumea Voice desktop frontend and its floating gadget. Mode: Operate.
+Replacement visual world for the complete Sonora desktop frontend and its floating gadget. Mode: Operate.
 
 ## Audience and job
 
-Windows users dictate into other applications throughout the day, then open Haumea only to manage history, files, shortcuts, pipelines, providers, vocabulary and diagnostics.
+Windows users dictate into other applications throughout the day, then open Sonora only to manage history, files, shortcuts, pipelines, providers, vocabulary and diagnostics.
 
 ## Primary tasks and evidence
 
@@ -20,7 +20,7 @@ Quiet Windows utility: warm-white canvas, neutral sidebar, white working surface
 
 ## Memorable moment
 
-The black Haumea Bar rests as a compact lozenge, expands only when state demands it and turns real speech energy into a calm white waveform.
+The black Sonora Bar rests as a compact lozenge, expands only when state demands it and turns real speech energy into a calm white waveform.
 
 ## Unresolved decisions
 

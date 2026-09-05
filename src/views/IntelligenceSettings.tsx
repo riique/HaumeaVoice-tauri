@@ -125,7 +125,7 @@ export function IntelligenceSettings() {
               <option value="literal">Literal</option><option value="smart">Smart</option><option value="aggressive">Aggressive</option>
             </select>
           </PreferenceRow>
-          <PreferenceRow title="Destino" description="Scratchpad salva uma nota no Haumea e nunca cola no aplicativo em foco.">
+          <PreferenceRow title="Destino" description="Scratchpad salva uma nota no Sonora e nunca cola no aplicativo em foco.">
             <select aria-label="Destino do ditado" className={selectClass} value={policy.destination} onChange={(event) => setPolicy({ ...policy, destination: event.target.value as OutputPolicyConfig["destination"] })}>
               <option value="focused_field">Campo em foco</option><option value="clipboard_only">Somente clipboard</option><option value="scratchpad">Scratchpad</option>
             </select>

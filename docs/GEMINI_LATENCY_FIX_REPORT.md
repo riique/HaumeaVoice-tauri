@@ -1,7 +1,7 @@
 # Correção de latência Gemini — relatório
 
-**Data:** 2026-07-18  
-**Produto:** Haumea Voice 1.0.3  
+**Data:** 2026-07-18
+**Produto:** Sonora 1.0.3
 
 ---
 
@@ -103,7 +103,7 @@ Campos novos em `HistoryEntry` (todos `#[serde(default)]`, retrocompatíveis):
 
 - Prompt FastAccurate inclui glossário + regras de identificadores.
 - `apply_strict_literals` em todos os modos de produto (e pós-Gemini).
-- Default seed: **Haumea Voice** `[LITERAL]` com aliases Homey / HowMeia / Homeia / Raumea Voice (`ensure_default_product_terms` no load de settings).
+- Default seed: **Sonora** `[LITERAL]` com aliases Homey / HowMeia / Homeia / Raumea Voice (`ensure_default_product_terms` no load de settings).
 
 ---
 
@@ -114,7 +114,7 @@ cargo test  → 85 passed
 npm run build → ok
 ```
 
-Cobertura relevante: transport selection, Haumea aliases, history fields (sanitizer_ms, transport), mocks Files, prompts.
+Cobertura relevante: transport selection, Sonora aliases, history fields (sanitizer_ms, transport), mocks Files, prompts.
 
 ---
 
@@ -160,7 +160,7 @@ Preservado: Ultrarrápido, Deepgram/legado, pronúncia (inline separado), clipbo
 | `sanitizer_latency_ms = 0` | grava `sanitizer_ms` real / `None` | `mode_result_to_history` |
 | UI “motor + sanitizador” | resumo Total + etapas | `HistoricoView.tsx` |
 | FastAccurate sem glossário | prompt + glossary + strict | `fast_accurate_transcription_prompt` |
-| Homey Voice | default literal + aliases | `default_haumea_voice_term` |
+| Homey Voice | default literal + aliases | `default_sonora_term` |
 | Métricas agregadas | campos por etapa + transport | `HistoryEntry` |
 
 ---

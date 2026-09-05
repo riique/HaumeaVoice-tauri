@@ -31,7 +31,7 @@ export function RecoveryView() {
     try { await work(); setMessage(success); await refresh(); } catch (e) { setMessage(String(e)); } finally { setBusy(false); }
   };
   const exportData = async () => {
-    const destination = await save({ defaultPath: `haumea-backup-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "Backup Haumea", extensions: ["json"] }] });
+    const destination = await save({ defaultPath: `sonora-backup-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "Backup Sonora", extensions: ["json"] }] });
     if (destination) await act(() => invoke("export_local_data", { destination, includeAudio }), "Backup exportado. Guarde-o em um local privado.");
   };
   const archiveAudio = async (id: string) => {
@@ -40,7 +40,7 @@ export function RecoveryView() {
     await act(async () => { const result = await invoke<string>("archive_history_audio", { id, destination }); setMessage(result); }, "Áudio arquivado; confira a pasta selecionada.");
   };
   const importData = async () => {
-    const source = await open({ multiple: false, filters: [{ name: "Backup Haumea", extensions: ["json"] }] });
+    const source = await open({ multiple: false, filters: [{ name: "Backup Sonora", extensions: ["json"] }] });
     if (typeof source === "string" && window.confirm("Importar este backup? Histórico, notas, vocabulário, snippets e styles serão mesclados. Configurações ativas serão preservadas e um backup será criado antes da importação.")) {
       await act(() => invoke("import_local_data", { source }), "Importação concluída. Confira os dados importados.");
     }

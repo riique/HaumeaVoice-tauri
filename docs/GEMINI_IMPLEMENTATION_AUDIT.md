@@ -1,4 +1,4 @@
-# Auditoria da implementação do Gemini — Haumea Voice
+# Auditoria da implementação do Gemini — Sonora
 
 **Data:** 2026-07-18  
 **Escopo:** somente leitura de código (sem chamadas de API, sem alteração de lógica de app)  
@@ -226,7 +226,7 @@ Content-Type: application/json
     {
       "parts": [
         {
-          "text": "Você é o revisor final…\nHipótese Whisper:\n\"\"\"\n…texto…\n\"\"\"\nGlossário do usuário:\n- Haumea Voice [application] (aliases: …) [LITERAL]\n"
+          "text": "Você é o revisor final…\nHipótese Whisper:\n\"\"\"\n…texto…\n\"\"\"\nGlossário do usuário:\n- Sonora [application] (aliases: …) [LITERAL]\n"
         },
         {
           "file_data": {
@@ -421,14 +421,14 @@ Soma de:
 
 ---
 
-## 8. Vocabulário e “Haumea Voice” → “Homey Voice”
+## 8. Vocabulário e “Sonora” → “Homey Voice”
 
 ### Como o glossário chega ao Gemini
 
 1. `format_glossary_for_prompt` (`vocabulary.rs`) monta linhas:
 
    ```text
-   - Haumea Voice [application] (aliases: …) [LITERAL]
+   - Sonora [application] (aliases: …) [LITERAL]
    ```
 
 2. Injetado nos prompts Precise / UltraPrecise (`precise_refinement_prompt`, `ultraprecise_refinement_prompt`).
@@ -439,16 +439,16 @@ Soma de:
 
 | Mecanismo | Efeito |
 |-----------|--------|
-| Whisper / Gemini erram foneticamente | “Haumea” → “Homey” é confusão acústica plausível |
+| Whisper / Gemini erram foneticamente | “Sonora” → “Homey” é confusão acústica plausível |
 | Prompt pede fidelidade ao **áudio** | se o modelo “ouve” Homey, pode preferir isso ao glossário |
 | `[LITERAL]` no prompt | instrução **soft**; modelo pode ignorar |
 | `apply_strict_literals` | só substitui se achar o **alias ou canônico** no texto final |
 | Se saída = `Homey Voice` e aliases **não** incluem `Homey` / `Homey Voice` | **nenhuma correção determinística** |
-| Strict no canônico | normaliza casing de “haumea voice”, **não** inventa match fonético |
+| Strict no canônico | normaliza casing de “sonora”, **não** inventa match fonético |
 
 Conclusões:
 
-- `Haumea Voice` **pode** estar no prompt (se cadastrado e enabled).
+- `Sonora` **pode** estar no prompt (se cadastrado e enabled).
 - Literal rígido **só ajuda** se (a) o modelo obedecer ou (b) um alias inequívoco aparecer no texto.
 - O modelo **pode normalizar livremente** nomes; não há validador semântico pós-Gemini além do replace de aliases strict.
 - Rápido e preciso **não envia glossário** → maior risco de “Homey”.
@@ -556,7 +556,7 @@ Files 1→2→3 ───┴→ Groq sanitizer → generate ultraprecise → del
 * **Causa mais provável da latência 7–10 s:** overhead **Files API (upload + polling 800 ms)** + **`generateContent` multimodal** + **delete síncrono** na critical path; no UltraPrecise soma-se o **sanitizer serial** após o join.
 * **Sanitizador no UltraPrecise:** **sim, o código executa** `run_sanitize`; o **“0,00 s” é bug de telemetria** (`sanitizer_latency_ms: Some(0)` em `mode_result_to_history`), com o tempo real embutido em “motor” e em `stages`.
 * **Problemas de telemetria:** UI legado motor/sanitizer; modos gravam total só em motor; upload/poll/generate/delete não aparecem separados; FastAccurate marca `gemini_ms` como wall total.
-* **Problemas de literais:** glossário ausente no Rápido e preciso; `[LITERAL]` é soft no prompt; `apply_strict_literals` só corrige **aliases conhecidos** — “Homey Voice” sem alias não volta para “Haumea Voice”.
+* **Problemas de literais:** glossário ausente no Rápido e preciso; `[LITERAL]` é soft no prompt; `apply_strict_literals` só corrige **aliases conhecidos** — “Homey Voice” sem alias não volta para “Sonora”.
 * **Três otimizações de maior impacto:**
   1. **Entregar texto ao usuário antes do delete** (cleanup em background / Drop já existe — parar de `await cleanup` na critical path).
   2. **UltraPrecise: iniciar sanitizer assim que Whisper terminar**, sem esperar upload (pipeline em estágios com canais).

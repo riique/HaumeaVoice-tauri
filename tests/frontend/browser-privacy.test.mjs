@@ -26,7 +26,7 @@ function fixture({ focused = true, visible = true } = {}) {
   vm.runInContext(source, context);
   return { reads, send(request, sender = "test-extension") {
     let response;
-    receiver({ type: "haumea-capture", request }, { id: sender }, (value) => { response = value; });
+    receiver({ type: "sonora-capture", request }, { id: sender }, (value) => { response = value; });
     return response;
   } };
 }

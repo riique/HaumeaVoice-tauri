@@ -10,6 +10,7 @@ export type GadgetContent =
   | "processing-dots"
   | "processing-label"
   | "success-mark"
+  | "no-speech-message"
   | "error-message";
 export type GadgetInteraction = "none" | "passive" | "start" | "recording-controls" | "retry";
 
@@ -45,7 +46,7 @@ export const GADGET_STATES: Record<GadgetState, GadgetStateDefinition> = {
     interaction: "start",
     animation: "settle",
     timeoutMs: null,
-    accessibleLabel: "Haumea pronto para ditar",
+    accessibleLabel: "Sonora pronto para ditar",
   },
   hover: {
     visibility: "visible",
@@ -119,6 +120,15 @@ export const GADGET_STATES: Record<GadgetState, GadgetStateDefinition> = {
     timeoutMs: 520,
     accessibleLabel: "Texto disponível",
   },
+  no_speech: {
+    visibility: "visible",
+    geometry: { width: 254, height: 58 },
+    content: "no-speech-message",
+    interaction: "passive",
+    animation: "feedback",
+    timeoutMs: 3200,
+    accessibleLabel: "Nenhuma voz encontrada",
+  },
   error: {
     visibility: "visible",
     geometry: { width: 326, height: 58 },
@@ -140,7 +150,7 @@ export function stateAfterTimeout(
 ): GadgetState | null {
   if (state === "appearing") return "initializing";
   if (state === "processing") return "processing_long";
-  if (state === "success" || state === "error") return restState(mode);
+  if (state === "success" || state === "error" || state === "no_speech") return restState(mode);
   return null;
 }
 

@@ -29,6 +29,7 @@ pub mod settings;
 pub mod shortcuts;
 pub mod single_instance;
 pub mod snippets;
+pub mod speech_presence;
 pub mod storage;
 pub mod transcription;
 pub mod transformations;
@@ -83,6 +84,7 @@ fn gadget_hit_rect(state: GadgetVisualState) -> Option<crate::models::GadgetHitR
         Processing => ((120.0, 52.0), (100.0, 36.0)),
         ProcessingLong => ((202.0, 52.0), (184.0, 36.0)),
         Success => ((54.0, 52.0), (36.0, 36.0)),
+        NoSpeech => ((254.0, 58.0), (236.0, 40.0)),
         Error => ((326.0, 58.0), (308.0, 46.0)),
     };
 
@@ -132,6 +134,10 @@ fn gadget_geometry(state: GadgetVisualState) -> GadgetGeometry {
         },
         GadgetVisualState::Error => GadgetGeometry {
             width: 326.0,
+            height: 58.0,
+        },
+        GadgetVisualState::NoSpeech => GadgetGeometry {
+            width: 254.0,
             height: 58.0,
         },
     }
@@ -369,7 +375,7 @@ fn win32_gadget_is_obscured(hwnd_raw: isize) -> bool {
 fn spawn_gadget_z_order_guardian(app: tauri::AppHandle, state: SharedState) {
     let promotion_pending = Arc::new(AtomicBool::new(false));
     std::thread::Builder::new()
-        .name("haumea-gadget-z-order".into())
+        .name("sonora-gadget-z-order".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
             if *state.gadget_visual_state.read() == GadgetVisualState::Hidden {
@@ -452,7 +458,7 @@ fn spawn_gadget_render_watchdog(
                 if let Err(error) = refresh_gadget_surface(&window) {
                     log::warn!("gadget: watchdog repaint failed: {}", error);
                 }
-                let _ = window.eval("window.dispatchEvent(new Event('haumea-gadget-repaint'))");
+                let _ = window.eval("window.dispatchEvent(new Event('sonora-gadget-repaint'))");
             }
         });
         if let Err(error) = queued {
@@ -677,7 +683,7 @@ fn setup_gadget(app: &tauri::AppHandle, state: &SharedState) {
     };
     let geometry = gadget_geometry(initial);
     let builder = WebviewWindowBuilder::new(app, "gadget", WebviewUrl::App("index.html".into()))
-        .title("Haumea Dictation Bar")
+        .title("Sonora Dictation Bar")
         .inner_size(geometry.width, geometry.height)
         .resizable(false)
         .decorations(false)
@@ -1035,12 +1041,12 @@ fn spawn_gadget_focus_monitor_watcher(_app: tauri::AppHandle, _state: SharedStat
 /// restore the window or quit for good. Returns the built tray so it stays
 /// alive for the lifetime of the app.
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let show_item = MenuItem::with_id(app, "show", "Mostrar Haumea Voice", true, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, "show", "Mostrar Sonora", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
-    let mut builder = TrayIconBuilder::with_id("haumea-tray")
-        .tooltip("Haumea Voice")
+    let mut builder = TrayIconBuilder::with_id("sonora-tray")
+        .tooltip("Sonora")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -1080,7 +1086,7 @@ fn restore_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Returns the per-user log directory for Haumea Voice. Computed from the
+/// Returns the per-user log directory for Sonora. Computed from the
 /// `APPDATA` environment variable and the Tauri bundle identifier so it is
 /// available **before** the Tauri runtime initialises (the `app.path()`
 /// resolver is not yet available at that point).
@@ -1667,7 +1673,7 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running Haumea Voice application");
+        .expect("error while running Sonora application");
 }
 
 #[cfg(test)]
@@ -1842,7 +1848,7 @@ mod log_rotation_tests {
     #[test]
     fn open_log_can_rotate_on_windows_without_losing_previous_bytes() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("haumea-log-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sonora-log-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("app.log");
         std::fs::File::create(&path)

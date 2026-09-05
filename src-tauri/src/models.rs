@@ -65,7 +65,7 @@ pub struct GadgetHitRect {
 }
 
 /// Controls whether the dictation bar exists while no dictation is active.
-/// `Auto` is intentionally the default: Haumea should disappear until needed.
+/// `Auto` is intentionally the default: Sonora should disappear until needed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WidgetVisibilityMode {
@@ -110,6 +110,7 @@ pub enum GadgetVisualState {
     Processing,
     ProcessingLong,
     Success,
+    NoSpeech,
     Error,
 }
 

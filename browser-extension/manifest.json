@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Haumea Voice Context",
+  "name": "Sonora Context",
   "version": "1.0.0",
-  "description": "Shares limited, privacy-filtered browser context with the local Haumea Voice app.",
+  "description": "Shares limited, privacy-filtered browser context with the local Sonora app.",
   "permissions": ["nativeMessaging"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {

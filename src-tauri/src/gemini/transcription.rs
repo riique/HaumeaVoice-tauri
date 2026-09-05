@@ -21,7 +21,7 @@ pub async fn transcribe_audio(req: TranscribeRequest) -> Result<GeminiGenerateRe
     let t0 = std::time::Instant::now();
     let mime = mime_for_ext(&req.ext);
     let display = if req.display_name.trim().is_empty() {
-        format!("haumea-stt.{}", req.ext)
+        format!("sonora-stt.{}", req.ext)
     } else {
         req.display_name.clone()
     };
@@ -186,7 +186,7 @@ mod tests {
             duration_ms: Some(1000),
             glossary_block: "termo".into(),
             file_tagging_enabled: false,
-            custom_vocabulary: vec!["Haumea".into(), "Tauri".into()],
+            custom_vocabulary: vec!["Sonora".into(), "Tauri".into()],
             untrusted_context: Some("contexto do editor".into()),
         };
 
@@ -206,7 +206,7 @@ mod tests {
             .unwrap()
             .transcription_config
             .unwrap();
-        assert_eq!(config.custom_vocabulary.unwrap(), vec!["Haumea", "Tauri"]);
+        assert_eq!(config.custom_vocabulary.unwrap(), vec!["Sonora", "Tauri"]);
         assert_eq!(config.mode.unwrap().mode_type, "smart");
         assert!(config.language_codes.is_none());
     }

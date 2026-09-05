@@ -2,6 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Sua voz: a short portrait first, optional detail at the end. */
+.voice-insights { max-width: 920px; }
+.voice-portrait { padding: 30px 0 34px; border-bottom: 1px solid #deded8; }
+.voice-portrait h2 { max-width: 28ch; color: #181816; font-size: 30px; font-weight: 600; line-height: 1.25; letter-spacing: -.025em; text-wrap: balance; overflow-wrap: anywhere; }
+.voice-portrait__text, .voice-full-portrait p { max-width: 68ch; margin-top: 18px; color: #555650; font-size: 15px; line-height: 1.85; overflow-wrap: anywhere; }
+.voice-portrait__action { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 24px; }
+.voice-insights h3 { color: #343530; font-size: 14px; font-weight: 600; line-height: 1.5; }
+.voice-insights h4 { color: #343530; font-size: 14px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
+.voice-signature { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 40px; padding: 32px 0; border-bottom: 1px solid #deded8; }
+.voice-signature blockquote { margin-top: 15px; color: #181816; font-size: 25px; font-weight: 500; line-height: 1.4; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.voice-topics { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 16px; color: #555650; font-size: 14px; line-height: 1.7; }
+.voice-topics li { padding-bottom: 3px; border-bottom: 1px solid #c7c8c0; overflow-wrap: anywhere; }
+.voice-habits { padding: 32px 0; }
+.voice-habits > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 22px; }
+.voice-habits p, .voice-experiment p { margin-top: 8px; color: #6f706a; font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+.voice-learning { max-width: 65ch; padding: 32px 0; color: #6f706a; font-size: 14px; line-height: 1.8; }
+.voice-experiment { padding: 24px; margin-bottom: 28px; border-radius: 14px; background: #eeeeea; }
+.voice-experiment h4 { margin-top: 12px; }
+.voice-insights summary { cursor: pointer; width: fit-content; padding: 8px 0; color: #555650; font-size: 13px; line-height: 1.5; }
+.voice-insights summary:hover { color: #181816; }
+.voice-full-portrait { margin-top: 12px; }
+.voice-details { border-top: 1px solid #deded8; padding: 12px 0; }
+.voice-details__body { padding: 20px 0; }
+.voice-details__body > section, .voice-details__body > details { margin-top: 28px; }
+.voice-preference { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 12px; max-width: 620px; }
+.voice-preference p { margin-top: 6px; color: #6f706a; font-size: 13px; line-height: 1.7; }
+.voice-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 32px; margin-top: 18px; font-size: 13px; }
+.voice-facts dt { color: #6f706a; }
+.voice-facts dd { color: #343530; margin-top: 5px; overflow-wrap: anywhere; }
+.voice-confirm { width: min(480px, calc(100% - 40px)); max-height: calc(100% - 40px); padding: 28px; border: 1px solid #deded8; border-radius: 14px; color: #181816; background: #fff; overscroll-behavior: contain; }
+.voice-confirm::backdrop { background: rgb(0 0 0 / .25); }
+.voice-confirm h2 { font-size: 20px; font-weight: 600; letter-spacing: -.02em; }
+.voice-confirm p { margin: 16px 0; font-size: 13px; line-height: 1.75; color: #555650; }
+.voice-confirm > div { margin-top: 24px; }
+@media (max-width: 900px) {
+  .voice-portrait { padding-top: 16px; }
+  .voice-portrait h2 { font-size: 27px; }
+  .voice-signature { grid-template-columns: 1fr; gap: 28px; }
+  .voice-habits > div { grid-template-columns: 1fr; gap: 22px; }
+}
+@media (max-width: 560px) { .voice-facts { grid-template-columns: 1fr; } }
+
 :root {
   color-scheme: light;
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -201,7 +243,7 @@ textarea:focus-visible {
   }
 }
 
-/* -------------------------- Haumea dictation bar -------------------------- */
+/* -------------------------- Sonora dictation bar -------------------------- */
 
 .gadget-window {
   display: flex;
@@ -249,7 +291,7 @@ textarea:focus-visible {
   to { opacity: 1; transform: scale(1); }
 }
 
-.haumea-bar {
+.sonora-bar {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -261,25 +303,25 @@ textarea:focus-visible {
   box-shadow: 0 10px 28px -14px rgba(0, 0, 0, .72), 0 3px 10px -6px rgba(0, 0, 0, .52);
 }
 
-button.haumea-bar { cursor: pointer; }
-button.haumea-bar:focus-visible,
-.haumea-bar button:focus-visible {
+button.sonora-bar { cursor: pointer; }
+button.sonora-bar:focus-visible,
+.sonora-bar button:focus-visible {
   outline: 2px solid rgba(255, 255, 255, .92);
   outline-offset: 2px;
 }
 
-.haumea-bar--idle { width: 52px; height: 32px; }
-.haumea-bar--hover { width: 126px; height: 38px; gap: 10px; padding: 0 13px; }
-.haumea-bar--activity { width: 54px; height: 36px; }
-.haumea-bar--recording { width: 170px; height: 36px; gap: 4px; padding: 0 5px; }
-.haumea-bar--processing { width: 100px; height: 36px; }
-.haumea-bar--processing-long { width: 184px; height: 36px; gap: 9px; padding: 0 14px; }
-.haumea-bar--success { width: 36px; height: 36px; color: #a8dab8; }
-.haumea-bar--error { width: 308px; height: 46px; justify-content: flex-start; gap: 9px; padding: 0 7px 0 14px; }
+.sonora-bar--idle { width: 52px; height: 32px; }
+.sonora-bar--hover { width: 126px; height: 38px; gap: 10px; padding: 0 13px; }
+.sonora-bar--activity { width: 54px; height: 36px; }
+.sonora-bar--recording { width: 170px; height: 36px; gap: 4px; padding: 0 5px; }
+.sonora-bar--processing { width: 100px; height: 36px; }
+.sonora-bar--processing-long { width: 184px; height: 36px; gap: 9px; padding: 0 14px; }
+.sonora-bar--success { width: 36px; height: 36px; color: #a8dab8; }
+.sonora-bar--error { width: 308px; height: 46px; justify-content: flex-start; gap: 9px; padding: 0 7px 0 14px; }
 
-.haumea-bar__shortcut,
-.haumea-bar__status,
-.haumea-bar__error-text {
+.sonora-bar__shortcut,
+.sonora-bar__status,
+.sonora-bar__error-text {
   overflow: hidden;
   color: #deded8;
   font-size: 11px;
@@ -289,11 +331,12 @@ button.haumea-bar:focus-visible,
   text-overflow: ellipsis;
 }
 
-.haumea-bar__shortcut { color: #b7b7b0; font-size: 10px; }
-.haumea-bar__status { min-width: 0; flex: 1; }
-.haumea-bar__error-text { min-width: 0; flex: 1; color: #f2f2ed; }
+.sonora-bar__shortcut { color: #b7b7b0; font-size: 10px; }
+.sonora-bar__status { min-width: 0; flex: 1; }
+.sonora-bar__error-text { min-width: 0; flex: 1; color: #f2f2ed; }
 
-.haumea-bar__control {
+.sonora-bar--no-speech { width: 236px; height: 40px; gap: 9px; padding: 0 16px; color: #f2f2ed; font-size: 12px; }
+.sonora-bar__control {
   display: inline-flex;
   width: 26px;
   height: 26px;
@@ -308,12 +351,12 @@ button.haumea-bar:focus-visible,
   transition: background-color 120ms ease, color 120ms ease;
 }
 
-.haumea-bar__control:hover { background: #292927; color: #fff; }
-.haumea-bar__control--primary { background: #f1f1eb; color: #171716; }
-.haumea-bar__control--primary:hover { background: #fff; color: #111; }
+.sonora-bar__control:hover { background: #292927; color: #fff; }
+.sonora-bar__control--primary { background: #f1f1eb; color: #171716; }
+.sonora-bar__control--primary:hover { background: #fff; color: #111; }
 
-.haumea-bar__retry,
-.haumea-bar__dismiss {
+.sonora-bar__retry,
+.sonora-bar__dismiss {
   display: inline-flex;
   height: 32px;
   align-items: center;
@@ -325,10 +368,10 @@ button.haumea-bar:focus-visible,
   cursor: pointer;
 }
 
-.haumea-bar__retry { gap: 6px; padding: 0 11px; font-size: 10px; font-weight: 600; }
-.haumea-bar__dismiss { width: 32px; flex: 0 0 32px; }
-.haumea-bar__retry:hover, .haumea-bar__dismiss:hover { background: #393936; }
-.haumea-bar__retry:disabled { cursor: wait; opacity: .55; }
+.sonora-bar__retry { gap: 6px; padding: 0 11px; font-size: 10px; font-weight: 600; }
+.sonora-bar__dismiss { width: 32px; flex: 0 0 32px; }
+.sonora-bar__retry:hover, .sonora-bar__dismiss:hover { background: #393936; }
+.sonora-bar__retry:disabled { cursor: wait; opacity: .55; }
 
 .mini-wave,
 .live-wave,

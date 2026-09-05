@@ -2,9 +2,9 @@
 
 ## 1. Diagnóstico do Problema
 
-Durante o uso do HaumeaVoice, observa-se frequentemente um pequeno atraso (*delay*) entre o acionamento da *keybind* de transcrição e o momento em que o microfone efetivamente começa a gravar o áudio. Isso faz com que as primeiras sílabas ou palavras ditas pelo usuário sejam cortadas (*chopped audio*).
+Durante o uso do Sonora, observa-se frequentemente um pequeno atraso (*delay*) entre o acionamento da *keybind* de transcrição e o momento em que o microfone efetivamente começa a gravar o áudio. Isso faz com que as primeiras sílabas ou palavras ditas pelo usuário sejam cortadas (*chopped audio*).
 
-### Causa Raiz Técnica no HaumeaVoice
+### Causa Raiz Técnica no Sonora
 
 Conforme inspecionado em [`src-tauri/src/audio.rs`](<C:/Dev/Projects/HaumeaVoice-tauri/src-tauri/src/audio.rs>), a gravação é disparada pela rotina `audio::start_capture()`, que executa o seguinte fluxo síncrono após o pressionamento do atalho global (`shortcuts.rs`):
 
@@ -70,7 +70,7 @@ O aplicativo inicializa a captura CPAL durante a inicialização (`app_setup`) e
 
 ---
 
-## 5. Recomendação de Arquitetura Proposta para o HaumeaVoice
+## 5. Recomendação de Arquitetura Proposta para o Sonora
 
 Para entregar a melhor experiência sem comprometer usuários de fones Bluetooth e notebooks, recomenda-se a seguinte abordagem combinada:
 

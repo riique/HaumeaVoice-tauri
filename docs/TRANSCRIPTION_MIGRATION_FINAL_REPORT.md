@@ -1,8 +1,8 @@
 # Relatório final — Migração de pipelines de transcrição
 
-**Produto:** Haumea Voice 1.0.3  
-**Escopo:** Fases 00–09  
-**Data:** 2026-07-18  
+**Produto:** Sonora 1.0.3
+**Escopo:** Fases 00–09
+**Data:** 2026-07-18
 
 ---
 
@@ -61,19 +61,19 @@ Deepgram permanece **experimental** no legado avançado. Chaves continuam em pla
 
 ## Teste manual guiado
 
-1. **Gravação** — Ctrl+B (ou atalho configurado): grava → para → texto no campo focado + card no Histórico.  
-2. **Cancel** — inicia gravação, Ctrl+Q: sem texto novo.  
-3. **Ultrarrápido** — Pipelines → selecionar → gravar curto.  
-4. **Rápido e preciso** — chave Google; testar com e sem fallback Whisper.  
-5. **Preciso** — verificar selo de modo e latência; forçar falha de rede se possível.  
-6. **Ultrapreciso** — Groq+Google; conferir estágios nos Detalhes.  
-7. **Upload** — Transcrição → arquivo WAV/MP3.  
-8. **Clipboard** — mic cola; upload **não** cola.  
-9. **Histórico** — copiar, editar, excluir, detalhes, retranscrever, avaliar pronúncia.  
-10. **Vocabulário** — termo strict + alias multi-palavra; retranscrever.  
-11. **Gadget** — idle/gravando/processando; arrastar; compacto.  
-12. **Atalhos** — rebind e validar.  
-13. **Bandeja** — fechar janela → app na bandeja; Sair encerra.  
+1. **Gravação** — Ctrl+B (ou atalho configurado): grava → para → texto no campo focado + card no Histórico.
+2. **Cancel** — inicia gravação, Ctrl+Q: sem texto novo.
+3. **Ultrarrápido** — Pipelines → selecionar → gravar curto.
+4. **Rápido e preciso** — chave Google; testar com e sem fallback Whisper.
+5. **Preciso** — verificar selo de modo e latência; forçar falha de rede se possível.
+6. **Ultrapreciso** — Groq+Google; conferir estágios nos Detalhes.
+7. **Upload** — Transcrição → arquivo WAV/MP3.
+8. **Clipboard** — mic cola; upload **não** cola.
+9. **Histórico** — copiar, editar, excluir, detalhes, retranscrever, avaliar pronúncia.
+10. **Vocabulário** — termo strict + alias multi-palavra; retranscrever.
+11. **Gadget** — idle/gravando/processando; arrastar; compacto.
+12. **Atalhos** — rebind e validar.
+13. **Bandeja** — fechar janela → app na bandeja; Sair encerra.
 14. **Legado** — Pipelines → Avançado → desligar modos → dual/Deepgram.
 
 **Não rodar release automática.** Build sugerido: `npm run tauri build`.
@@ -92,18 +92,18 @@ src/views/ConfiguracoesView.tsx  # UI pipelines
 src/views/HistoricoView.tsx
 docs/TRANSCRIPTION_MIGRATION_PLAN.md
 docs/TRANSCRIPTION_BEHAVIOR_BASELINE.md
-APP_CONTEXT_HAUMEA_VOICE.md
+APP_CONTEXT_SONORA.md
 ```
 
 ---
 
 ## O que não foi feito de propósito
 
-- Release / assinatura de código  
-- Windows Credential Manager (risco de migração de chaves)  
-- Remoção do código legado Deepgram/dual  
-- Testes E2E com APIs reais  
-- OpenRouter  
+- Release / assinatura de código
+- Windows Credential Manager (risco de migração de chaves)
+- Remoção do código legado Deepgram/dual
+- Testes E2E com APIs reais
+- OpenRouter
 
 ---
 

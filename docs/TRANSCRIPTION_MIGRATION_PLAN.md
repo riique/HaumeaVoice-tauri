@@ -18,7 +18,7 @@ Fase 00 (preparação). **Sem alteração funcional do app nesta fase.**
 - Não expor chaves; não chamar APIs reais salvo fase que autorize
 - Skills: `tauri` (IPC/Rust/segurança), `impeccable` (UX), `copywriting` (textos UI)
 
-Referências: `APP_CONTEXT_HAUMEA_VOICE.md`, `docs/TRANSCRIPTION_BEHAVIOR_BASELINE.md`
+Referências: `APP_CONTEXT_SONORA.md`, `docs/TRANSCRIPTION_BEHAVIOR_BASELINE.md`
 
 ---
 
@@ -166,7 +166,7 @@ Sempre: `git` reset para SHA do checkpoint Fase 00.
 ## 8. Critérios de saída da Fase 00
 
 - [x] Skills `impeccable`, `copywriting`, `tauri` carregadas
-- [x] `APP_CONTEXT_HAUMEA_VOICE.md` lido e validado
+- [x] `APP_CONTEXT_SONORA.md` lido e validado
 - [x] `npm run build` OK
 - [x] `cargo check` OK
 - [x] `cargo test` OK (3/3)

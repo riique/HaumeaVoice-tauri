@@ -1,4 +1,4 @@
-# Build do Projeto Haumea Voice
+# Build do Projeto Sonora
 
 Este documento descreve como realizar o build de produção do aplicativo desktop Tauri.
 
@@ -29,5 +29,5 @@ npm run tauri build
 Após a finalização do processo, o executável compilado estará disponível em:
 
 ```
-src-tauri/target/release/haumea-voice.exe
+src-tauri/target/release/sonora.exe
 ```

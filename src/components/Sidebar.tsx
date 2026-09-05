@@ -45,7 +45,7 @@ export function Sidebar({
           <AudioLines className="h-[17px] w-[17px]" strokeWidth={1.8} aria-hidden />
         </div>
         <span className="text-[17px] font-semibold tracking-[-0.02em] text-ink max-[1180px]:hidden">
-          Haumea
+          Sonora
         </span>
       </div>
 
@@ -77,7 +77,7 @@ export function Sidebar({
 
       {version && (
         <div className="px-5 text-[11px] tabular-nums text-[#5d5e58] max-[1180px]:px-0 max-[1180px]:text-center">
-          <span className="max-[1180px]:hidden">Haumea Voice </span>v{version}
+          <span className="max-[1180px]:hidden">Sonora </span>v{version}
         </div>
       )}
     </aside>

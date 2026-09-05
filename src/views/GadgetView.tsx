@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, Check, Mic, RefreshCw, Square, X } from "lucide-react";
+import { AlertCircle, Check, Mic, MicOff, RefreshCw, Square, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
   acknowledgeGadgetRendered,
@@ -149,7 +149,7 @@ export function GadgetApp() {
       transition("stopping");
     } else if (status.phase === "cancelling") {
       transitionToRest();
-    } else if (!(["success", "error"] as GadgetState[]).includes(stateRef.current)) {
+    } else if (!(["success", "error", "no_speech"] as GadgetState[]).includes(stateRef.current)) {
       transitionToRest();
     }
   }, [transition, transitionToRest]);
@@ -165,6 +165,14 @@ export function GadgetApp() {
         listen<RecordingStatus>("recording-stopped", (event) => applyRecordingStatus(event.payload)),
         listen<RecordingStatus>("recording-cancelled", (event) => applyRecordingStatus(event.payload)),
         listen<RecordingStatus>("recording-idle", (event) => applyRecordingStatus(event.payload)),
+        listen<RecordingStatus>("recording-no-speech", ({ payload }) => {
+          if (!payload.session_id || payload.session_id !== activeSessionIdRef.current
+            || payload.revision < latestRecordingRevisionRef.current) return;
+          setFailure(null);
+          setRetrying(false);
+          setProgressMessage(null);
+          transition("no_speech");
+        }),
         listen<number>("audio-level", (event) => {
         const level = Number.isFinite(event.payload) ? Math.max(0, Math.min(1, event.payload)) : 0;
         setAudioLevel((previous) => Math.abs(previous - level) < 0.005 ? previous : level);
@@ -176,7 +184,7 @@ export function GadgetApp() {
         if (event.payload.active) {
           transition("processing");
         } else if (["processing", "processing_long", "stopping"].includes(stateRef.current)) {
-          setFailure({ id: "", message: "Nenhuma fala foi detectada na gravação.", canRetry: false });
+          setFailure({ id: "", message: "Não foi possível concluir o ditado.", canRetry: false });
           transition("error");
         }
         }),
@@ -268,8 +276,8 @@ export function GadgetApp() {
     const handleNativeRepaint = () => {
       window.requestAnimationFrame(() => reportRendered(true));
     };
-    window.addEventListener("haumea-gadget-repaint", handleNativeRepaint);
-    return () => window.removeEventListener("haumea-gadget-repaint", handleNativeRepaint);
+    window.addEventListener("sonora-gadget-repaint", handleNativeRepaint);
+    return () => window.removeEventListener("sonora-gadget-repaint", handleNativeRepaint);
   }, [reportRendered]);
 
   const startOrStop = async () => {
@@ -363,18 +371,18 @@ interface GadgetPillProps {
 
 function GadgetPill({ state, level, shortcut, failure, retrying, progressMessage, onToggle, onCancel, onRetry, onFallback }: GadgetPillProps) {
   if (state === "idle") {
-    return <button type="button" onClick={onToggle} className="haumea-bar haumea-bar--idle" aria-label={`Iniciar ditado. ${shortcut}`}><MiniWave /></button>;
+    return <button type="button" onClick={onToggle} className="sonora-bar sonora-bar--idle" aria-label={`Iniciar ditado. ${shortcut}`}><MiniWave /></button>;
   }
   if (state === "hover") {
     return (
-      <button type="button" onClick={onToggle} className="haumea-bar haumea-bar--hover" aria-label={`Iniciar ditado. ${shortcut}`}>
-        <MiniWave /><Mic className="h-[15px] w-[15px]" aria-hidden /><span className="haumea-bar__shortcut">{shortcut}</span>
+      <button type="button" onClick={onToggle} className="sonora-bar sonora-bar--hover" aria-label={`Iniciar ditado. ${shortcut}`}>
+        <MiniWave /><Mic className="h-[15px] w-[15px]" aria-hidden /><span className="sonora-bar__shortcut">{shortcut}</span>
       </button>
     );
   }
   if (state === "recording") {
     return (
-      <div className="haumea-bar haumea-bar--recording" role="status">
+      <div className="sonora-bar sonora-bar--recording" role="status">
         <BarButton label="Cancelar e descartar" onClick={onCancel}><X className="h-[17px] w-[17px]" strokeWidth={2} /></BarButton>
         <Waveform level={level} />
         <BarButton label="Parar e transcrever" onClick={onToggle} primary><Square className="h-[11px] w-[11px] fill-current" strokeWidth={1.5} /></BarButton>
@@ -383,35 +391,38 @@ function GadgetPill({ state, level, shortcut, failure, retrying, progressMessage
   }
   if (state === "processing" || state === "processing_long") {
     return (
-      <div className={`haumea-bar ${state === "processing" ? "haumea-bar--processing" : "haumea-bar--processing-long"}`} role="status">
+      <div className={`sonora-bar ${state === "processing" ? "sonora-bar--processing" : "sonora-bar--processing-long"}`} role="status">
         <ProcessingDots /><BarButton label="Cancelar processamento" onClick={onCancel}><X className="h-4 w-4" /></BarButton>
-        {showsProcessingLabel(state) && <span className="haumea-bar__status">{retrying ? "Tentando novamente…" : progressMessage || "Transcrevendo…"}</span>}
+        {showsProcessingLabel(state) && <span className="sonora-bar__status">{retrying ? "Tentando novamente…" : progressMessage || "Transcrevendo…"}</span>}
       </div>
     );
   }
   if (state === "success") {
-    return <div className="haumea-bar haumea-bar--success" role="status" aria-label="Texto disponível"><Check className="h-[17px] w-[17px]" strokeWidth={2.2} aria-hidden /></div>;
+    return <div className="sonora-bar sonora-bar--success" role="status" aria-label="Texto disponível"><Check className="h-[17px] w-[17px]" strokeWidth={2.2} aria-hidden /></div>;
+  }
+  if (state === "no_speech") {
+    return <div className="sonora-bar sonora-bar--no-speech" role="status" aria-live="polite"><MicOff className="h-4 w-4 shrink-0" aria-hidden /><span>Nenhuma voz encontrada</span></div>;
   }
   if (state === "error") {
     return (
-      <div className="haumea-bar haumea-bar--error" role="alert" title={failure?.message}>
+      <div className="sonora-bar sonora-bar--error" role="alert" title={failure?.message}>
         <AlertCircle className="h-4 w-4 shrink-0 text-[#ffaaa3]" aria-hidden />
-        <span className="haumea-bar__error-text">{failure?.message || "Não foi possível concluir"}</span>
+        <span className="sonora-bar__error-text">{failure?.message || "Não foi possível concluir"}</span>
         {failure?.canRetry ? (
-          <><button type="button" onClick={onRetry} disabled={retrying} className="haumea-bar__retry" aria-label="Tentar transcrever o áudio salvo novamente">
+          <><button type="button" onClick={onRetry} disabled={retrying} className="sonora-bar__retry" aria-label="Tentar transcrever o áudio salvo novamente">
             <RefreshCw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} aria-hidden /><span>Tentar novamente</span>
-          </button><button type="button" onClick={onFallback} disabled={retrying} className="haumea-bar__retry" aria-label="Usar uma rota alternativa de transcrição"><span>Usar fallback</span></button></>
+          </button><button type="button" onClick={onFallback} disabled={retrying} className="sonora-bar__retry" aria-label="Usar uma rota alternativa de transcrição"><span>Usar fallback</span></button></>
         ) : (
-          <button type="button" onClick={onCancel} className="haumea-bar__dismiss" aria-label="Dispensar erro"><X className="h-3.5 w-3.5" aria-hidden /></button>
+          <button type="button" onClick={onCancel} className="sonora-bar__dismiss" aria-label="Dispensar erro"><X className="h-3.5 w-3.5" aria-hidden /></button>
         )}
       </div>
     );
   }
-  return <div className="haumea-bar haumea-bar--activity" role="status"><ActivityMark settled={state === "stopping"} /></div>;
+  return <div className="sonora-bar sonora-bar--activity" role="status"><ActivityMark settled={state === "stopping"} /></div>;
 }
 
 function BarButton({ label, onClick, primary = false, children }: { label: string; onClick: () => void; primary?: boolean; children: React.ReactNode }) {
-  return <button type="button" onClick={onClick} className={`haumea-bar__control ${primary ? "haumea-bar__control--primary" : ""}`} aria-label={label}>{children}</button>;
+  return <button type="button" onClick={onClick} className={`sonora-bar__control ${primary ? "sonora-bar__control--primary" : ""}`} aria-label={label}>{children}</button>;
 }
 
 function ActivityMark({ settled = false }: { settled?: boolean }) {
@@ -465,10 +476,10 @@ function Waveform({ level }: { level: number }) {
 /** Deterministic visual QA surface; reachable only from the Vite dev build. */
 export function GadgetPreviewApp() {
   const [level, setLevel] = useState(0.66);
-  const states: Array<Exclude<GadgetState, "hidden">> = ["idle", "hover", "initializing", "recording", "processing", "processing_long", "success", "error"];
+  const states: Array<Exclude<GadgetState, "hidden">> = ["idle", "hover", "initializing", "recording", "processing", "processing_long", "success", "no_speech", "error"];
   return (
     <main className="gadget-preview">
-      <header><h1>Haumea Bar — visual QA</h1><label>RMS<input type="range" min="0" max="1" step="0.01" value={level} onChange={(event) => setLevel(Number(event.target.value))} /></label></header>
+      <header><h1>Sonora Bar — visual QA</h1><label>RMS<input type="range" min="0" max="1" step="0.01" value={level} onChange={(event) => setLevel(Number(event.target.value))} /></label></header>
       <div className="gadget-preview__grid">
         {states.map((previewState) => (
           <figure key={previewState}>

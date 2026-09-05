@@ -22,7 +22,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("Diretório de dados inválido")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let temp = parent.join(format!(
-        ".haumea-write-{}-{}.tmp",
+        ".sonora-write-{}-{}.tmp",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn corrupt_store_is_preserved_and_previous_write_is_recoverable() {
         let dir = std::env::temp_dir().join(format!(
-            "haumea-storage-test-{}-{}",
+            "sonora-storage-test-{}-{}",
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));

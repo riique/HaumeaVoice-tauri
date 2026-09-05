@@ -182,7 +182,7 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
                 status.session_id.as_deref().unwrap_or("-")
             );
             state.clear_recording_start();
-            // A global shortcut does not activate Haumea, so this captures the
+            // A global shortcut does not activate Sonora, so this captures the
             // exact app/window where the user requested stop. Delivery remains
             // tied to this HWND even when it lives on another monitor.
             let delivery_target = crate::context::capture_foreground_target();

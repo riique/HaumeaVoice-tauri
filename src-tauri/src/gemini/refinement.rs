@@ -30,7 +30,7 @@ pub async fn refine_with_audio(req: RefineRequest) -> Result<GeminiGenerateResul
     let t0 = std::time::Instant::now();
     let mime = mime_for_ext(&req.ext);
     let display = if req.display_name.trim().is_empty() {
-        format!("haumea-refine.{}", req.ext)
+        format!("sonora-refine.{}", req.ext)
     } else {
         req.display_name.clone()
     };

@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     #[test]
     fn incremental_capture_survives_without_transcription() {
-        let directory = std::env::temp_dir().join(format!("haumea-spool-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("sonora-spool-{}", std::process::id()));
         let spool = CaptureSpool::start(directory.clone(), "synthetic", 16000).unwrap();
         spool.push(&[1, -2, 300]).unwrap();
         spool.push(&[-100]).unwrap();

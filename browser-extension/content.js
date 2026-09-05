@@ -59,7 +59,7 @@ function nearbyText() {
 
 // Collection happens only in response to a short-lived native request.
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (sender.id !== chrome.runtime.id || message?.type !== "haumea-capture") return;
+  if (sender.id !== chrome.runtime.id || message?.type !== "sonora-capture") return;
   const request = message.request;
   if (!request?.request_id || Date.now() > request.expires_at_ms || !document.hasFocus() || document.visibilityState !== "visible") return;
   if (!/^https?:$/.test(location.protocol)) return;

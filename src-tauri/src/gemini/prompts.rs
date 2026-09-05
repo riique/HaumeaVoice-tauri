@@ -750,10 +750,10 @@ mod tests {
 
     #[test]
     fn precise_prompt_audio_primary_and_vocab() {
-        let p = precise_refinement_prompt("hipótese whisper", "- Haumea [application]", false);
+        let p = precise_refinement_prompt("hipótese whisper", "- Sonora [application]", false);
         assert!(p.user_prompt.contains("fonte autoritativa"));
         assert!(p.user_prompt.contains("hipótese whisper"));
-        assert!(p.user_prompt.contains("Haumea"));
+        assert!(p.user_prompt.contains("Sonora"));
         assert!(!p.system_instruction.contains("hipótese whisper"));
         assert!(!p.system_instruction.contains("Tipo de conteúdo"));
         assert_eq!(PRECISE_PROMPT_VERSION, "precise-v3-2026-08");

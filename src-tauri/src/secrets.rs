@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn private_archive_is_verified_before_original_is_removed() {
         let root =
-            std::env::temp_dir().join(format!("haumea-private-archive-{}", std::process::id()));
+            std::env::temp_dir().join(format!("sonora-private-archive-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let source = root.join("old.json");
         let target = root.join("recovery.dpapi");

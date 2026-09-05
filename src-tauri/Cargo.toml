@@ -1,13 +1,13 @@
 [package]
-name = "haumea-voice"
-version = "1.0.34"
-description = "Haumea Voice desktop application"
-authors = ["Haumea Voice"]
+name = "sonora"
+version = "2.0.0"
+description = "Sonora desktop application"
+authors = ["Sonora"]
 edition = "2021"
 rust-version = "1.97"
 
 [lib]
-name = "haumea_voice_lib"
+name = "sonora_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

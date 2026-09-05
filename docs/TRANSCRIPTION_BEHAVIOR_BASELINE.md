@@ -1,10 +1,10 @@
 # Baseline de comportamento — Transcrição (Fase 00)
 
-Documento de referência do comportamento **atual** do Haumea Voice **antes** da migração para os novos modos.  
-Nenhuma alteração funcional foi feita nesta fase. Validado contra `APP_CONTEXT_HAUMEA_VOICE.md` e builds locais.
+Documento de referência do comportamento **atual** do Sonora **antes** da migração para os novos modos.
+Nenhuma alteração funcional foi feita nesta fase. Validado contra `APP_CONTEXT_SONORA.md` e builds locais.
 
-**Versão do app:** 1.0.3  
-**Data do baseline:** 2026-07-18  
+**Versão do app:** 1.0.3
+**Data do baseline:** 2026-07-18
 **Identificador:** `com.haumeavoice.app`
 
 ---
@@ -33,7 +33,7 @@ gadget_placement_tests::clamps_negative_edges_without_forcing_the_primary_monito
 
 ---
 
-## 2. Validação do `APP_CONTEXT_HAUMEA_VOICE.md`
+## 2. Validação do `APP_CONTEXT_SONORA.md`
 
 | Afirmação do relatório | Status |
 |------------------------|--------|
@@ -139,7 +139,7 @@ Nenhuma divergência material encontrada entre o relatório e o código nesta fa
 
 ### Deepgram
 
-- Batch: `POST https://api.deepgram.com/v1/listen` (`nova-3`, `language=pt-BR`, `keyterm=Haumea`)
+- Batch: `POST https://api.deepgram.com/v1/listen` (`nova-3`, `language=pt-BR`, `keyterm=Sonora`)
 - Live WS: `wss://api.deepgram.com/v1/listen` (`interim_results=false`)
 
 ### Gemini (apenas pronúncia)

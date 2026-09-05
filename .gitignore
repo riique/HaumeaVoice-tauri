@@ -14,6 +14,7 @@ src-tauri/check_err.txt
 .serena/memories/
 nul
 *.log
+.sonora-release/
 
 # Environment and editor files
 .env

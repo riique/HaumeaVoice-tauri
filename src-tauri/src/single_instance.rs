@@ -28,7 +28,7 @@ pub fn acquire() -> Result<Option<Instance>, String> {
         let existing = GetLastError() == ERROR_ALREADY_EXISTS;
         let instance = Instance(mutex);
         if existing {
-            if let Ok(window) = FindWindowW(None, w!("Haumea Voice")) {
+            if let Ok(window) = FindWindowW(None, w!("Sonora")) {
                 let _ = ShowWindow(window, SW_RESTORE);
                 let _ = SetForegroundWindow(window);
             }

@@ -1,4 +1,4 @@
-# Checklist de teste manual — Haumea Voice (pós-migração)
+# Checklist de teste manual — Sonora (pós-migração)
 
 Marque cada item após validar em build local (`cargo tauri dev` ou exe de debug).
 

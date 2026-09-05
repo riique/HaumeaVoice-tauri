@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-08-25T14:48:45.0404212-03:00",
-  "title": "Design System: Haumea Voice",
+  "title": "Design System: Sonora",
   "extensions": {
     "colorMeta": {
       "canvas": { "role": "neutral", "displayName": "Warm Canvas" },
@@ -27,14 +27,14 @@
       "mono": { "displayName": "Technical Mono", "purpose": "Paths, models, clocks and diagnostics." }
     },
     "shadows": [
-      { "name": "float", "value": "0 18px 44px -18px rgba(20, 20, 18, 0.42), 0 4px 14px -6px rgba(20, 20, 18, 0.24)", "purpose": "Separate the always-on-top Haumea Bar from arbitrary desktop content." },
+      { "name": "float", "value": "0 18px 44px -18px rgba(20, 20, 18, 0.42), 0 4px 14px -6px rgba(20, 20, 18, 0.24)", "purpose": "Separate the always-on-top Sonora Bar from arbitrary desktop content." },
       { "name": "menu", "value": "0 18px 48px -20px rgba(20, 20, 18, 0.28)", "purpose": "Open contextual menus only." },
       { "name": "keycap", "value": "0 1px 0 #c8c8c1", "purpose": "Give keyboard shortcut keys a restrained physical edge." },
       { "name": "toggle-knob", "value": "0 1px 3px rgba(0, 0, 0, 0.24)", "purpose": "Separate the white toggle knob from its track." }
     ],
     "motion": [
       { "name": "state-color", "value": "150ms", "purpose": "Button, navigation, field and toggle state changes." },
-      { "name": "gadget-enter", "value": "180ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Haumea Bar state entry with opacity, translate, scale and brief blur." },
+      { "name": "gadget-enter", "value": "180ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Sonora Bar state entry with opacity, translate, scale and brief blur." },
       { "name": "quiet-pulse", "value": "1.2s ease-in-out infinite", "purpose": "Recording and processing status only." },
       { "name": "meter-width", "value": "75ms", "purpose": "Microphone input level response." }
     ],
@@ -117,7 +117,7 @@
       "css": ".ds-kbd-combo { display:inline-flex; align-items:center; gap:6px; font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif; } .ds-kbd { display:inline-flex; min-width:28px; align-items:center; justify-content:center; border:1px solid #d5d5cf; border-radius:7px; background:#f7f7f4; color:#444540; padding:4px 8px; box-shadow:0 1px 0 #c8c8c1; font:500 11px/16px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif; } .ds-kbd-plus { color:#999a93; font-size:11px; }"
     },
     {
-      "name": "Haumea Bar",
+      "name": "Sonora Bar",
       "kind": "custom",
       "refersTo": "gadget",
       "description": "Signature always-on-top dictation control in its recording state.",
@@ -127,13 +127,13 @@
   ],
   "narrative": {
     "northStar": "Quiet by default",
-    "overview": "Haumea Voice é um utilitário Windows que deve desaparecer no fluxo de trabalho. A janela principal organiza capacidade técnica com densidade de operação, mas sem se apresentar como dashboard: hierarquia vem de espaço, tipografia, divisores finos e divulgação progressiva.\n\nO mundo visual é light-first e quase monocromático. Warm white, branco, near-black e cinzas neutros sustentam toda a interface; cor aparece apenas quando um estado real precisa ser reconhecido. A exceção memorável é o Haumea Bar, uma pílula preta compacta que se expande conforme gravação, processamento, sucesso ou falha exigem informação.",
+    "overview": "Sonora é um utilitário Windows que deve desaparecer no fluxo de trabalho. A janela principal organiza capacidade técnica com densidade de operação, mas sem se apresentar como dashboard: hierarquia vem de espaço, tipografia, divisores finos e divulgação progressiva.\n\nO mundo visual é light-first e quase monocromático. Warm white, branco, near-black e cinzas neutros sustentam toda a interface; cor aparece apenas quando um estado real precisa ser reconhecido. A exceção memorável é o Sonora Bar, uma pílula preta compacta que se expande conforme gravação, processamento, sucesso ou falha exigem informação.",
     "keyCharacteristics": [
       "Utilitário desktop-native, silencioso e orientado à tarefa.",
       "Densidade Operate com controles compactos e áreas de trabalho legíveis.",
       "Superfícies flat-by-default, separadas por tom e hairlines.",
       "Cor reservada a estados semânticos.",
-      "Haumea Bar preto como assinatura recorrente e responsiva ao estado."
+      "Sonora Bar preto como assinatura recorrente e responsiva ao estado."
     ],
     "rules": [
       { "name": "The Semantic Color Rule", "body": "Fora dos neutros, cor só comunica um estado real; nunca funciona como decoração, branding ornamental ou preenchimento de seção.", "section": "colors" },
@@ -144,7 +144,7 @@
       "Do mantenha a maior parte de cada tela em Warm Canvas, Working White, near-black e cinzas neutros.",
       "Do agrupe informação por espaço, hairlines e divulgação progressiva antes de criar novos containers.",
       "Do preserve controles compactos, foco visível, estados disabled/loading e hit targets adequados.",
-      "Do deixe o Haumea Bar expandir somente quando o estado exige texto, waveform, recuperação ou confirmação.",
+      "Do deixe o Sonora Bar expandir somente quando o estado exige texto, waveform, recuperação ou confirmação.",
       "Do use cor apenas para sucesso, gravação, aviso, erro ou destruição reais."
     ],
     "donts": [

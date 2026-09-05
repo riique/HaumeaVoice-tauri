@@ -132,14 +132,14 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = r#"Você é um validador semântico de a
 ═══ 3. RECONCILIAÇÃO DAS TRANSCRIÇÕES ═══
 - Compare [WHISPER_RAW] e [DEEPGRAM_RAW], corrija falhas fonéticas e mescle de forma inteligente em um único melhor texto.
 - Priorize do [WHISPER_RAW]: estrutura de código, jargões técnicos e termos de tecnologia (ex.: useEffect, gRPC, Tokio, RwLock).
-- Priorize do [DEEPGRAM_RAW]: numerais, unidades de medida (ex.: 40 mg) e o termo "Haumea".
+- Priorize do [DEEPGRAM_RAW]: numerais, unidades de medida (ex.: 40 mg) e o termo "Sonora".
 - Se só uma transcrição estiver presente/preenchida, use-a normalmente.
 
 ═══ 4. GLOSSÁRIO DE TERMOS CANÔNICOS ═══
 Quando um termo transcrito for CLARAMENTE uma corrupção fonética/ortográfica de um dos termos abaixo, substitua pela grafia oficial. Só troque quando o contexto encaixar; na dúvida, mantenha o original (NÃO force termos do glossário onde não pertencem).
 Modelos e empresas de IA (grafia oficial): ChatGPT, GPT, OpenAI; Claude, Claude Opus, Claude Sonnet, Claude Haiku, Anthropic; Gemini, Google; DeepSeek; GLM; Gemma; Nemotron.
 Exemplos: "chat gpt"/"chatgipiti" → ChatGPT; "clod opus"/"cláudio opus" → Claude Opus; "deep sick"/"dipsik" → DeepSeek; "guemma" → Gemma; "nemotron" → Nemotron.
-- Sempre substitua "HowMeia" por "Haumea", preservando a grafia oficial do nome.
+- Use "Sonora" para o nome do aplicativo quando esse contexto estiver claro; preserve o adjetivo comum em expressões como "trilha sonora".
 
 ═══ 5. NORMALIZAÇÃO MATEMÁTICA/CIENTÍFICA E UNIDADES ═══
 - Potências de base dez ditas por extenso → notação compacta com expoente sobrescrito. Ex.: "dez elevado a menos sete" → 10⁻⁷; "dez à sexta potência negativa" → 10⁻⁶; "dez a menos oito" → 10⁻⁸.
@@ -679,7 +679,7 @@ mod persistence_tests {
     use super::*;
     #[test]
     fn concurrent_preferences_keep_both_changes_and_reject_corruption() {
-        let dir = std::env::temp_dir().join(format!("haumea-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sonora-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("settings.json");
         std::thread::scope(|scope| {

@@ -764,7 +764,7 @@ mod tests {
             "audio/wav",
             "AQID",
             Some("estilo confiável"),
-            Some(vec!["Haumea".into(), "Tauri".into()]),
+            Some(vec!["Sonora".into(), "Tauri".into()]),
         );
         let val = serde_json::to_value(&req).unwrap();
 
@@ -778,7 +778,7 @@ mod tests {
         assert!(val["generation_config"]["transcription_config"]["language_codes"].is_null());
         assert_eq!(
             val["generation_config"]["transcription_config"]["custom_vocabulary"],
-            serde_json::json!(["Haumea", "Tauri"])
+            serde_json::json!(["Sonora", "Tauri"])
         );
         assert_eq!(
             val["generation_config"]["transcription_config"]["mode"]["type"],

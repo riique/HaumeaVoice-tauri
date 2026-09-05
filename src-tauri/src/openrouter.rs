@@ -15,8 +15,8 @@ use std::{
 const CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const TRANSCRIPTIONS_URL: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
 const STT_MODELS_URL: &str = "https://openrouter.ai/api/v1/models?output_modalities=transcription";
-const APP_REFERER: &str = "https://haumea.fun/haumea-voice";
-const APP_TITLE: &str = "Haumea Voice";
+const APP_REFERER: &str = "https://github.com/riique/Sonora";
+const APP_TITLE: &str = "Sonora";
 static STT_MODEL_IDS: tokio::sync::OnceCell<HashSet<String>> = tokio::sync::OnceCell::const_new();
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn attributes_requests_to_haumea_voice() {
+    fn attributes_requests_to_sonora() {
         let headers = app_attribution_headers();
         assert_eq!(headers.get(REFERER).unwrap(), APP_REFERER);
         assert_eq!(headers.get("X-OpenRouter-Title").unwrap(), APP_TITLE);

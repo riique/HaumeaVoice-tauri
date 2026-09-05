@@ -70,7 +70,7 @@ export function AtalhosView() {
 
   return (
     <div className="space-y-8">
-      <PageHeader title="Atalhos" description="Personalize os atalhos globais que controlam o Haumea em qualquer aplicativo." />
+      <PageHeader title="Atalhos" description="Personalize os atalhos globais que controlam o Sonora em qualquer aplicativo." />
       {error && <ErrorState>{error}</ErrorState>}
       <section aria-labelledby="dictation-shortcuts">
         <h2 id="dictation-shortcuts" className="section-title border-b border-line pb-3">Ditado</h2>
@@ -115,7 +115,7 @@ export function AtalhosView() {
             );
           })}
         </div>
-        <p className="border-t border-line pt-4 text-[12px] text-muted">Os atalhos funcionam globalmente enquanto o Haumea estiver em execução. Pressione Esc para cancelar uma captura.</p>
+        <p className="border-t border-line pt-4 text-[12px] text-muted">Os atalhos funcionam globalmente enquanto o Sonora estiver em execução. Pressione Esc para cancelar uma captura.</p>
       </section>
     </div>
   );

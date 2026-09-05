@@ -140,7 +140,7 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
   return (
     <div>
       <PageHeader
-        title="Haumea"
+        title="Sonora"
         description="Comece a falar em qualquer aplicativo com o atalho global."
         action={<KbdCombo keys={toggleKeys} />}
       />

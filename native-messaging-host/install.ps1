@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $resolvedExecutable = (Resolve-Path -LiteralPath $ExecutablePath).Path
-$targetDirectory = Join-Path $env:LOCALAPPDATA 'HaumeaVoice\NativeMessaging'
+$targetDirectory = Join-Path $env:LOCALAPPDATA 'Sonora\NativeMessaging'
 $targetManifest = Join-Path $targetDirectory 'com.haumeavoice.context.json'
 $template = Join-Path $PSScriptRoot 'com.haumeavoice.context.json.template'
 

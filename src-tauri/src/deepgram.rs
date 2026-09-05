@@ -19,7 +19,7 @@
 //! Both modes return the same type of raw acoustic string so the rest of
 //! the pipeline (sanitizer → clipboard → history) is mode-agnostic.
 //!
-//! The request is configured with a K-Term (`Haumea`) that biases the
+//! The request is configured with a K-Term (`Sonora`) that biases the
 //! acoustic model toward the product proper noun.
 
 use crate::models::DeepgramMode;
@@ -43,8 +43,8 @@ const DEEPGRAM_WS_BASE_URL: &str = "wss://api.deepgram.com/v1/listen";
 
 /// K-Term injected into every Deepgram request. Deepgram weights the
 /// supplied term higher during decoding, which measurably reduces
-/// substitution errors on the "Haumea" proper noun.
-const KEYTERM: &str = "Haumea";
+/// substitution errors on the "Sonora" proper noun.
+const KEYTERM: &str = "Sonora";
 
 /// Soft timeout for the HTTP batch exchange. Deepgram typically answers a
 /// short clip in well under five seconds, so thirty seconds gives ample
@@ -485,7 +485,7 @@ pub async fn transcribe_with_keyterms(
 /// latência-previsível profile (pt-BR fixed, no smart_format / measurements).
 ///
 /// `extra_keyterms` are optional user vocabulary canonicals (in addition to
-/// the built-in product keyterm "Haumea").
+/// the built-in product keyterm "Sonora").
 fn build_batch_request_url(extra_keyterms: &[String]) -> String {
     let mut params = vec![
         "model=nova-3".to_string(),

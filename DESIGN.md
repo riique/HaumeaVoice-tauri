@@ -1,5 +1,5 @@
 ---
-name: Haumea Voice
+name: Sonora
 description: Quiet Windows utility for fast, recoverable dictation.
 colors:
   canvas: "#f7f7f4"
@@ -131,15 +131,21 @@ components:
     height: "44px"
 ---
 
-# Design System: Haumea Voice
+# Design System: Sonora
 
 ## Overview
 
+### Insights no Sonora v2.0
+
+“Sua voz” usa leitura breve e divulgação progressiva: um retrato, uma expressão, até três assuntos e três hábitos. Confiança numérica, siglas acústicas, detalhes de geração e evidências não aparecem na visão inicial. Preferências e medições permanecem acessíveis por teclado nos detalhes. O retrato continua opcional e confirma o envio antes da geração.
+
+A barra usa um estado neutro para “Nenhuma voz encontrada”, com retorno automático após 3,2 segundos. Silêncio não recebe aparência de erro nem ações de retranscrição.
+
 **Creative North Star: "Quiet by default"**
 
-Haumea Voice é um utilitário Windows que deve desaparecer no fluxo de trabalho. A janela principal organiza capacidade técnica com densidade de operação, mas sem se apresentar como dashboard: hierarquia vem de espaço, tipografia, divisores finos e divulgação progressiva.
+Sonora é um utilitário Windows que deve desaparecer no fluxo de trabalho. A janela principal organiza capacidade técnica com densidade de operação, mas sem se apresentar como dashboard: hierarquia vem de espaço, tipografia, divisores finos e divulgação progressiva.
 
-O mundo visual é light-first e quase monocromático. Warm white, branco, near-black e cinzas neutros sustentam toda a interface; cor aparece apenas quando um estado real precisa ser reconhecido. A exceção memorável é o Haumea Bar, uma pílula preta compacta que se expande conforme gravação, processamento, sucesso ou falha exigem informação.
+O mundo visual é light-first e quase monocromático. Warm white, branco, near-black e cinzas neutros sustentam toda a interface; cor aparece apenas quando um estado real precisa ser reconhecido. A exceção memorável é o Sonora Bar, uma pílula preta compacta que se expande conforme gravação, processamento, sucesso ou falha exigem informação.
 
 **Key Characteristics:**
 
@@ -147,7 +153,7 @@ O mundo visual é light-first e quase monocromático. Warm white, branco, near-b
 - Densidade Operate com controles compactos e áreas de trabalho legíveis.
 - Superfícies flat-by-default, separadas por tom e hairlines.
 - Cor reservada a estados semânticos.
-- Haumea Bar preto como assinatura recorrente e responsiva ao estado.
+- Sonora Bar preto como assinatura recorrente e responsiva ao estado.
 
 ## Colors
 
@@ -171,7 +177,7 @@ A paleta combina papéis quentes e neutros com tinta near-black; nenhuma cor dec
 - **Near-black Ink:** texto principal e ícones de maior ênfase.
 - **Muted Graphite:** descrições, metadados e navegação inativa.
 - **Hairline Gray:** bordas, regras e divisores; a versão forte aparece em hover ou em limites que precisam de definição adicional.
-- **Gadget Black:** corpo da Haumea Bar, independente do canvas claro.
+- **Gadget Black:** corpo da Sonora Bar, independente do canvas claro.
 
 ### Named Rules
 
@@ -210,11 +216,11 @@ Em 1180px, a sidebar reduz de 216px para 76px e esconde labels; a navegação in
 
 ## Elevation & Depth
 
-O sistema é flat-by-default. Canvas, sidebar e superfície branca criam profundidade por diferença tonal, bordas de 1px e divisores; sombras ficam restritas a elementos que realmente flutuam, como menus e a Haumea Bar. Teclas e o knob do toggle recebem microelevação tátil, não decoração ambiente.
+O sistema é flat-by-default. Canvas, sidebar e superfície branca criam profundidade por diferença tonal, bordas de 1px e divisores; sombras ficam restritas a elementos que realmente flutuam, como menus e a Sonora Bar. Teclas e o knob do toggle recebem microelevação tátil, não decoração ambiente.
 
 ### Shadow Vocabulary
 
-- **Floating gadget:** sombra ampla em duas camadas para separar a Haumea Bar de qualquer aplicativo sob o overlay.
+- **Floating gadget:** sombra ampla em duas camadas para separar a Sonora Bar de qualquer aplicativo sob o overlay.
 - **Menu:** sombra difusa somente enquanto o menu está aberto.
 - **Keycap:** linha inferior de 1px para sugerir uma tecla física.
 - **Toggle knob:** sombra curta para separar o knob branco do trilho.
@@ -225,7 +231,7 @@ O sistema é flat-by-default. Canvas, sidebar e superfície branca criam profund
 
 ## Shapes
 
-Controles usam cantos compactos entre 8px e 10px; menus usam 12px e superfícies principais 14px. Tags pequenas podem usar 5–7px. A geometria permanece suavemente arredondada, nunca inflada: pílulas completas são reservadas ao Haumea Bar, toggles, indicadores e ações circulares dentro do gadget.
+Controles usam cantos compactos entre 8px e 10px; menus usam 12px e superfícies principais 14px. Tags pequenas podem usar 5–7px. A geometria permanece suavemente arredondada, nunca inflada: pílulas completas são reservadas ao Sonora Bar, toggles, indicadores e ações circulares dentro do gadget.
 
 Bordas são hairlines neutras. Containers extensos podem usar apenas bordas horizontais e divisores quando um cartão fechado adicionaria peso desnecessário.
 
@@ -267,7 +273,7 @@ O trilho tem 40×24px e forma de pílula; desligado usa cinza médio e ligado us
 
 Tecla compacta com fundo Warm Canvas, borda, raio de 7px, label de 11px e uma linha inferior de 1px. Combinações usam sinais de adição discretos, nunca uma caixa única para toda a sequência.
 
-### Haumea Bar
+### Sonora Bar
 
 A assinatura do sistema é uma pílula preta de 44px de altura. O estado idle pode medir apenas 44px ou 72px; estados informativos expandem horizontalmente conforme o conteúdo. O waveform branco responde ao RMS real, vermelho aparece durante gravação, e os estados entram em 180ms com easing de desaceleração. A barra não ganha chrome, cabeçalho, gradiente ou painel auxiliar.
 
@@ -278,7 +284,7 @@ A assinatura do sistema é uma pílula preta de 44px de altura. O estado idle po
 - **Do** mantenha a maior parte de cada tela em Warm Canvas, Working White, near-black e cinzas neutros.
 - **Do** agrupe informação por espaço, hairlines e divulgação progressiva antes de criar novos containers.
 - **Do** preserve controles compactos, foco visível, estados disabled/loading e hit targets adequados.
-- **Do** deixe o Haumea Bar expandir somente quando o estado exige texto, waveform, recuperação ou confirmação.
+- **Do** deixe o Sonora Bar expandir somente quando o estado exige texto, waveform, recuperação ou confirmação.
 - **Do** use cor apenas para sucesso, gravação, aviso, erro ou destruição reais.
 
 ### Don't:

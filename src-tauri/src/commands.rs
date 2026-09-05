@@ -1434,7 +1434,7 @@ pub async fn get_autostart() -> Result<bool, CommandError> {
                 "query",
                 "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                 "/v",
-                "HaumeaVoice",
+                "Sonora",
             ])
             .output()
             .map_err(|e| CommandError::Internal(e.to_string()))?;
@@ -1474,7 +1474,7 @@ pub async fn set_autostart(enabled: bool) -> Result<(), CommandError> {
                     "add",
                     "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                     "/v",
-                    "HaumeaVoice",
+                    "Sonora",
                     "/t",
                     "REG_SZ",
                     "/d",
@@ -1495,7 +1495,7 @@ pub async fn set_autostart(enabled: bool) -> Result<(), CommandError> {
                     "delete",
                     "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                     "/v",
-                    "HaumeaVoice",
+                    "Sonora",
                     "/f",
                 ])
                 .status();

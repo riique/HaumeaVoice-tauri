@@ -12,7 +12,7 @@ Pessoas que usam Windows e precisam ditar texto com frequência em qualquer apli
 
 ## Product Purpose
 
-Haumea Voice transforma fala em texto por meio de um atalho global, cola o resultado no campo atualmente focado e mantém um hub local para gerenciar pipelines, histórico, arquivos, vocabulário, atalhos e preferências. O sucesso é um fluxo de ditado rápido, confiável e recuperável que exige pouca atenção visual durante o uso cotidiano.
+Sonora transforma fala em texto por meio de um atalho global, cola o resultado no campo atualmente focado e mantém um hub local para gerenciar pipelines, histórico, arquivos, vocabulário, atalhos e preferências. O sucesso é um fluxo de ditado rápido, confiável e recuperável que exige pouca atenção visual durante o uso cotidiano.
 
 ## Positioning
 
@@ -20,7 +20,7 @@ O aplicativo combina uma interface desktop local de gerenciamento com um gadget 
 
 ## Operating Context
 
-- O Haumea aberto funciona como hub de gerenciamento.
+- O Sonora aberto funciona como hub de gerenciamento.
 - O gadget e os atalhos globais funcionam como interface cotidiana de ditado.
 - `Ctrl+B` inicia ou encerra a gravação por padrão; `Ctrl+Q` cancela.
 - A transcrição de microfone cola o texto no campo focado; upload manual de arquivo não cola automaticamente.
@@ -39,7 +39,7 @@ O aplicativo combina uma interface desktop local de gerenciamento com um gadget 
 
 ## Brand Commitments
 
-- Nome do produto: Haumea Voice; a marca compacta pode usar “Haumea”.
+- Nome do produto: Sonora; a marca compacta pode usar “Sonora”.
 - Identidade própria, sem copiar marca, logo ou assets do Wispr Flow.
 - O redesign substitui integralmente o mundo dark/orange por uma interface light-first, quase monocromática, silenciosa, premium e desktop-native.
 - Princípio visual e comportamental vinculante: “Quiet by default. Information appears when needed.”

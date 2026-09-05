@@ -133,7 +133,7 @@ export function ConfiguracoesView() {
 
   return (
     <div className="settings-page space-y-7">
-      <PageHeader title="Configurações" description="Ajuste o Haumea para o seu fluxo de trabalho." />
+      <PageHeader title="Configurações" description="Ajuste o Sonora para o seu fluxo de trabalho." />
       <div className="settings-layout">
       <nav
         className="settings-nav scrollbar-thin"
@@ -245,7 +245,7 @@ function GeralTab() {
       <div className="divide-y divide-line">
         <Row
           title="Iniciar com o Windows"
-          description="Abre o Haumea Voice ao ligar o computador (em segundo plano se usar autostart)."
+          description="Abre o Sonora ao ligar o computador (em segundo plano se usar autostart)."
         >
           <Toggle
             label="Iniciar com o Windows"

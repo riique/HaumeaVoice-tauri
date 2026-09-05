@@ -84,7 +84,7 @@ pub fn select_gemini_audio_transport(
     }
 }
 
-/// Best-effort duration from a 16-bit mono PCM WAV (Haumea mic format).
+/// Best-effort duration from a 16-bit mono PCM WAV (Sonora mic format).
 /// Returns `None` if the buffer is not a parseable WAVE with data chunk.
 pub fn estimate_wav_duration_ms(bytes: &[u8]) -> Option<u64> {
     if bytes.len() < 44 {
