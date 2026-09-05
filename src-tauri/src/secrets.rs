@@ -1,76 +1,260 @@
-//! Persistent API key storage.
-//!
-//! The API keys entered in the settings screen are persisted to a JSON file
-//! (`api_keys.json`) inside the per-user Tauri app data directory so they
-//! survive an app restart or a machine reboot. Reads/writes are guarded by a
-//! process-wide `Mutex` so a save triggered from the UI cannot interleave with
-//! the load performed during startup.
-//!
-//! Note: the file is stored under the user's protected AppData directory but
-//! the keys themselves are written in plain text (no OS-keychain encryption).
-//! Windows Credential Manager would be preferable long-term; it was not swapped
-//! in during the transcription migration to avoid breaking existing installs
-//! mid-rollout. Documented as residual risk in the final migration report.
-
+//! User-scoped DPAPI credentials; the renderer receives opaque references only.
 use crate::models::ApiKeys;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use parking_lot::Mutex;
-use std::{fs, path::PathBuf, sync::OnceLock};
-
-static SECRETS_PATH: OnceLock<PathBuf> = OnceLock::new();
-static SECRETS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-/// Called once during app setup with the resolved `api_keys.json` path so
-/// every subsequent helper can read/write without threading the `AppHandle`
-/// through the command layer.
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::hash_map::RandomState,
+    fs,
+    hash::{BuildHasher, Hash, Hasher},
+    path::PathBuf,
+    sync::OnceLock,
+};
+static PATH: OnceLock<PathBuf> = OnceLock::new();
+static LOCK: Mutex<()> = Mutex::new(());
+static REFERENCES: OnceLock<RandomState> = OnceLock::new();
+#[derive(Serialize, Deserialize)]
+struct Envelope {
+    protection: String,
+    ciphertext: String,
+}
 pub fn init(file: PathBuf) {
-    let _ = SECRETS_PATH.set(file);
-    let _ = SECRETS_LOCK.set(Mutex::new(()));
+    let _ = PATH.set(file);
 }
 
-fn path() -> Option<&'static PathBuf> {
-    SECRETS_PATH.get()
-}
-
-fn lock() -> &'static Mutex<()> {
-    SECRETS_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-/// Reads the persisted API keys from disk. Returns the default (all `None`)
-/// when the file is missing or cannot be parsed, so a corrupted file never
-/// blocks startup.
-pub fn load() -> ApiKeys {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        return ApiKeys::default();
+#[cfg(windows)]
+fn crypt(bytes: &[u8], protect: bool) -> Result<Vec<u8>, String> {
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{LocalFree, HLOCAL},
+            Security::Cryptography::{
+                CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+            },
+        },
     };
-    match fs::read_to_string(file) {
-        Ok(contents) if !contents.trim().is_empty() => serde_json::from_str::<ApiKeys>(&contents)
-            .unwrap_or_default()
-            .normalized(),
-        _ => ApiKeys::default(),
-    }
-}
-
-/// Persists `keys` to disk, replacing any previous contents. Failures are
-/// logged but not propagated: the in-memory state has already been updated, so
-/// a failed write only means the keys won't survive the next restart.
-pub fn save(keys: &ApiKeys) {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        log::warn!("secrets: data directory not initialised, skipping save");
-        return;
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: u32::try_from(bytes.len()).map_err(|_| "Credenciais excedem o limite")?,
+        pbData: bytes.as_ptr().cast_mut(),
     };
-
-    if let Err(e) = fs::create_dir_all(file.parent().unwrap_or(file.as_path())) {
-        log::error!("secrets: could not create data dir: {}", e);
-        return;
-    }
-    match serde_json::to_string_pretty(keys) {
-        Ok(json) => {
-            if let Err(e) = fs::write(file, json) {
-                log::error!("secrets: failed to write file: {}", e);
-            }
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        let result = if protect {
+            CryptProtectData(
+                &input,
+                PCWSTR::null(),
+                None,
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        } else {
+            CryptUnprotectData(
+                &input,
+                None,
+                None,
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        result.map_err(|_| {
+            "Não foi possível acessar as credenciais protegidas desta conta Windows".to_string()
+        })?;
+        let value = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        for index in 0..output.cbData as usize {
+            std::ptr::write_volatile(output.pbData.add(index), 0);
         }
-        Err(e) => log::error!("secrets: failed to serialize: {}", e),
+        let _ = LocalFree(HLOCAL(output.pbData.cast()));
+        Ok(value)
+    }
+}
+#[cfg(not(windows))]
+fn crypt(_: &[u8], _: bool) -> Result<Vec<u8>, String> {
+    Err("Armazenamento seguro requer Windows nesta versão".into())
+}
+
+fn encoded(keys: &ApiKeys) -> Result<Vec<u8>, String> {
+    let mut plain = serde_json::to_vec(keys).map_err(|_| "Credenciais inválidas")?;
+    let encrypted = crypt(&plain, true);
+    plain.fill(0);
+    serde_json::to_vec(&Envelope {
+        protection: "dpapi-current-user-v1".into(),
+        ciphertext: STANDARD.encode(encrypted?),
+    })
+    .map_err(|_| "Falha ao proteger credenciais".into())
+}
+fn decoded(bytes: &[u8]) -> Result<ApiKeys, String> {
+    let envelope: Envelope =
+        serde_json::from_slice(bytes).map_err(|_| "Credenciais protegidas inválidas")?;
+    if envelope.protection != "dpapi-current-user-v1" {
+        return Err("Formato de proteção desconhecido".into());
+    }
+    let mut plain = crypt(
+        &STANDARD
+            .decode(envelope.ciphertext)
+            .map_err(|_| "Credenciais inválidas")?,
+        false,
+    )?;
+    let result = serde_json::from_slice::<ApiKeys>(&plain)
+        .map(ApiKeys::normalized)
+        .map_err(|_| "Credenciais protegidas inválidas".into());
+    plain.fill(0);
+    result
+}
+pub fn load() -> Result<ApiKeys, String> {
+    let _guard = LOCK.lock();
+    let file = PATH.get().ok_or("Diretório de credenciais indisponível")?;
+    let bytes = match fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ApiKeys::default()),
+        Err(_) => return Err("Não foi possível ler as credenciais".into()),
+    };
+    if serde_json::from_slice::<Envelope>(&bytes).is_ok() {
+        return decoded(&bytes);
+    }
+    let keys = serde_json::from_slice::<ApiKeys>(&bytes)
+        .map_err(|_| "Arquivo de credenciais inválido; restaure um backup")?
+        .normalized();
+    // Verify an encrypted recovery copy before replacing legacy plaintext.
+    let encrypted = encoded(&keys)?;
+    let recovery = file.with_extension("migration.dpapi");
+    crate::storage::atomic_write(&recovery, &encrypted)?;
+    let verified = decoded(&fs::read(&recovery).map_err(|_| "Falha ao verificar backup")?)?;
+    if serde_json::to_value(&verified).ok() != serde_json::to_value(&keys).ok() {
+        return Err("Backup de credenciais divergente".into());
+    }
+    let replacement = file.with_extension("encrypted.tmp");
+    crate::storage::atomic_write(&replacement, &encrypted)?;
+    fs::rename(replacement, file)
+        .map_err(|_| "Não foi possível concluir a migração das credenciais")?;
+    Ok(keys)
+}
+pub fn save(keys: &ApiKeys) -> Result<(), String> {
+    let _guard = LOCK.lock();
+    let file = PATH.get().ok_or("Diretório de credenciais indisponível")?;
+    if file.exists() {
+        decoded(&fs::read(file).map_err(|_| "Não foi possível ler as credenciais atuais")?)?;
+    }
+    crate::storage::atomic_write(file, &encoded(keys)?)
+}
+fn reference(provider: &str, key: &str) -> String {
+    let mut hash = REFERENCES.get_or_init(RandomState::new).build_hasher();
+    provider.hash(&mut hash);
+    key.hash(&mut hash);
+    format!("stored:{:016x}", hash.finish())
+}
+pub fn mask(keys: &ApiKeys) -> ApiKeys {
+    let map = |provider, values: &Vec<String>| {
+        values
+            .iter()
+            .map(|value| reference(provider, value))
+            .collect()
+    };
+    ApiKeys {
+        groq: map("groq", &keys.groq),
+        google: map("google", &keys.google),
+        deepgram: map("deepgram", &keys.deepgram),
+        openrouter: map("openrouter", &keys.openrouter),
+        meta: map("meta", &keys.meta),
+    }
+}
+pub fn resolve(
+    provider: &str,
+    values: Vec<String>,
+    existing: &[String],
+) -> Result<Vec<String>, String> {
+    values
+        .into_iter()
+        .map(|value| {
+            if value.starts_with("stored:") {
+                existing
+                    .iter()
+                    .find(|key| reference(provider, key) == value)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "As credenciais mudaram. Recarregue as configurações antes de salvar."
+                            .into()
+                    })
+            } else {
+                Ok(value)
+            }
+        })
+        .collect()
+}
+/// Preserve obsolete private data as a verified, user-bound encrypted recovery copy.
+pub fn archive_private_file(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    use std::io::Write;
+    let mut plain = fs::read(source).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let encrypted = crypt(&plain, true)?;
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(destination)
+            .map_err(|e| e.to_string())?;
+        file.write_all(&encrypted)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| e.to_string())?;
+        drop(file);
+        let mut verified = crypt(&fs::read(destination).map_err(|e| e.to_string())?, false)?;
+        let matches = verified == plain;
+        verified.fill(0);
+        if !matches {
+            return Err("A cópia protegida não passou na verificação".into());
+        }
+        fs::remove_file(source).map_err(|e| e.to_string())
+    })();
+    plain.fill(0);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn references_reject_stale_and_cross_provider_values() {
+        let keys = vec!["synthetic-test-credential".to_string()];
+        let token = reference("google", &keys[0]);
+        assert!(!token.contains(&keys[0]));
+        assert_eq!(resolve("google", vec![token.clone()], &keys).unwrap(), keys);
+        assert!(resolve("groq", vec![token.clone()], &keys).is_err());
+        assert!(resolve("google", vec![token], &[]).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn dpapi_round_trip_and_tampering() {
+        let bytes = b"synthetic-test-only";
+        let encrypted = crypt(bytes, true).unwrap();
+        assert_ne!(encrypted, bytes);
+        assert_eq!(crypt(&encrypted, false).unwrap(), bytes);
+        let mut altered = encrypted;
+        altered[0] ^= 1;
+        assert!(crypt(&altered, false).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn private_archive_is_verified_before_original_is_removed() {
+        let root =
+            std::env::temp_dir().join(format!("haumea-private-archive-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("old.json");
+        let target = root.join("recovery.dpapi");
+        fs::write(&source, b"synthetic private context").unwrap();
+        archive_private_file(&source, &target).unwrap();
+        assert!(!source.exists());
+        assert_eq!(
+            crypt(&fs::read(&target).unwrap(), false).unwrap(),
+            b"synthetic private context"
+        );
+        fs::write(&source, b"new synthetic context").unwrap();
+        assert!(archive_private_file(&source, &target).is_err());
+        assert!(source.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

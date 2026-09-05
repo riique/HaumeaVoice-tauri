@@ -366,11 +366,8 @@ pub fn extract_text(parsed: GenerateContentResponse) -> Result<String, String> {
     Ok(trimmed)
 }
 
-pub fn generate_url(model: &str, api_key: &str) -> String {
-    format!(
-        "{}/models/{}:generateContent?key={}",
-        API_ROOT, model, api_key
-    )
+pub fn generate_url(model: &str, _api_key: &str) -> String {
+    format!("{}/models/{}:generateContent", API_ROOT, model)
 }
 
 /// POST generateContent with a per-request timeout override.
@@ -402,15 +399,16 @@ pub async fn generate_content_with_model(
     let request = async {
         let response = client
             .post(url)
+            .header("x-goog-api-key", api_key)
             .json(effective_body)
             .send()
             .await
-            .map_err(|e| format!("falha na requisição ao Gemini: {}", e))?;
+            .map_err(|e| format!("falha na requisição ao Gemini: {}", e.without_url()))?;
         let status = response.status().as_u16();
         let body_text = response
             .text()
             .await
-            .map_err(|e| format!("falha ao ler a resposta do Gemini: {}", e))?;
+            .map_err(|e| format!("falha ao ler a resposta do Gemini: {}", e.without_url()))?;
         Ok::<_, String>((status, body_text))
     };
 
@@ -422,7 +420,7 @@ pub async fn generate_content_with_model(
     })??;
     let generate_ms = t0.elapsed().as_millis() as u64;
     if status != 200 {
-        return Err(format!("Gemini retornou status {}: {}", status, body_text));
+        return Err(format!("Gemini retornou HTTP {status}. Confira as credenciais, os limites e a disponibilidade do modelo."));
     }
 
     let parsed: GenerateContentResponse = serde_json::from_str(&body_text)
@@ -453,8 +451,8 @@ pub async fn generate_content_with_model(
     })
 }
 
-pub fn interactions_url(api_key: &str) -> String {
-    format!("{}/interactions?key={}", API_ROOT, api_key)
+pub fn interactions_url(_api_key: &str) -> String {
+    format!("{}/interactions", API_ROOT)
 }
 
 /// POST to the Gemini Interactions API (/v1beta/interactions).
@@ -472,15 +470,23 @@ pub async fn interact_with_model(
     let request = async {
         let response = client
             .post(url)
+            .header("x-goog-api-key", api_key)
             .json(body)
             .send()
             .await
-            .map_err(|e| format!("falha na requisição ao Gemini (interactions): {}", e))?;
+            .map_err(|e| {
+                format!(
+                    "falha na requisição ao Gemini (interactions): {}",
+                    e.without_url()
+                )
+            })?;
         let status = response.status().as_u16();
-        let body_text = response
-            .text()
-            .await
-            .map_err(|e| format!("falha ao ler a resposta do Gemini (interactions): {}", e))?;
+        let body_text = response.text().await.map_err(|e| {
+            format!(
+                "falha ao ler a resposta do Gemini (interactions): {}",
+                e.without_url()
+            )
+        })?;
         Ok::<_, String>((status, body_text))
     };
 
@@ -492,7 +498,7 @@ pub async fn interact_with_model(
     })??;
     let generate_ms = t0.elapsed().as_millis() as u64;
     if status != 200 {
-        return Err(format!("Gemini retornou status {}: {}", status, body_text));
+        return Err(format!("Gemini retornou HTTP {status}. Confira as credenciais, os limites e a disponibilidade do modelo."));
     }
 
     let parsed: InteractionResponse = serde_json::from_str(&body_text).map_err(|e| {
@@ -817,5 +823,15 @@ mod tests {
             .to_string();
 
         assert_eq!(text, "Transcrição de alta fidelidade");
+    }
+    #[test]
+    fn credentials_are_never_part_of_request_urls() {
+        for url in [
+            generate_url("test-model", "synthetic-private-key"),
+            interactions_url("synthetic-private-key"),
+        ] {
+            assert!(!url.contains("synthetic-private-key"));
+            assert!(!url.contains("key="));
+        }
     }
 }

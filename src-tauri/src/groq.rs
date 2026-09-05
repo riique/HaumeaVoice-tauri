@@ -218,19 +218,32 @@ pub struct SanitizerOutcome {
 /// `low`/`medium`/`high`); otherwise it is omitted so the API does not reject
 /// the call. The function always returns a [`SanitizerOutcome`] carrying both
 /// the result and a [`crate::models::SanitizerDebug`] capture of the request.
-pub async fn call_sanitizer_api(
-    whisper_text: &str,
-    deepgram_text: &str,
-    model: &str,
-    system_prompt: &str,
-    untrusted_context: Option<&str>,
-    // Pre-formatted glossary lines (may be empty). Prefer structured vocabulary.
-    glossary_block: &str,
-    api_key: &str,
-    reasoning_enabled: bool,
-    reasoning_effort: &str,
-    reasoning_supported: bool,
-) -> SanitizerOutcome {
+pub struct CallSanitizerApiInput<'a> {
+    pub whisper_text: &'a str,
+    pub deepgram_text: &'a str,
+    pub model: &'a str,
+    pub system_prompt: &'a str,
+    pub untrusted_context: Option<&'a str>,
+    pub glossary_block: &'a str,
+    pub api_key: &'a str,
+    pub reasoning_enabled: bool,
+    pub reasoning_effort: &'a str,
+    pub reasoning_supported: bool,
+}
+
+pub async fn call_sanitizer_api(input: CallSanitizerApiInput<'_>) -> SanitizerOutcome {
+    let CallSanitizerApiInput {
+        whisper_text,
+        deepgram_text,
+        model,
+        system_prompt,
+        untrusted_context,
+        glossary_block,
+        api_key,
+        reasoning_enabled,
+        reasoning_effort,
+        reasoning_supported,
+    } = input;
     // Assemble the final system prompt: the base prompt (which may already carry
     // the dual-engine instruction appended by the caller), followed by the
     // user's personal glossary. The reasoning level is now controlled by the

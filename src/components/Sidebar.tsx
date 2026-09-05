@@ -4,6 +4,7 @@ import {
   AudioLines,
   FileAudio,
   History,
+  LifeBuoy,
   Home,
   Keyboard,
   Settings,
@@ -19,6 +20,7 @@ const NAV: { key: ViewKey; label: string; icon: LucideIcon }[] = [
   { key: "historico", label: "Histórico", icon: History },
   { key: "insights", label: "Insights", icon: ChartNoAxesCombined },
   { key: "scratchpad", label: "Scratchpad", icon: NotebookPen },
+  { key: "recuperacao", label: "Recuperação", icon: LifeBuoy },
   { key: "atalhos", label: "Atalhos", icon: Keyboard },
   { key: "configuracoes", label: "Configurações", icon: Settings },
 ];

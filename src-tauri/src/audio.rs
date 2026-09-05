@@ -19,10 +19,19 @@ use crate::models::{AppState, DeepgramMode, TranscriptionEngine};
 /// — extra pressure that compounds the gadget AppHang when the overlay is
 /// backgrounded and the WebView2 JS task queue is throttled.
 /// Best-effort: silently no-ops when the gadget window is gone.
-fn emit_transcribing(handle: &tauri::AppHandle, value: bool) {
+fn emit_transcribing(state: &AppState, value: bool) {
     use tauri::{Emitter, Manager};
-    if let Some(g) = handle.get_webview_window("gadget") {
-        let _ = g.emit("transcribing", value);
+    let Some(job) = state
+        .operations
+        .status()
+        .filter(|job| matches!(job.kind.as_str(), "microphone" | "retry-mic"))
+    else {
+        return;
+    };
+    if let Some(handle) = state.app_handle.read().as_ref() {
+        if let Some(gadget) = handle.get_webview_window("gadget") {
+            let _ = gadget.emit("transcribing", serde_json::json!({"active": value, "operation_id": job.id, "cancelled": job.cancelled}));
+        }
     }
 }
 
@@ -41,6 +50,18 @@ pub fn spawn_audio_level_emitter(handle: tauri::AppHandle, state: Arc<AppState>)
         while state.is_recording() {
             std::thread::sleep(std::time::Duration::from_millis(80));
 
+            let fault = state.capture_fault.lock().take().or_else(|| {
+                (state.recording_elapsed_ms() >= crate::capture_spool::MAX_CAPTURE_SECONDS * 1000)
+                    .then(|| {
+                        "Limite de 15 minutos atingido. Áudio preservado na recuperação.".into()
+                    })
+            });
+            if let Some(error) = fault {
+                crate::shortcuts::handle_cancel(&handle, &state);
+                use tauri::Emitter;
+                let _ = handle.emit("capture-error", error);
+                break;
+            }
             let capture_rate = *state.capture_rate.read();
             // Shorter analysis window → snappier reaction to speech onsets.
             let window = ((capture_rate as usize) / 20).max(256);
@@ -211,7 +232,7 @@ pub fn start_capture(
                 found = Some(d);
             }
         }
-        found.or_else(|| host.default_input_device())
+        found
     } else {
         host.default_input_device()
     };
@@ -244,8 +265,20 @@ pub fn start_capture(
     // Use the device's own config — no forced rate or channel count.
     let config: StreamConfig = supported.into();
 
-    let err_callback = |err: cpal::StreamError| {
-        log::error!("audio: stream error: {}", err);
+    let directory = crate::audio_store::default_directory()
+        .ok_or_else(|| AudioError::DeviceOpen("Armazenamento de recuperação indisponível".into()))?
+        .join("recovery");
+    *state.capture_spool.lock() = Some(
+        crate::capture_spool::CaptureSpool::start(directory, session_id, native_rate)
+            .map_err(AudioError::DeviceOpen)?,
+    );
+    *state.capture_fault.lock() = None;
+    let error_state = state.clone();
+    let err_callback = move |_err: cpal::StreamError| {
+        *error_state.capture_fault.lock() = Some(
+            "O microfone foi desconectado ou o driver falhou. O áudio parcial foi preservado."
+                .into(),
+        );
     };
 
     let ch = native_channels as usize;
@@ -264,7 +297,7 @@ pub fn start_capture(
                         // Never discard a capture block. The stream is stopped
                         // before the buffer is drained, and the level meter only
                         // holds this lock long enough to copy a small window.
-                        st.audio_buffer.lock().extend_from_slice(&mono);
+                        record_capture_block(&st, &mono);
                         // Fan-out to live Deepgram while the user is speaking
                         // so stop only needs a Finalize flush (not a full re-upload).
                         push_live_deepgram_pcm(&st, &mono);
@@ -284,7 +317,7 @@ pub fn start_capture(
                             return;
                         }
                         let mono = downmix_f32(samples, ch);
-                        st.audio_buffer.lock().extend_from_slice(&mono);
+                        record_capture_block(&st, &mono);
                         push_live_deepgram_pcm(&st, &mono);
                     },
                     err_callback,
@@ -395,19 +428,15 @@ pub async fn stop_capture(
     if !state.set_recording_delivery_target(delivery_target) {
         log::warn!("audio: stop target captured before recording session became available");
     }
-    if let Some(handle) = state.app_handle.read().as_ref() {
-        emit_transcribing(handle, true);
-    }
+    emit_transcribing(state, true);
 
-    struct TranscribingGuard(Option<tauri::AppHandle>);
+    struct TranscribingGuard(Arc<AppState>);
     impl Drop for TranscribingGuard {
         fn drop(&mut self) {
-            if let Some(handle) = self.0.as_ref() {
-                emit_transcribing(handle, false);
-            }
+            emit_transcribing(&self.0, false);
         }
     }
-    let _guard = TranscribingGuard(state.app_handle.read().clone());
+    let _guard = TranscribingGuard(state.clone());
 
     stop_capture_inner(state).await
 }
@@ -423,15 +452,26 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
     let _ = state.drop_audio_stream();
 
     let live_session = state.deepgram_live.lock().take();
-    {
-        let buf = state.audio_buffer.lock();
-        if let Some(ref session) = live_session {
-            session.catch_up_from_buffer(&buf);
+    let spool = state.capture_spool.lock().take();
+    let raw_samples = if let Some(spool) = spool {
+        match spool
+            .finish()
+            .and_then(|path| crate::capture_spool::read_pcm(&path))
+        {
+            Ok(samples) => samples,
+            Err(error) => {
+                log::error!("capture: {error}");
+                return None;
+            }
         }
+    } else {
+        state.drain_audio_buffer()
+    };
+    state.clear_audio_buffer();
+    if let Some(ref session) = live_session {
+        session.catch_up_from_buffer(&raw_samples);
     }
-
-    let raw_samples = state.drain_audio_buffer();
-    if raw_samples.is_empty() {
+    if raw_samples.is_empty() || raw_samples.iter().all(|sample| sample.unsigned_abs() <= 1) {
         log::warn!("audio: stop requested but buffer was empty");
         if let Some(session) = live_session {
             session.abort();
@@ -552,7 +592,7 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
                         ..Default::default()
                     },
                 );
-                deliver_pipeline_result(&mut result).await;
+                deliver_pipeline_result(state, &mut result).await;
                 let entry = crate::transcription::mode_result_to_history(
                     id,
                     now_timestamp(),
@@ -561,8 +601,9 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
                     "mic",
                     &result,
                 );
-                crate::history::push(entry.clone());
-                crate::transcription::emit_saved(state, &entry);
+                if !persist_and_notify(state, &entry) {
+                    return None;
+                }
                 crate::pipeline_run::emit_pipeline_progress(
                     state,
                     crate::pipeline_run::PipelineProgressEvent {
@@ -594,8 +635,7 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
                     err_msg,
                 );
                 attach_pending_failed_run(state, &mut entry);
-                crate::history::push(entry.clone());
-                crate::transcription::emit_saved(state, &entry);
+                persist_and_notify(state, &entry);
                 return None;
             }
         }
@@ -615,34 +655,36 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
         Ok(a) => a,
         Err(err_msg) => {
             let entry = crate::transcription::build_failed_entry(
-                state,
-                id,
-                now_timestamp(),
-                audio_path,
-                duration_ms,
-                "mic",
-                engine,
-                err_msg,
+                crate::transcription::pipeline::BuildFailedEntryInput {
+                    state,
+                    id,
+                    date: now_timestamp(),
+                    audio_path,
+                    duration_ms,
+                    source: "mic",
+                    engine,
+                    error_msg: err_msg,
+                },
             );
-            crate::history::push(entry.clone());
-            crate::transcription::emit_saved(state, &entry);
+            persist_and_notify(state, &entry);
             return None;
         }
     };
 
     if acoustic.whisper_text.trim().is_empty() && acoustic.deepgram_text.trim().is_empty() {
         let entry = crate::transcription::build_failed_entry(
-            state,
-            id,
-            now_timestamp(),
-            audio_path,
-            duration_ms,
-            "mic",
-            engine,
-            "Nenhum texto detectado na gravação.".to_string(),
+            crate::transcription::pipeline::BuildFailedEntryInput {
+                state,
+                id,
+                date: now_timestamp(),
+                audio_path,
+                duration_ms,
+                source: "mic",
+                engine,
+                error_msg: "Nenhum texto detectado na gravação.".to_string(),
+            },
         );
-        crate::history::push(entry.clone());
-        crate::transcription::emit_saved(state, &entry);
+        persist_and_notify(state, &entry);
         return None;
     }
 
@@ -677,24 +719,27 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
     deliver_clipboard_and_paste(&final_text).await;
 
     let entry = crate::transcription::build_success_entry(
-        state,
-        id,
-        now_timestamp(),
-        audio_path,
-        engine,
-        &acoustic.whisper_text,
-        &acoustic.deepgram_text,
-        final_text.clone(),
-        duration_ms,
-        "mic",
-        elapsed,
-        acoustic.effective_dual,
-        acoustic.deepgram_ran,
-        &sanitize,
-        "mic",
+        crate::transcription::pipeline::BuildSuccessEntryInput {
+            state,
+            id,
+            date: now_timestamp(),
+            audio_path,
+            engine,
+            whisper_text: &acoustic.whisper_text,
+            deepgram_text: &acoustic.deepgram_text,
+            final_text: final_text.clone(),
+            duration_ms,
+            source: "mic",
+            transcription_latency_ms: elapsed,
+            dual_mode: acoustic.effective_dual,
+            deepgram_ran: acoustic.deepgram_ran,
+            sanitize: &sanitize,
+            log_context: "mic",
+        },
     );
-    crate::history::push(entry.clone());
-    crate::transcription::emit_saved(state, &entry);
+    if !persist_and_notify(state, &entry) {
+        return None;
+    }
     crate::pipeline_run::emit_pipeline_progress(
         state,
         crate::pipeline_run::PipelineProgressEvent {
@@ -708,36 +753,79 @@ async fn stop_capture_inner(state: &Arc<AppState>) -> Option<String> {
     Some(final_text)
 }
 
-/// Linear resampler: mono i16 from `from_rate` to `to_rate`.
-fn resample(input: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
+/// Polyphase windowed-sinc resampling with low-pass filtering before decimation.
+pub(crate) fn resample(input: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
+    if from_rate == 0 || to_rate == 0 {
+        return Vec::new();
+    }
     if from_rate == to_rate || input.is_empty() {
         return input.to_vec();
     }
-    let ratio = from_rate as f64 / to_rate as f64;
-    let out_len = ((input.len() as f64) / ratio).ceil() as usize;
+    let cutoff = (to_rate as f64 / from_rate as f64).min(1.0) * 0.90;
+    let radius = (24.0 / cutoff).ceil() as isize;
+    // Cache trigonometry once per phase. 48k -> 16k needs only one phase.
+    let gcd = |mut a: u32, mut b: u32| {
+        while b != 0 {
+            let r = a % b;
+            a = b;
+            b = r;
+        }
+        a
+    };
+    let phases = (to_rate / gcd(from_rate, to_rate)).min(1024) as usize;
+    let kernels: Vec<Vec<f64>> = (0..phases)
+        .map(|phase| {
+            let fraction = phase as f64 / phases as f64;
+            (-radius..=radius)
+                .map(|offset| {
+                    let distance = offset as f64 - fraction;
+                    let x = std::f64::consts::PI * cutoff * distance;
+                    let sinc = if x.abs() < 1e-9 { 1.0 } else { x.sin() / x };
+                    let window =
+                        0.5 + 0.5 * (std::f64::consts::PI * distance / (radius as f64 + 1.0)).cos();
+                    cutoff * sinc * window
+                })
+                .collect()
+        })
+        .collect();
+    let out_len = (input.len() as u64 * to_rate as u64).div_ceil(from_rate as u64) as usize;
     let mut output = Vec::with_capacity(out_len);
-    let last = input.len() - 1;
-    for i in 0..out_len {
-        let src = i as f64 * ratio;
-        let idx = (src as usize).min(last);
-        let frac = src - idx as f64;
-        let a = input[idx] as f64;
-        let b = if idx + 1 < input.len() {
-            input[idx + 1] as f64
-        } else {
-            a
-        };
-        output.push((a + (b - a) * frac) as i16);
+    for index in 0..out_len {
+        let numerator = index as u64 * from_rate as u64;
+        let center = (numerator / to_rate as u64) as isize;
+        let phase = ((numerator % to_rate as u64) * phases as u64 / to_rate as u64) as usize;
+        let mut sum = 0.0;
+        let mut weight_sum = 0.0;
+        for (tap, &weight) in kernels[phase].iter().enumerate() {
+            let source = center + tap as isize - radius;
+            if source >= 0 && (source as usize) < input.len() {
+                sum += f64::from(input[source as usize]) * weight;
+                weight_sum += weight;
+            }
+        }
+        output.push(
+            (sum / weight_sum.max(1e-9))
+                .round()
+                .clamp(-32768.0, 32767.0) as i16,
+        );
     }
     output
 }
 
-async fn write_clipboard(final_text: &str) -> Result<(), String> {
+async fn write_clipboard(
+    final_text: &str,
+    permit: Option<crate::operations::Permit>,
+) -> Result<(), String> {
     let clipboard_text = final_text.to_string();
     let clipboard_fut = tokio::task::spawn_blocking(move || {
-        let mut clipboard = arboard::Clipboard::new()?;
-        clipboard.set_text(clipboard_text)?;
-        Ok::<(), arboard::Error>(())
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        if permit.as_ref().is_some_and(|permit| !permit.valid()) {
+            return Err("Entrega cancelada".into());
+        }
+        clipboard
+            .set_text(clipboard_text)
+            .map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
     });
     match tokio::time::timeout(std::time::Duration::from_secs(3), clipboard_fut).await {
         Ok(Ok(Ok(()))) => {
@@ -770,9 +858,11 @@ fn attach_pending_failed_run(state: &AppState, entry: &mut crate::models::Histor
 // Compatibility path for the dormant legacy pipeline. Product modes use the
 // structured delivery function below and retain its target-safety evidence.
 async fn deliver_clipboard_and_paste(final_text: &str) {
-    match write_clipboard(final_text).await {
+    match write_clipboard(final_text, None).await {
         Ok(()) => {
-            if let Err(error) = paste_into_focused_field() {
+            if let Err(error) =
+                paste_into_focused_field(crate::context::ForegroundTarget::default(), None)
+            {
                 log::warn!("audio: legacy auto-paste failed: {}", error);
             }
         }
@@ -780,7 +870,7 @@ async fn deliver_clipboard_and_paste(final_text: &str) {
     }
 }
 
-async fn deliver_pipeline_result(run: &mut crate::pipeline_run::PipelineRun) {
+async fn deliver_pipeline_result(state: &AppState, run: &mut crate::pipeline_run::PipelineRun) {
     use crate::output_policy::DictationDestination;
     use crate::pipeline_run::{DeliveryRecord, PipelineError, StageKind, StageRecord};
 
@@ -789,11 +879,13 @@ async fn deliver_pipeline_result(run: &mut crate::pipeline_run::PipelineRun) {
     let expected_target = crate::context::ForegroundTarget {
         hwnd: run.delivery.target_hwnd,
         process_id: run.delivery.target_process_id,
+        focus_id: run.delivery.target_focus_id,
     };
     let mut delivery = DeliveryRecord {
         destination: run.destination,
         target_hwnd: expected_target.hwnd,
         target_process_id: expected_target.process_id,
+        target_focus_id: expected_target.focus_id,
         delivered_at_ms: Some(crate::pipeline_run::epoch_ms()),
         ..Default::default()
     };
@@ -810,14 +902,14 @@ async fn deliver_pipeline_result(run: &mut crate::pipeline_run::PipelineRun) {
         }
         DictationDestination::ClipboardOnly => {
             let clipboard_started = std::time::Instant::now();
-            let result = write_clipboard(&text).await;
+            let result = write_clipboard(&text, state.operations.permit()).await;
             run.timings.clipboard_ms = Some(clipboard_started.elapsed().as_millis() as u64);
             delivery.clipboard_ok = result.is_ok();
             result
         }
         DictationDestination::FocusedField => {
             let clipboard_started = std::time::Instant::now();
-            let result = write_clipboard(&text).await;
+            let result = write_clipboard(&text, state.operations.permit()).await;
             run.timings.clipboard_ms = Some(clipboard_started.elapsed().as_millis() as u64);
             delivery.clipboard_ok = result.is_ok();
             result.and_then(|()| {
@@ -825,7 +917,8 @@ async fn deliver_pipeline_result(run: &mut crate::pipeline_run::PipelineRun) {
                     return Err("delivery target changed; text kept on clipboard".into());
                 }
                 delivery.paste_attempted = true;
-                paste_into_focused_field().map(|()| delivery.paste_ok = true)
+                paste_into_focused_field(expected_target, Some(&state.operations))
+                    .map(|()| delivery.paste_ok = true)
             })
         }
     };
@@ -892,6 +985,7 @@ pub async fn undo_ai_edit(
     entry_id: &str,
     version: &str,
 ) -> Result<UndoAiEditOutcome, String> {
+    let _lease = state.operations.begin("undo")?;
     let entry = crate::history::get(entry_id).ok_or("Histórico não encontrado")?;
     let run = entry
         .pipeline_runs
@@ -919,10 +1013,15 @@ pub async fn undo_ai_edit(
     preferences.persist_raw_context = false;
     let current = crate::context::capture(&preferences);
     let exact_selection = current.selected_text.as_deref() == run.transcript.delivered.as_deref();
-    let same_target = crate::context::foreground_target_matches(&run.context);
-    write_clipboard(&replacement).await?;
+    let expected = crate::context::ForegroundTarget {
+        hwnd: run.delivery.target_hwnd,
+        process_id: run.delivery.target_process_id,
+        focus_id: run.delivery.target_focus_id,
+    };
+    let same_target = crate::context::foreground_delivery_target_matches(expected);
+    write_clipboard(&replacement, state.operations.permit()).await?;
     if same_target && exact_selection {
-        paste_into_focused_field()?;
+        paste_into_focused_field(expected, Some(&state.operations))?;
         Ok(UndoAiEditOutcome::ReplacedSelection)
     } else {
         Ok(UndoAiEditOutcome::CopiedToClipboard)
@@ -942,19 +1041,31 @@ pub async fn retry_transcription_handler_with_strategy(
     id: &str,
     force_fallback: bool,
 ) -> Result<String, String> {
-    if let Some(handle) = state.app_handle.read().as_ref() {
-        emit_transcribing(handle, true);
+    let kind = if crate::history::get(id).is_some_and(|entry| entry.source == "mic") {
+        "retry-mic"
+    } else {
+        "retry-file"
+    };
+    let lease = state.operations.begin(kind)?;
+    tokio::select! { biased;
+        _ = lease.cancelled() => Err("Retranscrição cancelada. O áudio foi preservado.".into()),
+        result = retry_transcription_handler_with_strategy_inner(state, id, force_fallback) => result,
     }
+}
+async fn retry_transcription_handler_with_strategy_inner(
+    state: &Arc<AppState>,
+    id: &str,
+    force_fallback: bool,
+) -> Result<String, String> {
+    emit_transcribing(state, true);
 
-    struct TranscribingGuard(Option<tauri::AppHandle>);
+    struct TranscribingGuard(Arc<AppState>);
     impl Drop for TranscribingGuard {
         fn drop(&mut self) {
-            if let Some(handle) = self.0.as_ref() {
-                emit_transcribing(handle, false);
-            }
+            emit_transcribing(&self.0, false);
         }
     }
-    let _guard = TranscribingGuard(state.app_handle.read().clone());
+    let _guard = TranscribingGuard(state.clone());
 
     let entry = crate::history::get(id).ok_or_else(|| "Histórico não encontrado".to_string())?;
 
@@ -966,8 +1077,9 @@ pub async fn retry_transcription_handler_with_strategy(
     let fail =
         |state: &Arc<AppState>, entry: &crate::models::HistoryEntry, msg: String| -> String {
             let failed = crate::transcription::update_failed_entry(state, entry, msg.clone());
-            crate::history::update_entry(failed.clone());
-            crate::transcription::emit_saved(state, &failed);
+            if let Err(error) = persist_retry(state, &failed) {
+                return error;
+            }
             msg
         };
 
@@ -1059,7 +1171,7 @@ pub async fn retry_transcription_handler_with_strategy(
                         result.context = previous.context.clone();
                         result.destination = previous.destination;
                     }
-                    deliver_pipeline_result(&mut result).await;
+                    deliver_pipeline_result(state, &mut result).await;
                 }
                 let updated = crate::transcription::mode_result_to_history(
                     entry.id.clone(),
@@ -1069,8 +1181,7 @@ pub async fn retry_transcription_handler_with_strategy(
                     &entry.source,
                     &result,
                 );
-                crate::history::update_entry(updated.clone());
-                crate::transcription::emit_saved(state, &updated);
+                persist_retry(state, &updated)?;
                 return Ok(final_text);
             }
             Err(msg) => {
@@ -1084,8 +1195,7 @@ pub async fn retry_transcription_handler_with_strategy(
                     msg.clone(),
                 );
                 attach_pending_failed_run(state, &mut failed);
-                crate::history::update_entry(failed.clone());
-                crate::transcription::emit_saved(state, &failed);
+                persist_retry(state, &failed)?;
                 return Err(msg);
             }
         }
@@ -1117,25 +1227,26 @@ pub async fn retry_transcription_handler_with_strategy(
     }
 
     let updated_entry = crate::transcription::build_success_entry(
-        state,
-        entry.id.clone(),
-        entry.date.clone(),
-        Some(audio_path),
-        engine,
-        &acoustic.whisper_text,
-        &acoustic.deepgram_text,
-        final_text.clone(),
-        entry.duration_ms,
-        &entry.source,
-        elapsed,
-        acoustic.effective_dual,
-        acoustic.deepgram_ran,
-        &sanitize,
-        "retry",
+        crate::transcription::pipeline::BuildSuccessEntryInput {
+            state,
+            id: entry.id.clone(),
+            date: entry.date.clone(),
+            audio_path: Some(audio_path),
+            engine,
+            whisper_text: &acoustic.whisper_text,
+            deepgram_text: &acoustic.deepgram_text,
+            final_text: final_text.clone(),
+            duration_ms: entry.duration_ms,
+            source: &entry.source,
+            transcription_latency_ms: elapsed,
+            dual_mode: acoustic.effective_dual,
+            deepgram_ran: acoustic.deepgram_ran,
+            sanitize: &sanitize,
+            log_context: "retry",
+        },
     );
 
-    crate::history::update_entry(updated_entry.clone());
-    crate::transcription::emit_saved(state, &updated_entry);
+    persist_retry(state, &updated_entry)?;
 
     Ok(final_text)
 }
@@ -1285,7 +1396,10 @@ async fn run_forced_fallback(
 /// the clipboard, so the user can paste it manually. A short delay gives the
 /// foreground application a moment to settle and ensures the clipboard write is
 /// visible to it before the paste is dispatched.
-fn paste_into_focused_field() -> Result<(), String> {
+fn paste_into_focused_field(
+    expected: crate::context::ForegroundTarget,
+    coordinator: Option<&crate::operations::Coordinator>,
+) -> Result<(), String> {
     use enigo::{
         Direction::{Click, Press, Release},
         Enigo, Key, Keyboard, Settings,
@@ -1308,6 +1422,13 @@ fn paste_into_focused_field() -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     let v_key = Key::Unicode('v');
 
+    if coordinator.is_some_and(|coordinator| coordinator.status().is_some_and(|job| job.cancelled))
+    {
+        return Err("Entrega cancelada".into());
+    }
+    if !crate::context::foreground_delivery_target_matches(expected) {
+        return Err("O campo de destino mudou. O texto está na área de transferência.".into());
+    }
     enigo
         .key(modifier, Press)
         .map_err(|e| format!("failed to press modifier: {}", e))?;
@@ -1326,19 +1447,25 @@ fn paste_into_focused_field() -> Result<(), String> {
 /// Reads a local audio file and runs the legacy transcription pipeline.
 /// Unlike microphone capture, an upload does not hijack the clipboard.
 pub async fn transcribe_file_path(state: &Arc<AppState>, path: String) -> Result<String, String> {
-    if let Some(handle) = state.app_handle.read().as_ref() {
-        emit_transcribing(handle, true);
+    let lease = state.operations.begin("upload")?;
+    tokio::select! { biased;
+        _ = lease.cancelled() => Err("Transcrição cancelada. O áudio de origem permanece disponível.".into()),
+        result = transcribe_file_path_inner(state, path) => result,
     }
+}
+pub(crate) async fn transcribe_file_path_inner(
+    state: &Arc<AppState>,
+    path: String,
+) -> Result<String, String> {
+    emit_transcribing(state, true);
 
-    struct TranscribingGuard(Option<tauri::AppHandle>);
+    struct TranscribingGuard(Arc<AppState>);
     impl Drop for TranscribingGuard {
         fn drop(&mut self) {
-            if let Some(handle) = self.0.as_ref() {
-                emit_transcribing(handle, false);
-            }
+            emit_transcribing(&self.0, false);
         }
     }
-    let _guard = TranscribingGuard(state.app_handle.read().clone());
+    let _guard = TranscribingGuard(state.clone());
 
     const MAX_AUDIO_FILE_SIZE: u64 = 50 * 1024 * 1024;
     let metadata = std::fs::metadata(&path)
@@ -1398,8 +1525,9 @@ pub async fn transcribe_file_path(state: &Arc<AppState>, path: String) -> Result
                     "file",
                     &result,
                 );
-                crate::history::push(entry.clone());
-                crate::transcription::emit_saved(state, &entry);
+                if !persist_and_notify(state, &entry) {
+                    return Err("Falha ao salvar; áudio preservado para recuperação".into());
+                }
                 return Ok(final_text);
             }
             Err(err_msg) => {
@@ -1417,8 +1545,7 @@ pub async fn transcribe_file_path(state: &Arc<AppState>, path: String) -> Result
                     full_msg.clone(),
                 );
                 attach_pending_failed_run(state, &mut entry);
-                crate::history::push(entry.clone());
-                crate::transcription::emit_saved(state, &entry);
+                persist_and_notify(state, &entry);
                 return Err(full_msg);
             }
         }
@@ -1433,17 +1560,18 @@ pub async fn transcribe_file_path(state: &Arc<AppState>, path: String) -> Result
                     file_name, err_msg
                 );
                 let entry = crate::transcription::build_failed_entry(
-                    state,
-                    id,
-                    now_timestamp(),
-                    audio_path,
-                    0,
-                    "file",
-                    engine,
-                    full_msg.clone(),
+                    crate::transcription::pipeline::BuildFailedEntryInput {
+                        state,
+                        id,
+                        date: now_timestamp(),
+                        audio_path,
+                        duration_ms: 0,
+                        source: "file",
+                        engine,
+                        error_msg: full_msg.clone(),
+                    },
                 );
-                crate::history::push(entry.clone());
-                crate::transcription::emit_saved(state, &entry);
+                persist_and_notify(state, &entry);
                 return Err(full_msg);
             }
         };
@@ -1451,17 +1579,18 @@ pub async fn transcribe_file_path(state: &Arc<AppState>, path: String) -> Result
     if acoustic.whisper_text.trim().is_empty() && acoustic.deepgram_text.trim().is_empty() {
         let err_msg = "Nenhum texto detectado no arquivo de áudio.".to_string();
         let entry = crate::transcription::build_failed_entry(
-            state,
-            id,
-            now_timestamp(),
-            audio_path,
-            0,
-            "file",
-            engine,
-            err_msg.clone(),
+            crate::transcription::pipeline::BuildFailedEntryInput {
+                state,
+                id,
+                date: now_timestamp(),
+                audio_path,
+                duration_ms: 0,
+                source: "file",
+                engine,
+                error_msg: err_msg.clone(),
+            },
         );
-        crate::history::push(entry.clone());
-        crate::transcription::emit_saved(state, &entry);
+        persist_and_notify(state, &entry);
         return Err(err_msg);
     }
 
@@ -1476,24 +1605,27 @@ pub async fn transcribe_file_path(state: &Arc<AppState>, path: String) -> Result
 
     let final_text = sanitize.final_text.clone();
     let entry = crate::transcription::build_success_entry(
-        state,
-        id,
-        now_timestamp(),
-        audio_path,
-        engine,
-        &acoustic.whisper_text,
-        &acoustic.deepgram_text,
-        final_text.clone(),
-        0,
-        "file",
-        elapsed,
-        acoustic.effective_dual,
-        acoustic.deepgram_ran,
-        &sanitize,
-        "file",
+        crate::transcription::pipeline::BuildSuccessEntryInput {
+            state,
+            id,
+            date: now_timestamp(),
+            audio_path,
+            engine,
+            whisper_text: &acoustic.whisper_text,
+            deepgram_text: &acoustic.deepgram_text,
+            final_text: final_text.clone(),
+            duration_ms: 0,
+            source: "file",
+            transcription_latency_ms: elapsed,
+            dual_mode: acoustic.effective_dual,
+            deepgram_ran: acoustic.deepgram_ran,
+            sanitize: &sanitize,
+            log_context: "file",
+        },
     );
-    crate::history::push(entry.clone());
-    crate::transcription::emit_saved(state, &entry);
+    if !persist_and_notify(state, &entry) {
+        return Err("Falha ao salvar; áudio preservado para recuperação".into());
+    }
 
     Ok(final_text)
 }
@@ -1516,10 +1648,10 @@ fn now_timestamp() -> String {
         use windows::Win32::System::SystemInformation::GetLocalTime;
         // windows 0.58: GetLocalTime() -> SYSTEMTIME
         let st = unsafe { GetLocalTime() };
-        return format!(
+        format!(
             "{:04}-{:02}-{:02} {:02}:{:02}",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute
-        );
+        )
     }
     #[cfg(not(windows))]
     {
@@ -1555,6 +1687,7 @@ pub fn cancel_capture(state: &Arc<AppState>) {
         log::info!("audio: deepgram live session aborted on cancel");
     }
     state.clear_audio_buffer();
+    state.capture_spool.lock().take();
     state.recording_session.lock().take();
     log::info!("audio: capture cancelled, buffers released");
 }
@@ -1580,7 +1713,7 @@ pub fn start_mic_test_stream(app: &tauri::AppHandle, state: &Arc<AppState>) -> R
                 found = Some(d);
             }
         }
-        found.or_else(|| host.default_input_device())
+        found
     } else {
         host.default_input_device()
     };
@@ -1717,4 +1850,103 @@ pub fn start_mic_test_stream(app: &tauri::AppHandle, state: &Arc<AppState>) -> R
     *state.test_stream.lock() = Some(stream);
 
     Ok(())
+}
+
+fn persist_retry(state: &Arc<AppState>, entry: &crate::models::HistoryEntry) -> Result<(), String> {
+    if state.operations.status().is_some_and(|job| job.cancelled) {
+        return Err("Operação cancelada".into());
+    }
+    if !crate::history::update_entry(entry.clone()) {
+        return Err("Não foi possível atualizar o histórico. O áudio e a entrada anterior foram preservados.".into());
+    }
+    crate::transcription::emit_saved(state, entry);
+    Ok(())
+}
+
+fn persist_and_notify(state: &Arc<AppState>, entry: &crate::models::HistoryEntry) -> bool {
+    if state.operations.status().is_some_and(|job| job.cancelled) {
+        return false;
+    }
+    match crate::history::push(entry.clone()) {
+        Ok(()) => {
+            if let Some(run) = entry.pipeline_runs.last() {
+                crate::maintenance::mark_capture_complete(&run.session_id);
+            }
+            crate::transcription::emit_saved(state, entry);
+            true
+        }
+        Err(error) => {
+            log::error!("history: {error}");
+            if let Some(app) = state.app_handle.read().as_ref() {
+                use tauri::Emitter;
+                let _ = app.emit("storage-error", "Não foi possível salvar a transcrição. O áudio foi preservado; verifique o armazenamento e tente recuperar o ditado.");
+            }
+            false
+        }
+    }
+}
+
+fn record_capture_block(state: &Arc<AppState>, samples: &[i16]) {
+    if let Some(spool) = state.capture_spool.lock().as_ref() {
+        if let Err(error) = spool.push(samples) {
+            *state.capture_fault.lock() = Some(error);
+        }
+    }
+    let mut meter = state.audio_buffer.lock();
+    let keep = 16_384usize;
+    if samples.len() >= keep {
+        meter.clear();
+        meter.extend_from_slice(&samples[samples.len() - keep..]);
+    } else {
+        let excess = (meter.len() + samples.len()).saturating_sub(keep);
+        meter.drain(..excess);
+        meter.extend_from_slice(samples);
+    }
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+    #[test]
+    fn lowpass_preserves_voice_band_and_rejects_aliases() {
+        let tone = |hz: f64| {
+            (0..48000)
+                .map(|i| {
+                    (12000.0 * (2.0 * std::f64::consts::PI * hz * i as f64 / 48000.0).sin()) as i16
+                })
+                .collect::<Vec<_>>()
+        };
+        let rms = |samples: &[i16]| {
+            (samples[200..samples.len() - 200]
+                .iter()
+                .map(|s| (*s as f64).powi(2))
+                .sum::<f64>()
+                / (samples.len() - 400) as f64)
+                .sqrt()
+        };
+        let voice = resample(&tone(1000.0), 48000, 16000);
+        let alias = resample(&tone(12000.0), 48000, 16000);
+        assert_eq!(voice.len(), 16000);
+        assert!((rms(&voice) - 12000.0 / 2f64.sqrt()).abs() < 100.0);
+        assert!(
+            rms(&alias) / rms(&voice) < 0.01,
+            "at least 40 dB attenuation required"
+        );
+        assert!(resample(&vec![0; 48000], 48000, 16000)
+            .iter()
+            .all(|s| *s == 0));
+        for rate in [8000, 44100, 96000] {
+            assert_eq!(resample(&vec![123; rate], rate as u32, 16000).len(), 16000);
+        }
+    }
+    #[test]
+    fn resampling_minute_stays_within_local_processing_budget() {
+        let samples = vec![100i16; 48000 * 60];
+        let start = std::time::Instant::now();
+        let result = resample(&samples, 48000, 16000);
+        assert_eq!(result.len(), 16000 * 60);
+        assert!(result.iter().all(|s| *s == 100));
+        eprintln!("resample 60s 48k->16k: {} ms", start.elapsed().as_millis());
+        assert!(start.elapsed().as_secs() < 30);
+    }
 }

@@ -546,15 +546,22 @@ pub struct ApiKeysPayload {
 /// samples in short, exclusive bursts. The active `cpal::Stream`
 /// handle is stored as `Option` so it can be swapped out cleanly when
 /// a recording starts or stops.
+pub static CONFIG_LOCK: parking_lot::ReentrantMutex<()> = parking_lot::ReentrantMutex::new(());
+
 pub struct AppState {
     pub engine: RwLock<TranscriptionEngine>,
     pub sanitizer: RwLock<SanitizerModel>,
     pub recording: RwLock<bool>,
     recording_lifecycle: Mutex<RecordingLifecycle>,
+    pub operations: Arc<crate::operations::Coordinator>,
+    pub capture_lease: Mutex<Option<crate::operations::Lease>>,
     pub api_keys: RwLock<ApiKeys>,
     pub audio_stream: Mutex<Option<Stream>>,
     pub audio_buffer: Mutex<Vec<i16>>,
+    pub capture_spool: Mutex<Option<crate::capture_spool::CaptureSpool>>,
+    pub capture_fault: Mutex<Option<String>>,
     pub test_stream: Mutex<Option<Stream>>,
+    pub test_lease: Mutex<Option<crate::operations::Lease>>,
     /// Native sample rate (Hz) of the active capture stream. The microphone is
     /// recorded at the device's own rate and resampled to 16 kHz only when the
     /// final WAV is assembled, because forcing an unsupported rate on the
@@ -632,11 +639,11 @@ pub struct AppState {
     /// Failure journal handed from provider orchestration to history when a
     /// top-level Result must remain backward-compatible with `String` errors.
     pub pending_failed_pipeline_run: Mutex<Option<crate::pipeline_run::PipelineRun>>,
-    groq_key_cursor: AtomicUsize,
-    google_key_cursor: AtomicUsize,
-    deepgram_key_cursor: AtomicUsize,
-    openrouter_key_cursor: AtomicUsize,
-    meta_key_cursor: AtomicUsize,
+    groq_key_cursor: Arc<AtomicUsize>,
+    google_key_cursor: Arc<AtomicUsize>,
+    deepgram_key_cursor: Arc<AtomicUsize>,
+    openrouter_key_cursor: Arc<AtomicUsize>,
+    meta_key_cursor: Arc<AtomicUsize>,
 }
 
 impl AppState {
@@ -646,10 +653,15 @@ impl AppState {
             sanitizer: RwLock::new(SanitizerModel::default()),
             recording: RwLock::new(false),
             recording_lifecycle: Mutex::new(RecordingLifecycle::default()),
+            operations: Arc::new(crate::operations::Coordinator::default()),
+            capture_lease: Mutex::new(None),
             api_keys: RwLock::new(ApiKeys::default()),
             audio_stream: Mutex::new(None),
             audio_buffer: Mutex::new(Vec::new()),
+            capture_spool: Mutex::new(None),
+            capture_fault: Mutex::new(None),
             test_stream: Mutex::new(None),
+            test_lease: Mutex::new(None),
             capture_rate: RwLock::new(16_000),
             recording_since: Mutex::new(None),
             system_prompt: RwLock::new(String::new()),
@@ -684,11 +696,11 @@ impl AppState {
             ),
             temporary_profile_override: RwLock::new(None),
             pending_failed_pipeline_run: Mutex::new(None),
-            groq_key_cursor: AtomicUsize::new(0),
-            google_key_cursor: AtomicUsize::new(0),
-            deepgram_key_cursor: AtomicUsize::new(0),
-            openrouter_key_cursor: AtomicUsize::new(0),
-            meta_key_cursor: AtomicUsize::new(0),
+            groq_key_cursor: Arc::new(AtomicUsize::new(0)),
+            google_key_cursor: Arc::new(AtomicUsize::new(0)),
+            deepgram_key_cursor: Arc::new(AtomicUsize::new(0)),
+            openrouter_key_cursor: Arc::new(AtomicUsize::new(0)),
+            meta_key_cursor: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -719,6 +731,42 @@ impl AppState {
         )
     }
 
+    /// Provider orchestration reads one immutable configuration snapshot per job.
+    pub fn pipeline_snapshot(&self) -> Arc<Self> {
+        let _config = CONFIG_LOCK.lock();
+        let mut snapshot = Self::new();
+        snapshot.groq_key_cursor = self.groq_key_cursor.clone();
+        snapshot.google_key_cursor = self.google_key_cursor.clone();
+        snapshot.deepgram_key_cursor = self.deepgram_key_cursor.clone();
+        snapshot.openrouter_key_cursor = self.openrouter_key_cursor.clone();
+        snapshot.meta_key_cursor = self.meta_key_cursor.clone();
+        snapshot.operations = self.operations.clone();
+        *snapshot.engine.write() = *self.engine.read();
+        *snapshot.sanitizer.write() = *self.sanitizer.read();
+        *snapshot.api_keys.write() = self.api_keys.read().clone();
+        *snapshot.system_prompt.write() = self.system_prompt.read().clone();
+        *snapshot.app_handle.write() = self.app_handle.read().clone();
+        *snapshot.dual_engine.write() = *self.dual_engine.read();
+        *snapshot.deepgram_mode.write() = *self.deepgram_mode.read();
+        *snapshot.sanitizer_enabled.write() = *self.sanitizer_enabled.read();
+        *snapshot.reasoning_enabled.write() = *self.reasoning_enabled.read();
+        *snapshot.reasoning_effort.write() = self.reasoning_effort.read().clone();
+        *snapshot.vocabulary.write() = self.vocabulary.read().clone();
+        *snapshot.modes_enabled.write() = *self.modes_enabled.read();
+        *snapshot.transcription_mode.write() = *self.transcription_mode.read();
+        *snapshot.gemini_fallback_to_whisper.write() = *self.gemini_fallback_to_whisper.read();
+        *snapshot.file_tagging_enabled.write() = *self.file_tagging_enabled.read();
+        *snapshot.gemini_pipelines.write() = self.gemini_pipelines.read().clone();
+        *snapshot.context_preferences.write() = self.context_preferences.read().clone();
+        *snapshot.output_profiles.write() = self.output_profiles.read().clone();
+        *snapshot.formatting_level.write() = *self.formatting_level.read();
+        *snapshot.dictation_destination.write() = *self.dictation_destination.read();
+        *snapshot.temporary_profile_override.write() =
+            self.temporary_profile_override.read().clone();
+        *snapshot.recording_session.lock() = self.recording_session.lock().clone();
+        Arc::new(snapshot)
+    }
+
     pub fn next_meta_key(&self) -> Option<String> {
         Self::next_key(&self.api_keys.read().meta, &self.meta_key_cursor)
     }
@@ -735,6 +783,11 @@ impl AppState {
         let mut lifecycle = self.recording_lifecycle.lock();
         match lifecycle.phase {
             RecordingPhase::Idle => {
+                let Ok(lease) = self.operations.begin("microphone") else {
+                    return RecordingToggle::Busy(lifecycle.snapshot());
+                };
+                *self.capture_lease.lock() = Some(lease);
+
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -768,10 +821,10 @@ impl AppState {
         generation: u64,
         stream: Stream,
         session: crate::pipeline_run::RecordingSession,
-    ) -> Result<(), (Stream, crate::pipeline_run::RecordingSession)> {
+    ) -> Result<(), Box<(Stream, crate::pipeline_run::RecordingSession)>> {
         let lifecycle = self.recording_lifecycle.lock();
         if lifecycle.generation != generation || lifecycle.phase != RecordingPhase::Starting {
-            return Err((stream, session));
+            return Err(Box::new((stream, session)));
         }
         *self.audio_stream.lock() = Some(stream);
         *self.recording_session.lock() = Some(session);

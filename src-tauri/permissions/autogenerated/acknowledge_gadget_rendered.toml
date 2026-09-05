@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-acknowledge-gadget-rendered"
+description = "Enables the acknowledge_gadget_rendered command without any pre-configured scope."
+commands.allow = ["acknowledge_gadget_rendered"]
+
+[[permission]]
+identifier = "deny-acknowledge-gadget-rendered"
+description = "Denies the acknowledge_gadget_rendered command without any pre-configured scope."
+commands.deny = ["acknowledge_gadget_rendered"]

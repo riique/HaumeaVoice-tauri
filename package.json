@@ -1,14 +1,17 @@
 {
   "name": "haumea-voice",
   "private": true,
-  "version": "1.0.33",
+  "version": "1.0.34",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "test:frontend": "node --experimental-strip-types --test tests/frontend/*.test.mjs",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:ui": "vitest run",
+    "benchmark": "node scripts/benchmark.mjs",
+    "lint": "tsc --noEmit && node scripts/check-contracts.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
@@ -22,11 +25,13 @@
     "@tauri-apps/cli": "^2.1.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.3",
+    "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.20",
+    "jsdom": "^26.1.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7"
   }
 }

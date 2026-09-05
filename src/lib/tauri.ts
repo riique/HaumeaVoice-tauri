@@ -381,6 +381,7 @@ export interface HistoryEntry {
 }
 
 export interface PipelineProgressEvent {
+  operation_id: number;
   kind:
     | "audio_preparing"
     | "recognizing"
@@ -893,3 +894,7 @@ export const setAiVoiceProfileEnabled = (enabled: boolean) => invoke<void>("set_
 export const generateAiVoiceProfile = () => invoke<VoiceProfile>("generate_ai_voice_profile");
 export const addInsightCorrectionToVocabulary = (before: string, after: string) => invoke<void>("add_insight_correction_to_vocabulary", { before, after });
 
+
+export interface HistoryPage { items: HistoryEntry[]; total: number; next_offset: number | null; total_words: number }
+export const getHistoryPage = (query = "", offset = 0, limit = 50, deleted = false) => invoke<HistoryPage>("get_history_page", { query, offset, limit, deleted });
+export const getHistoryDetail = (id: string) => invoke<HistoryEntry>("get_history_detail", { id });

@@ -7,6 +7,7 @@ import { HistoricoView } from "./views/HistoricoView";
 import { AtalhosView } from "./views/AtalhosView";
 import { ConfiguracoesView } from "./views/ConfiguracoesView";
 import { ScratchpadView } from "./views/ScratchpadView";
+import { RecoveryView } from "./views/RecoveryView";
 import { InsightsView } from "./views/InsightsView";
 import type { ViewKey } from "./views";
 
@@ -22,6 +23,7 @@ export default function App() {
 
       <main id="main-content" tabIndex={-1} className="scrollbar-thin min-w-0 flex-1 overflow-y-auto">
         <div className={view === "configuracoes" ? "page-shell max-w-[1540px]" : "page-shell"}>
+          {view === "recuperacao" && <RecoveryView />}
           {view === "inicio" && <InicioView onNavigate={setView} />}
           {view === "transcricao" && <TranscricaoView />}
           {view === "historico" && <HistoricoView />}

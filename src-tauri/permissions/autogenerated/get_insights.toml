@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-insights"
+description = "Enables the get_insights command without any pre-configured scope."
+commands.allow = ["get_insights"]
+
+[[permission]]
+identifier = "deny-get-insights"
+description = "Denies the get_insights command without any pre-configured scope."
+commands.deny = ["get_insights"]

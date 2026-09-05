@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-insights-backfill-paused"
+description = "Enables the set_insights_backfill_paused command without any pre-configured scope."
+commands.allow = ["set_insights_backfill_paused"]
+
+[[permission]]
+identifier = "deny-set-insights-backfill-paused"
+description = "Denies the set_insights_backfill_paused command without any pre-configured scope."
+commands.deny = ["set_insights_backfill_paused"]

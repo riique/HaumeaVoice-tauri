@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, FileAudio, Loader2, UploadCloud } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/Surface";
-import { transcribeFile } from "../lib/tauri";
+import { cancelRecording, transcribeFile } from "../lib/tauri";
 
 type Status = "idle" | "transcribing" | "done" | "error";
 
@@ -15,6 +15,7 @@ function baseName(path: string): string {
 }
 
 export function TranscricaoView() {
+  const busy = useRef(false);
   const [filePath, setFilePath] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
@@ -23,6 +24,7 @@ export function TranscricaoView() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let mounted = true;
     void getCurrentWebview().onDragDropEvent((event) => {
       const payload = event.payload;
       if (payload.type === "over" || payload.type === "enter") {
@@ -40,12 +42,13 @@ export function TranscricaoView() {
         if (dropped && AUDIO_EXTENSIONS.includes(extension)) selectPath(dropped);
       }
     }).then((dispose) => {
-      unlisten = dispose;
-    });
-    return () => unlisten?.();
+      if (!mounted) dispose(); else unlisten = dispose;
+    }).catch((failure) => { if (mounted) setError(String(failure)); });
+    return () => { mounted = false; unlisten?.(); };
   }, []);
 
   const selectPath = (path: string) => {
+    if (busy.current) return;
     setFilePath(path);
     setStatus("idle");
     setResult("");
@@ -61,12 +64,14 @@ export function TranscricaoView() {
       });
       if (typeof selected === "string") selectPath(selected);
     } catch (browseError) {
-      console.error("file dialog failed:", browseError);
+      setError(String(browseError));
+      setStatus("error");
     }
   };
 
   const handleTranscribe = async () => {
-    if (!filePath) return;
+    if (!filePath || busy.current) return;
+    busy.current = true;
     setStatus("transcribing");
     setError("");
     setResult("");
@@ -76,16 +81,18 @@ export function TranscricaoView() {
     } catch (transcriptionError) {
       setError(typeof transcriptionError === "string" ? transcriptionError : String(transcriptionError));
       setStatus("error");
-    }
+    } finally { busy.current = false; }
   };
 
   return (
     <div className="space-y-8">
       <PageHeader title="Transcrição" description="Envie um arquivo de áudio para transcrever com a pipeline ativa." />
 
+      {status === "transcribing" && <Button onClick={() => void cancelRecording().catch((e) => setError(String(e)))}>Cancelar transcrição</Button>}
       <section className="surface overflow-hidden" aria-labelledby="upload-title">
         <button
           type="button"
+          disabled={status === "transcribing"}
           onClick={handleBrowse}
           className={
             "m-6 flex min-h-[330px] w-[calc(100%-3rem)] flex-col items-center justify-center rounded-[12px] border border-dashed px-10 py-14 text-center transition-colors " +

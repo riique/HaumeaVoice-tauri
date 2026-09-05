@@ -626,7 +626,7 @@ async fn call_deepgram_streaming_final(
                 "deepgram streaming_final post-hoc: batch REST ok ({} chars)",
                 text.len()
             );
-            return Ok(text);
+            Ok(text)
         }
         Err(batch_err) => {
             log::warn!(

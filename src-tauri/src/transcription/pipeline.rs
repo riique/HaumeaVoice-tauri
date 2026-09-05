@@ -29,19 +29,32 @@ fn provider_identity(engine: TranscriptionEngine) -> (&'static str, &'static str
         ),
     }
 }
+pub struct LegacySuccessRunInput<'a> {
+    pub state: &'a AppState,
+    pub history_id: &'a str,
+    pub engine: TranscriptionEngine,
+    pub whisper_text: &'a str,
+    pub deepgram_text: &'a str,
+    pub final_text: &'a str,
+    pub transcription_latency_ms: u64,
+    pub dual_mode: bool,
+    pub deepgram_ran: bool,
+    pub sanitize: &'a SanitizeOutcome,
+}
 
-fn legacy_success_run(
-    state: &AppState,
-    history_id: &str,
-    engine: TranscriptionEngine,
-    whisper_text: &str,
-    deepgram_text: &str,
-    final_text: &str,
-    transcription_latency_ms: u64,
-    dual_mode: bool,
-    deepgram_ran: bool,
-    sanitize: &SanitizeOutcome,
-) -> PipelineRun {
+fn legacy_success_run(input: LegacySuccessRunInput<'_>) -> PipelineRun {
+    let LegacySuccessRunInput {
+        state,
+        history_id,
+        engine,
+        whisper_text,
+        deepgram_text,
+        final_text,
+        transcription_latency_ms,
+        dual_mode,
+        deepgram_ran,
+        sanitize,
+    } = input;
     let mode = TranscriptionMode::from_legacy(engine, dual_mode);
     let now = epoch_ms();
     let mut run = PipelineRun::success(
@@ -231,18 +244,18 @@ pub async fn run_sanitize(
     } else {
         match sanitizer_key {
             Some(key) => {
-                let outcome = crate::groq::call_sanitizer_api(
+                let outcome = crate::groq::call_sanitizer_api(crate::groq::CallSanitizerApiInput {
                     whisper_text,
                     deepgram_text,
-                    model_id,
-                    &system_prompt_to_use,
-                    context_block.as_deref(),
-                    &glossary_block,
-                    &key,
+                    model: model_id,
+                    system_prompt: &system_prompt_to_use,
+                    untrusted_context: context_block.as_deref(),
+                    glossary_block: &glossary_block,
+                    api_key: &key,
                     reasoning_enabled,
-                    &reasoning_effort,
-                    supports_reasoning,
-                )
+                    reasoning_effort: &reasoning_effort,
+                    reasoning_supported: supports_reasoning,
+                })
                 .await;
 
                 debug_info = Some(outcome.debug);
@@ -318,23 +331,42 @@ pub async fn run_sanitize(
 }
 
 /// Builds a successful history entry (caller persists + emits).
-pub fn build_success_entry(
-    state: &AppState,
-    id: String,
-    date: String,
-    audio_path: Option<String>,
-    engine: TranscriptionEngine,
-    whisper_text: &str,
-    deepgram_text: &str,
-    final_text: String,
-    duration_ms: u64,
-    source: &str,
-    transcription_latency_ms: u64,
-    dual_mode: bool,
-    deepgram_ran: bool,
-    sanitize: &SanitizeOutcome,
-    log_context: &str,
-) -> HistoryEntry {
+pub struct BuildSuccessEntryInput<'a> {
+    pub state: &'a AppState,
+    pub id: String,
+    pub date: String,
+    pub audio_path: Option<String>,
+    pub engine: TranscriptionEngine,
+    pub whisper_text: &'a str,
+    pub deepgram_text: &'a str,
+    pub final_text: String,
+    pub duration_ms: u64,
+    pub source: &'a str,
+    pub transcription_latency_ms: u64,
+    pub dual_mode: bool,
+    pub deepgram_ran: bool,
+    pub sanitize: &'a SanitizeOutcome,
+    pub log_context: &'a str,
+}
+
+pub fn build_success_entry(input: BuildSuccessEntryInput<'_>) -> HistoryEntry {
+    let BuildSuccessEntryInput {
+        state,
+        id,
+        date,
+        audio_path,
+        engine,
+        whisper_text,
+        deepgram_text,
+        final_text,
+        duration_ms,
+        source,
+        transcription_latency_ms,
+        dual_mode,
+        deepgram_ran,
+        sanitize,
+        log_context,
+    } = input;
     let words = final_text.split_whitespace().count();
     let transcription_throughput = est_throughput(sanitize.raw_words, transcription_latency_ms);
     let sanitizer_throughput = est_throughput(words, sanitize.sanitizer_latency_ms);
@@ -353,18 +385,18 @@ pub fn build_success_entry(
         dual_mode,
         log_context,
     );
-    let pipeline_run = legacy_success_run(
+    let pipeline_run = legacy_success_run(crate::transcription::pipeline::LegacySuccessRunInput {
         state,
-        &id,
+        history_id: &id,
         engine,
         whisper_text,
         deepgram_text,
-        &final_text,
+        final_text: &final_text,
         transcription_latency_ms,
         dual_mode,
         deepgram_ran,
         sanitize,
-    );
+    });
 
     HistoryEntry {
         schema_version: PIPELINE_RUN_SCHEMA_VERSION,
@@ -433,16 +465,28 @@ pub fn build_success_entry(
 }
 
 /// Builds a failed history entry for a new transcription attempt.
-pub fn build_failed_entry(
-    state: &AppState,
-    id: String,
-    date: String,
-    audio_path: Option<String>,
-    duration_ms: u64,
-    source: &str,
-    engine: TranscriptionEngine,
-    error_msg: String,
-) -> HistoryEntry {
+pub struct BuildFailedEntryInput<'a> {
+    pub state: &'a AppState,
+    pub id: String,
+    pub date: String,
+    pub audio_path: Option<String>,
+    pub duration_ms: u64,
+    pub source: &'a str,
+    pub engine: TranscriptionEngine,
+    pub error_msg: String,
+}
+
+pub fn build_failed_entry(input: BuildFailedEntryInput<'_>) -> HistoryEntry {
+    let BuildFailedEntryInput {
+        state,
+        id,
+        date,
+        audio_path,
+        duration_ms,
+        source,
+        engine,
+        error_msg,
+    } = input;
     let dual_mode = *state.dual_engine.read();
     let deepgram_attempted = dual_mode || engine == TranscriptionEngine::DeepgramNova3;
     let pipeline_run = legacy_failed_run(&id, engine, dual_mode, &error_msg);

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-evaluate-pronunciation"
+description = "Enables the evaluate_pronunciation command without any pre-configured scope."
+commands.allow = ["evaluate_pronunciation"]
+
+[[permission]]
+identifier = "deny-evaluate-pronunciation"
+description = "Denies the evaluate_pronunciation command without any pre-configured scope."
+commands.deny = ["evaluate_pronunciation"]

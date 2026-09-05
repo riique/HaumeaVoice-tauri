@@ -59,18 +59,32 @@ pub async fn refine_with_audio(req: RefineRequest) -> Result<GeminiGenerateResul
 }
 
 /// Precise-mode refine: hybrid. Prefer precomputed base64 for parallel prep.
-pub async fn refine_precise(
-    api_key: &str,
-    model: &str,
-    audio: &[u8],
-    ext: &str,
-    display_name: &str,
-    whisper_hypothesis: &str,
-    glossary_block: &str,
-    file_tagging_enabled: bool,
-    duration_ms: Option<u64>,
-    precomputed_b64: Option<(String, u64)>,
-) -> Result<GeminiGenerateResult, String> {
+pub struct RefinePreciseInput<'a> {
+    pub api_key: &'a str,
+    pub model: &'a str,
+    pub audio: &'a [u8],
+    pub ext: &'a str,
+    pub display_name: &'a str,
+    pub whisper_hypothesis: &'a str,
+    pub glossary_block: &'a str,
+    pub file_tagging_enabled: bool,
+    pub duration_ms: Option<u64>,
+    pub precomputed_b64: Option<(String, u64)>,
+}
+
+pub async fn refine_precise(input: RefinePreciseInput<'_>) -> Result<GeminiGenerateResult, String> {
+    let RefinePreciseInput {
+        api_key,
+        model,
+        audio,
+        ext,
+        display_name,
+        whisper_hypothesis,
+        glossary_block,
+        file_tagging_enabled,
+        duration_ms,
+        precomputed_b64,
+    } = input;
     let mime = mime_for_ext(ext);
     let duration = duration_ms.or_else(|| estimate_wav_duration_ms(audio));
     let transport = select_gemini_audio_transport(audio.len(), duration, mime)?;
@@ -93,16 +107,30 @@ pub async fn refine_precise(
 }
 
 /// Precise-mode refine using an **already uploaded** remote file (caller owns cleanup).
+pub struct RefinePreciseWithFileInput<'a> {
+    pub api_key: &'a str,
+    pub model: &'a str,
+    pub file: &'a GeminiFileRef,
+    pub whisper_hypothesis: &'a str,
+    pub glossary_block: &'a str,
+    pub file_tagging_enabled: bool,
+    pub duration_ms: Option<u64>,
+    pub audio_bytes: usize,
+}
+
 pub async fn refine_precise_with_file(
-    api_key: &str,
-    model: &str,
-    file: &GeminiFileRef,
-    whisper_hypothesis: &str,
-    glossary_block: &str,
-    file_tagging_enabled: bool,
-    duration_ms: Option<u64>,
-    audio_bytes: usize,
+    input: RefinePreciseWithFileInput<'_>,
 ) -> Result<GeminiGenerateResult, String> {
+    let RefinePreciseWithFileInput {
+        api_key,
+        model,
+        file,
+        whisper_hypothesis,
+        glossary_block,
+        file_tagging_enabled,
+        duration_ms,
+        audio_bytes,
+    } = input;
     let prompt =
         precise_refinement_prompt(whisper_hypothesis, glossary_block, file_tagging_enabled);
     generate_with_remote_file(
@@ -186,19 +214,36 @@ pub async fn transcribe_inline(
 }
 
 /// UltraPrecise refine (hybrid).
+pub struct RefineUltrapreciseInput<'a> {
+    pub api_key: &'a str,
+    pub model: &'a str,
+    pub audio: &'a [u8],
+    pub ext: &'a str,
+    pub display_name: &'a str,
+    pub whisper_raw: &'a str,
+    pub sanitized: &'a str,
+    pub glossary_block: &'a str,
+    pub file_tagging_enabled: bool,
+    pub duration_ms: Option<u64>,
+    pub precomputed_b64: Option<(String, u64)>,
+}
+
 pub async fn refine_ultraprecise(
-    api_key: &str,
-    model: &str,
-    audio: &[u8],
-    ext: &str,
-    display_name: &str,
-    whisper_raw: &str,
-    sanitized: &str,
-    glossary_block: &str,
-    file_tagging_enabled: bool,
-    duration_ms: Option<u64>,
-    precomputed_b64: Option<(String, u64)>,
+    input: RefineUltrapreciseInput<'_>,
 ) -> Result<GeminiGenerateResult, String> {
+    let RefineUltrapreciseInput {
+        api_key,
+        model,
+        audio,
+        ext,
+        display_name,
+        whisper_raw,
+        sanitized,
+        glossary_block,
+        file_tagging_enabled,
+        duration_ms,
+        precomputed_b64,
+    } = input;
     let mime = mime_for_ext(ext);
     let duration = duration_ms.or_else(|| estimate_wav_duration_ms(audio));
     let transport = select_gemini_audio_transport(audio.len(), duration, mime)?;
@@ -225,17 +270,32 @@ pub async fn refine_ultraprecise(
 }
 
 /// UltraPrecise refine using an already-uploaded remote file (caller owns cleanup).
+pub struct RefineUltrapreciseWithFileInput<'a> {
+    pub api_key: &'a str,
+    pub model: &'a str,
+    pub file: &'a GeminiFileRef,
+    pub whisper_raw: &'a str,
+    pub sanitized: &'a str,
+    pub glossary_block: &'a str,
+    pub file_tagging_enabled: bool,
+    pub duration_ms: Option<u64>,
+    pub audio_bytes: usize,
+}
+
 pub async fn refine_ultraprecise_with_file(
-    api_key: &str,
-    model: &str,
-    file: &GeminiFileRef,
-    whisper_raw: &str,
-    sanitized: &str,
-    glossary_block: &str,
-    file_tagging_enabled: bool,
-    duration_ms: Option<u64>,
-    audio_bytes: usize,
+    input: RefineUltrapreciseWithFileInput<'_>,
 ) -> Result<GeminiGenerateResult, String> {
+    let RefineUltrapreciseWithFileInput {
+        api_key,
+        model,
+        file,
+        whisper_raw,
+        sanitized,
+        glossary_block,
+        file_tagging_enabled,
+        duration_ms,
+        audio_bytes,
+    } = input;
     let prompt = ultraprecise_refinement_prompt(
         whisper_raw,
         sanitized,

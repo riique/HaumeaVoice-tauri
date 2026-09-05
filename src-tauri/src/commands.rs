@@ -26,7 +26,7 @@ impl Serialize for CommandError {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(self.to_string().as_ref())
+        serializer.serialize_str(&crate::redaction::message(&self.to_string()))
     }
 }
 
@@ -64,6 +64,16 @@ pub async fn update_engine_config(
 
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::settings::save_engine_config_batch(
+            Some(payload.engine),
+            Some(payload.sanitizer),
+            payload.dual_engine,
+            payload.reasoning_enabled,
+            payload.reasoning_effort.clone(),
+            payload.deepgram_mode,
+        )
+        .map_err(CommandError::Internal)?;
         {
             *shared.engine.write() = payload.engine;
         }
@@ -82,15 +92,6 @@ pub async fn update_engine_config(
         {
             *shared.deepgram_mode.write() = payload.deepgram_mode;
         }
-
-        crate::settings::save_engine_config_batch(
-            Some(payload.engine),
-            Some(payload.sanitizer),
-            payload.dual_engine,
-            payload.reasoning_enabled,
-            payload.reasoning_effort.clone(),
-            payload.deepgram_mode,
-        );
 
         Ok(EngineConfigSnapshot {
             engine: payload.engine,
@@ -206,18 +207,21 @@ pub async fn update_mode_config(
 
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        *shared.modes_enabled.write() = true;
-        *shared.transcription_mode.write() = payload.mode;
-        *shared.gemini_fallback_to_whisper.write() = payload.gemini_fallback_to_whisper;
-        *shared.file_tagging_enabled.write() = payload.file_tagging_enabled;
-        *shared.gemini_pipelines.write() = payload.gemini_pipelines.clone();
+        let _config = crate::models::CONFIG_LOCK.lock();
         crate::settings::save_mode_config_batch(
             true,
             payload.mode,
             payload.gemini_fallback_to_whisper,
             payload.file_tagging_enabled,
             payload.gemini_pipelines.clone(),
-        );
+        )
+        .map_err(CommandError::Internal)?;
+        *shared.modes_enabled.write() = true;
+        *shared.transcription_mode.write() = payload.mode;
+        *shared.gemini_fallback_to_whisper.write() = payload.gemini_fallback_to_whisper;
+        *shared.file_tagging_enabled.write() = payload.file_tagging_enabled;
+        *shared.gemini_pipelines.write() = payload.gemini_pipelines.clone();
+
         let (label, desc) = mode_copy(payload.mode);
         Ok(ModeConfigSnapshot {
             modes_enabled: true,
@@ -302,23 +306,23 @@ pub async fn save_api_keys(
 
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
+        let _config = crate::models::CONFIG_LOCK.lock();
+        let mut guard = shared.api_keys.write();
+        let resolve = crate::secrets::resolve;
         let keys = crate::models::ApiKeys {
-            groq: payload.groq,
-            google: payload.google,
-            deepgram: payload.deepgram,
-            openrouter: payload.openrouter,
-            meta: payload.meta,
+            groq: resolve("groq", payload.groq, &guard.groq).map_err(CommandError::Internal)?,
+            google: resolve("google", payload.google, &guard.google)
+                .map_err(CommandError::Internal)?,
+            deepgram: resolve("deepgram", payload.deepgram, &guard.deepgram)
+                .map_err(CommandError::Internal)?,
+            openrouter: resolve("openrouter", payload.openrouter, &guard.openrouter)
+                .map_err(CommandError::Internal)?,
+            meta: resolve("meta", payload.meta, &guard.meta).map_err(CommandError::Internal)?,
         }
         .normalized();
-
-        {
-            let mut guard = shared.api_keys.write();
-            *guard = keys.clone();
-        }
-
-        // Persist outside the lock; the in-memory state is already authoritative
-        // for the running session, so a failed write only affects the next launch.
-        crate::secrets::save(&keys);
+        crate::secrets::save(&keys).map_err(CommandError::Internal)?;
+        crate::redaction::register(&keys);
+        *guard = keys;
         Ok(())
     })
     .await
@@ -335,7 +339,7 @@ pub async fn get_api_keys(
     state: State<'_, SharedState>,
 ) -> Result<crate::models::ApiKeys, CommandError> {
     let shared = state.inner().clone();
-    let keys = tokio::task::spawn_blocking(move || shared.api_keys.read().clone())
+    let keys = tokio::task::spawn_blocking(move || crate::secrets::mask(&shared.api_keys.read()))
         .await
         .map_err(|e| CommandError::Internal(e.to_string()))?;
     Ok(keys)
@@ -370,6 +374,10 @@ pub async fn evaluate_pronunciation(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<String, CommandError> {
+    let lease = state
+        .operations
+        .begin("pronunciation")
+        .map_err(CommandError::Internal)?;
     log::info!("evaluate_pronunciation: id={}", id);
 
     let entry = crate::history::get(&id)
@@ -390,13 +398,17 @@ pub async fn evaluate_pronunciation(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "wav".to_string());
 
-    let feedback =
-        crate::gemini::evaluate_pronunciation(audio_bytes, &ext, &entry.text, &google_key)
-            .await
-            .map_err(CommandError::Internal)?;
+    let feedback = tokio::select! { biased;
+        _ = lease.cancelled() => return Err(CommandError::Internal("Avaliação cancelada".into())),
+        result = crate::gemini::evaluate_pronunciation(audio_bytes, &ext, &entry.text, &google_key) => result.map_err(CommandError::Internal)?,
+    };
 
     // Persist the feedback so it is shown again without re-calling Gemini.
-    crate::history::set_evaluation(&id, &feedback);
+    if !crate::history::set_evaluation(&id, &feedback) {
+        return Err(CommandError::Internal(
+            "Não foi possível salvar a avaliação".into(),
+        ));
+    }
 
     Ok(feedback)
 }
@@ -431,6 +443,16 @@ pub fn cancel_recording(
     app: tauri::AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), CommandError> {
+    if state.operations.status().is_some_and(|job| {
+        matches!(
+            job.kind.as_str(),
+            "import" | "export" | "archive" | "history-edit" | "voice-profile"
+        )
+    }) {
+        return Err(CommandError::Internal(
+            "Aguarde a gravação dos dados para preservar sua integridade".into(),
+        ));
+    }
     crate::shortcuts::handle_cancel(&app, state.inner());
     Ok(())
 }
@@ -457,10 +479,10 @@ pub fn get_recording_status(state: State<'_, SharedState>) -> crate::models::Rec
 /// list lives in `history.json` inside the app data directory and is
 /// kept in sync across invocations by the `history` module.
 #[tauri::command]
-pub async fn get_history() -> Vec<crate::models::HistoryEntry> {
+pub async fn get_history() -> Result<Vec<crate::models::HistoryEntry>, CommandError> {
     tokio::task::spawn_blocking(|| {
         let developer_mode = crate::settings::load_dev_mode();
-        let mut entries = crate::history::load_all();
+        let mut entries = crate::history::try_load_all().map_err(CommandError::Internal)?;
         if !developer_mode {
             for entry in &mut entries {
                 entry.debug_info = None;
@@ -473,10 +495,10 @@ pub async fn get_history() -> Vec<crate::models::HistoryEntry> {
                 }
             }
         }
-        entries
+        Ok::<_, CommandError>(entries)
     })
     .await
-    .unwrap_or_default()
+    .map_err(|e| CommandError::Internal(e.to_string()))?
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -519,7 +541,7 @@ pub async fn set_audio_storage_directory(
             ),
             None => None,
         };
-        crate::settings::save_audio_directory(saved);
+        crate::settings::save_audio_directory(saved).map_err(CommandError::Internal)?;
         audio_storage_snapshot()
     })
     .await
@@ -589,17 +611,27 @@ pub async fn read_history_audio(id: String) -> Result<tauri::ipc::Response, Comm
 /// Wipes the persisted transcription history. Used by the "Limpar Tudo"
 /// button in the Histórico view.
 #[tauri::command]
-pub async fn clear_history() {
-    tokio::task::spawn_blocking(|| {
-        crate::history::clear();
-    })
-    .await
-    .unwrap_or_default();
+pub async fn clear_history(state: State<'_, SharedState>) -> Result<(), CommandError> {
+    let _lease = state
+        .operations
+        .begin("history-edit")
+        .map_err(CommandError::Internal)?;
+    tokio::task::spawn_blocking(crate::history::clear)
+        .await
+        .map_err(|e| CommandError::Internal(e.to_string()))?
+        .map_err(CommandError::Internal)
 }
 
 /// Deletes a single history entry (and its audio file if present).
 #[tauri::command]
-pub async fn delete_history_entry(id: String) -> Result<(), CommandError> {
+pub async fn delete_history_entry(
+    state: State<'_, SharedState>,
+    id: String,
+) -> Result<(), CommandError> {
+    let _lease = state
+        .operations
+        .begin("history-edit")
+        .map_err(CommandError::Internal)?;
     let ok = tokio::task::spawn_blocking(move || crate::history::delete_entry(&id))
         .await
         .map_err(|e| CommandError::Internal(e.to_string()))?;
@@ -607,14 +639,23 @@ pub async fn delete_history_entry(id: String) -> Result<(), CommandError> {
         Ok(())
     } else {
         Err(CommandError::Internal(
-            "entrada de histórico não encontrada".into(),
+            "não foi possível alterar o histórico; confira o armazenamento e tente novamente"
+                .into(),
         ))
     }
 }
 
 /// Updates the final text of a history entry (manual edit). Keeps evaluation.
 #[tauri::command]
-pub async fn update_history_text(id: String, text: String) -> Result<(), CommandError> {
+pub async fn update_history_text(
+    state: State<'_, SharedState>,
+    id: String,
+    text: String,
+) -> Result<(), CommandError> {
+    let _lease = state
+        .operations
+        .begin("history-edit")
+        .map_err(CommandError::Internal)?;
     let entry = crate::history::get(&id)
         .ok_or_else(|| CommandError::Internal("entrada de histórico não encontrada".into()))?;
     let before = entry.text.clone();
@@ -642,7 +683,8 @@ pub async fn update_history_text(id: String, text: String) -> Result<(), Command
         Ok(())
     } else {
         Err(CommandError::Internal(
-            "entrada de histórico não encontrada".into(),
+            "não foi possível alterar o histórico; confira o armazenamento e tente novamente"
+                .into(),
         ))
     }
 }
@@ -667,6 +709,7 @@ pub async fn resolve_vocabulary_suggestion(
         .map_err(CommandError::Internal)?;
     if accepted {
         let event = event.ok_or_else(|| CommandError::Internal("suggestion not found".into()))?;
+        let _config = crate::models::CONFIG_LOCK.lock();
         let mut vocabulary = state.vocabulary.read().clone();
         if let Some(term) = vocabulary
             .iter_mut()
@@ -690,7 +733,7 @@ pub async fn resolve_vocabulary_suggestion(
         }
         let vocabulary = crate::vocabulary::normalize_and_validate(vocabulary)
             .map_err(CommandError::InvalidPayload)?;
-        crate::settings::save_vocabulary(vocabulary.clone());
+        crate::settings::save_vocabulary(vocabulary.clone()).map_err(CommandError::Internal)?;
         *state.vocabulary.write() = vocabulary;
     }
     Ok(())
@@ -736,6 +779,10 @@ pub async fn set_ai_voice_profile_enabled(enabled: bool) -> Result<(), CommandEr
 pub async fn generate_ai_voice_profile(
     state: State<'_, SharedState>,
 ) -> Result<crate::insights::VoiceProfile, CommandError> {
+    let _lease = state
+        .operations
+        .begin("voice-profile")
+        .map_err(CommandError::Internal)?;
     crate::insights::generate_voice_profile(state.inner())
         .await
         .map_err(CommandError::Internal)
@@ -752,6 +799,7 @@ pub async fn add_insight_correction_to_vocabulary(
             "Correção e grafia canônica são obrigatórias.".into(),
         ));
     }
+    let _config = crate::models::CONFIG_LOCK.lock();
     let mut vocabulary = state.vocabulary.read().clone();
     if let Some(term) = vocabulary
         .iter_mut()
@@ -775,7 +823,7 @@ pub async fn add_insight_correction_to_vocabulary(
     }
     let vocabulary = crate::vocabulary::normalize_and_validate(vocabulary)
         .map_err(CommandError::InvalidPayload)?;
-    crate::settings::save_vocabulary(vocabulary.clone());
+    crate::settings::save_vocabulary(vocabulary.clone()).map_err(CommandError::Internal)?;
     *state.vocabulary.write() = vocabulary;
     crate::learning::accept_pair(before.trim(), after.trim()).map_err(CommandError::Internal)?;
     Ok(())
@@ -793,8 +841,9 @@ pub async fn save_system_prompt(
     log::info!("save_system_prompt: {} chars", prompt.len());
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        *shared.system_prompt.write() = prompt.clone();
-        crate::settings::save_system_prompt(prompt);
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::settings::save_system_prompt(prompt.clone()).map_err(CommandError::Internal)?;
+        *shared.system_prompt.write() = prompt;
         Ok(())
     })
     .await
@@ -862,11 +911,13 @@ pub async fn set_custom_words(
     let shared = state.inner().clone();
     let terms_store = terms.clone();
     tokio::task::spawn_blocking(move || {
-        *shared.vocabulary.write() = terms_store.clone();
-        crate::settings::save_vocabulary(terms_store);
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::settings::save_vocabulary(terms_store.clone()).map_err(CommandError::Internal)?;
+        *shared.vocabulary.write() = terms_store;
+        Ok::<(), CommandError>(())
     })
     .await
-    .map_err(|e| CommandError::Internal(e.to_string()))?;
+    .map_err(|e| CommandError::Internal(e.to_string()))??;
 
     Ok(result)
 }
@@ -890,11 +941,13 @@ pub async fn set_vocabulary(
     let shared = state.inner().clone();
     let result = cleaned.clone();
     tokio::task::spawn_blocking(move || {
-        *shared.vocabulary.write() = cleaned.clone();
-        crate::settings::save_vocabulary(cleaned);
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::settings::save_vocabulary(cleaned.clone()).map_err(CommandError::Internal)?;
+        *shared.vocabulary.write() = cleaned;
+        Ok::<(), CommandError>(())
     })
     .await
-    .map_err(|e| CommandError::Internal(e.to_string()))?;
+    .map_err(|e| CommandError::Internal(e.to_string()))??;
 
     Ok(result)
 }
@@ -945,11 +998,17 @@ pub async fn set_widget_visibility_mode(
     mode: WidgetVisibilityMode,
 ) -> Result<WidgetPreferences, CommandError> {
     log::info!("set_widget_visibility_mode: {:?}", mode);
-    *state.widget_visibility_mode.write() = mode;
-    *state.compact_mode.write() = mode == WidgetVisibilityMode::Always;
-    tokio::task::spawn_blocking(move || crate::settings::save_widget_visibility_mode(mode))
-        .await
-        .map_err(|error| CommandError::Internal(error.to_string()))?;
+    let shared = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::settings::save_widget_visibility_mode(mode)?;
+        *shared.widget_visibility_mode.write() = mode;
+        *shared.compact_mode.write() = mode == WidgetVisibilityMode::Always;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+    .map_err(CommandError::Internal)?;
 
     let current = *state.gadget_visual_state.read();
     if matches!(
@@ -1037,7 +1096,7 @@ pub async fn get_dev_mode() -> Result<bool, CommandError> {
 pub async fn set_dev_mode(value: bool) -> Result<(), CommandError> {
     log::info!("set_dev_mode: {}", value);
     tokio::task::spawn_blocking(move || {
-        crate::settings::save_dev_mode(value);
+        crate::settings::save_dev_mode(value).map_err(CommandError::Internal)?;
         Ok(())
     })
     .await
@@ -1058,10 +1117,16 @@ pub async fn set_context_preferences(
 ) -> Result<crate::context::ContextPreferences, CommandError> {
     preferences.max_context_chars = preferences.max_context_chars.clamp(100, 4_000);
     let persisted = preferences.clone();
-    tokio::task::spawn_blocking(move || crate::settings::save_context_preferences(persisted))
-        .await
-        .map_err(|error| CommandError::Internal(error.to_string()))?;
-    *state.context_preferences.write() = preferences.clone();
+    let shared = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::settings::save_context_preferences(persisted.clone())?;
+        *shared.context_preferences.write() = persisted;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+    .map_err(CommandError::Internal)?;
     Ok(preferences)
 }
 
@@ -1121,21 +1186,20 @@ pub async fn set_output_policy_config(
         }
     }
 
-    let persisted_profiles = config.profiles.clone();
-    let persisted_level = config.formatting_level;
-    let persisted_destination = config.destination;
+    let persisted = config.clone();
+    let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        crate::settings::save_output_profiles(persisted_profiles);
-        crate::settings::save_formatting_level(persisted_level);
-        crate::settings::save_dictation_destination(persisted_destination);
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::settings::save_output_policy(&persisted)?;
+        *shared.formatting_level.write() = persisted.formatting_level;
+        *shared.dictation_destination.write() = persisted.destination;
+        *shared.output_profiles.write() = persisted.profiles;
+        *shared.temporary_profile_override.write() = persisted.temporary_override;
+        Ok::<(), String>(())
     })
     .await
-    .map_err(|error| CommandError::Internal(error.to_string()))?;
-
-    *state.formatting_level.write() = config.formatting_level;
-    *state.dictation_destination.write() = config.destination;
-    *state.output_profiles.write() = config.profiles.clone();
-    *state.temporary_profile_override.write() = config.temporary_override.clone();
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+    .map_err(CommandError::Internal)?;
     Ok(config)
 }
 
@@ -1144,7 +1208,8 @@ pub async fn get_scratchpad_notes() -> Result<Vec<crate::scratchpad::ScratchpadN
 {
     tokio::task::spawn_blocking(crate::scratchpad::list)
         .await
-        .map_err(|error| CommandError::Internal(error.to_string()))
+        .map_err(|error| CommandError::Internal(error.to_string()))?
+        .map_err(CommandError::Internal)
 }
 
 #[tauri::command]
@@ -1159,7 +1224,8 @@ pub async fn delete_scratchpad_note(id: String) -> Result<bool, CommandError> {
 pub async fn get_snippets() -> Result<Vec<crate::snippets::VoiceSnippet>, CommandError> {
     tokio::task::spawn_blocking(crate::snippets::list)
         .await
-        .map_err(|error| CommandError::Internal(error.to_string()))
+        .map_err(|error| CommandError::Internal(error.to_string()))?
+        .map_err(CommandError::Internal)
 }
 
 #[tauri::command]
@@ -1196,8 +1262,9 @@ pub async fn set_sanitizer_enabled(
     log::info!("set_sanitizer_enabled: {}", value);
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::settings::save_sanitizer_enabled(value).map_err(CommandError::Internal)?;
         *shared.sanitizer_enabled.write() = value;
-        crate::settings::save_sanitizer_enabled(value);
         Ok(())
     })
     .await
@@ -1244,7 +1311,7 @@ pub async fn get_input_device() -> Option<String> {
 pub async fn set_input_device(device: Option<String>) -> Result<(), CommandError> {
     log::info!("set_input_device: {:?}", device);
     tokio::task::spawn_blocking(move || {
-        crate::settings::save_input_device(device);
+        crate::settings::save_input_device(device).map_err(CommandError::Internal)?;
         Ok(())
     })
     .await
@@ -1263,7 +1330,19 @@ pub async fn start_mic_test(
     log::info!("start_mic_test");
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        crate::audio::start_mic_test_stream(&app, &shared).map_err(CommandError::Internal)
+        let lease = shared
+            .operations
+            .begin("mic-test")
+            .map_err(CommandError::Internal)?;
+        crate::audio::start_mic_test_stream(&app, &shared).map_err(CommandError::Internal)?;
+        if shared.operations.status().is_some_and(|job| job.cancelled) {
+            shared.test_stream.lock().take();
+            return Err(CommandError::Internal(
+                "Teste de microfone cancelado".into(),
+            ));
+        }
+        *shared.test_lease.lock() = Some(lease);
+        Ok(())
     })
     .await
     .map_err(|e| CommandError::Internal(e.to_string()))?
@@ -1278,6 +1357,7 @@ pub async fn stop_mic_test(state: State<'_, SharedState>) -> Result<(), CommandE
     let shared = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         *shared.test_stream.lock() = None;
+        shared.test_lease.lock().take();
         Ok(())
     })
     .await
@@ -1429,4 +1509,125 @@ pub async fn set_autostart(enabled: bool) -> Result<(), CommandError> {
     })
     .await
     .map_err(|e| CommandError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn get_history_page(
+    query: String,
+    offset: usize,
+    limit: usize,
+    deleted: bool,
+) -> Result<crate::history::Page, CommandError> {
+    tokio::task::spawn_blocking(move || crate::history::page(&query, offset, limit, deleted))
+        .await
+        .map_err(|e| CommandError::Internal(e.to_string()))?
+        .map_err(CommandError::Internal)
+}
+#[tauri::command]
+pub fn get_history_detail(id: String) -> Result<crate::models::HistoryEntry, CommandError> {
+    let mut entry = crate::history::get(&id)
+        .ok_or_else(|| CommandError::Internal("Entrada não encontrada".into()))?;
+    if !crate::settings::load_dev_mode() {
+        entry.debug_info = None;
+        for run in &mut entry.pipeline_runs {
+            run.debug_info = None;
+            for attempt in &mut run.attempts {
+                attempt.result.request_sanitized = None;
+                attempt.result.response_sanitized = None;
+            }
+        }
+    }
+    Ok(entry)
+}
+#[tauri::command]
+pub fn restore_history_entry(id: String) -> Result<(), CommandError> {
+    crate::history::restore_entry(&id).map_err(CommandError::Internal)
+}
+#[tauri::command]
+pub fn repair_history_journal() -> Result<(), CommandError> {
+    crate::history::repair_journal().map_err(CommandError::Internal)
+}
+
+#[tauri::command]
+pub async fn get_local_diagnostics(
+    state: State<'_, SharedState>,
+) -> Result<crate::maintenance::Diagnostics, CommandError> {
+    let shared = state.inner().clone();
+    tokio::task::spawn_blocking(move || crate::maintenance::diagnostics(&shared))
+        .await
+        .map_err(|e| CommandError::Internal(e.to_string()))
+}
+#[tauri::command]
+pub async fn retry_recovery_audio(
+    state: State<'_, SharedState>,
+    id: String,
+) -> Result<String, CommandError> {
+    crate::maintenance::retry_audio(state.inner(), id)
+        .await
+        .map_err(CommandError::Internal)
+}
+#[tauri::command]
+pub async fn export_local_data(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+    destination: String,
+    include_audio: Option<bool>,
+) -> Result<(), CommandError> {
+    let lease = state
+        .operations
+        .begin("export")
+        .map_err(CommandError::Internal)?;
+    tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        let _config = crate::models::CONFIG_LOCK.lock();
+        crate::maintenance::export(
+            &app,
+            std::path::Path::new(&destination),
+            include_audio.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))?
+    .map_err(CommandError::Internal)
+}
+#[tauri::command]
+pub async fn import_local_data(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+    source: String,
+) -> Result<usize, CommandError> {
+    let _lease = state
+        .operations
+        .begin("import")
+        .map_err(CommandError::Internal)?;
+    let shared = state.inner().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _config = crate::models::CONFIG_LOCK.lock();
+        let result = crate::maintenance::import_history(&app, std::path::Path::new(&source))?;
+        *shared.vocabulary.write() = crate::settings::load_vocabulary();
+        *shared.output_profiles.write() = crate::settings::load_output_profiles();
+        Ok::<_, String>(result)
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))?
+    .map_err(CommandError::Internal)?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn archive_history_audio(
+    state: State<'_, SharedState>,
+    id: String,
+    destination: String,
+) -> Result<String, CommandError> {
+    let _lease = state
+        .operations
+        .begin("archive")
+        .map_err(CommandError::Internal)?;
+    tokio::task::spawn_blocking(move || {
+        crate::maintenance::archive_audio(&id, std::path::Path::new(&destination))
+    })
+    .await
+    .map_err(|e| CommandError::Internal(e.to_string()))?
+    .map_err(CommandError::Internal)
 }

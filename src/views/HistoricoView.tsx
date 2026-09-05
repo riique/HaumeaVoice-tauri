@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -25,7 +25,8 @@ import { PronunciationEvaluation } from "../components/PronunciationEvaluation";
 import {
   evaluatePronunciation,
   getDevMode,
-  getHistory,
+  getHistoryPage,
+  getHistoryDetail,
   readHistoryAudio,
   revealHistoryAudio,
   retryTranscription,
@@ -250,6 +251,9 @@ function PipelineInspector({ entry, devMode }: { entry: HistoryEntry; devMode: b
 }
 
 export function HistoricoView() {
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const generation = useRef(0);
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -265,6 +269,7 @@ export function HistoricoView() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const menuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { if (menuOpen) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus(); }, [menuOpen]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const activeAudioIdRef = useRef<string | null>(null);
@@ -287,15 +292,19 @@ export function HistoricoView() {
     setPlayingId(null);
   };
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
+    const request = ++generation.current;
     try {
-      setItems(await getHistory());
+      const page = await getHistoryPage(query, offset);
+      if (request !== generation.current) return;
+      setItems(page.items); setTotal(page.total);
+      setErrors((current) => ({ ...current, load: "" }));
     } catch (error) {
-      console.error("failed to load history:", error);
+      setErrors((current) => ({ ...current, load: `Não foi possível carregar o histórico: ${String(error)}` }));
     } finally {
       setLoading(false);
     }
-  };
+  }, [query, offset]);
 
   useEffect(() => {
     void refresh();
@@ -305,7 +314,7 @@ export function HistoricoView() {
       void unlistenPromise.then((unlisten) => unlisten());
       releaseAudio();
     };
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     const close = (event: MouseEvent) => {
@@ -315,10 +324,14 @@ export function HistoricoView() {
     return () => document.removeEventListener("pointerdown", close);
   }, []);
 
-  const filtered = query.trim()
-    ? items.filter((item) => `${item.text} ${item.error_message ?? ""}`.toLowerCase().includes(query.trim().toLowerCase()))
-    : items;
+  const filtered = items;
 
+  const inspect = async (entry: HistoryEntry) => {
+    setMenuOpen(null);
+    if (detailsOpen[entry.id]) { setDetailsOpen((current) => ({ ...current, [entry.id]: false })); return; }
+    try { const detail = await getHistoryDetail(entry.id); setItems((current) => current.map((item) => item.id === entry.id ? detail : item)); setDetailsOpen((current) => ({ ...current, [entry.id]: true })); }
+    catch (e) { setErrors((current) => ({ ...current, [entry.id]: String(e) })); }
+  };
   const copyText = async (id: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -457,12 +470,18 @@ export function HistoricoView() {
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-64 flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#8b8c85]" aria-hidden />
-          <Input aria-label="Buscar transcrições" placeholder="Buscar transcrições…" value={query} onChange={(event) => setQuery(event.target.value)} className="pl-9" />
+          <Input aria-label="Buscar transcrições" placeholder="Buscar transcrições…" value={query} onChange={(event) => { setOffset(0); setQuery(event.target.value); }} className="pl-9" />
         </div>
-        <Button size="sm" disabled={!items.some((item) => !item.is_error && item.text.trim())} onClick={() => void copyAll()}><Copy className="h-3.5 w-3.5" aria-hidden />Copiar todas</Button>
+        <Button size="sm" disabled={!items.some((item) => !item.is_error && item.text.trim())} onClick={() => void copyAll()}><Copy className="h-3.5 w-3.5" aria-hidden />Copiar página</Button>
         <Button size="sm" variant="danger" disabled={!items.length} onClick={() => void clearAll()}><Trash2 className="h-3.5 w-3.5" aria-hidden />Limpar</Button>
       </div>
 
+      <nav aria-label="Paginação do histórico" className="flex flex-wrap items-center gap-3 text-sm">
+        <Button size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Anterior</Button>
+        <span aria-live="polite">{total ? offset + 1 : 0}–{Math.min(offset + items.length, total)} de {total.toLocaleString("pt-BR")}</span>
+        <Button size="sm" disabled={offset + 50 >= total} onClick={() => setOffset(offset + 50)}>Próxima</Button>
+      </nav>
+      {errors.load && <div role="alert" className="text-sm"><p>{errors.load}</p><Button onClick={() => void refresh()}>Tentar novamente</Button></div>}
       {loading ? <div className="surface"><SkeletonRows count={5} /></div> : filtered.length === 0 ? (
         <div className="surface"><EmptyState title={query ? "Nenhum resultado" : "Histórico vazio"} description={query ? "Tente buscar por outro trecho." : "Suas próximas transcrições aparecerão aqui."} /></div>
       ) : (
@@ -505,23 +524,29 @@ export function HistoricoView() {
                     {hasAudio && <button className="icon-button" disabled={loadingAudioId === entry.id} onClick={() => void toggleAudio(entry)} aria-label={playingId === entry.id ? "Pausar áudio" : "Reproduzir áudio"} title={playingId === entry.id ? "Pausar áudio" : "Reproduzir áudio"}>{loadingAudioId === entry.id ? <Loader2 className="h-4 w-4 animate-spin" /> : playingId === entry.id ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}</button>}
                     {!isError && <button className="icon-button" onClick={() => void copyText(entry.id, entry.text)} aria-label="Copiar transcrição" title="Copiar">{copiedId === entry.id ? <Check className="h-4 w-4 text-[#25613f]" /> : <Copy className="h-4 w-4" />}</button>}
                     {!isError && <button className="icon-button" onClick={() => { setEditingId(entry.id); setEditDraft(entry.text); }} aria-label="Editar transcrição" title="Editar"><Pencil className="h-4 w-4" /></button>}
-                    {hasAudio && <button className="icon-button" disabled={isBusy} onClick={() => void retry(entry.id)} aria-label="Retranscrever" title="Retranscrever">{isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}</button>}
+                    {hasAudio && <button className="icon-button" disabled={busyId !== null} onClick={() => void retry(entry.id)} aria-label="Retranscrever" title="Retranscrever">{isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}</button>}
                     <div className="relative" ref={menuOpen === entry.id ? menuRef : undefined}>
-                      <button className="icon-button" onClick={() => setMenuOpen((current) => current === entry.id ? null : entry.id)} aria-label="Mais ações" aria-expanded={menuOpen === entry.id}><MoreHorizontal className="h-4 w-4" /></button>
+                      <button className="icon-button" onClick={() => setMenuOpen((current) => current === entry.id ? null : entry.id)} aria-label="Mais ações" aria-haspopup="menu" aria-expanded={menuOpen === entry.id}><MoreHorizontal className="h-4 w-4" /></button>
                       {menuOpen === entry.id && (
-                        <div className="menu-panel z-50 w-52" role="menu">
+                        <div className="menu-panel z-50 w-52" role="menu" onKeyDown={(event) => {
+                          const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+                          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+                          if (event.key === "Escape") { setMenuOpen(null); menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus(); }
+                          if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length; buttons[next]?.focus(); }
+                        }}>
                           {hasAudio && <button className="menu-item" role="menuitem" onClick={() => { setMenuOpen(null); void revealHistoryAudio(entry.id).catch((error) => setErrors((current) => ({ ...current, [entry.id]: String(error) }))); }}><FolderOpen className="h-4 w-4" />Mostrar áudio</button>}
                           {hasAudio && !isError && <button className="menu-item" role="menuitem" onClick={() => void evaluate(entry)}><Sparkles className="h-4 w-4" />{entry.evaluation ? "Ver pronúncia" : "Avaliar pronúncia"}</button>}
                           {hasAudio && <button className="menu-item" role="menuitem" onClick={() => void useFallback(entry.id)}><RefreshCw className="h-4 w-4" />Usar fallback</button>}
                           {!isError && latestRun?.transcript.raw && <button className="menu-item" role="menuitem" onClick={() => void undo(entry, "raw")}><RotateCcw className="h-4 w-4" />Undo para RAW</button>}
                           {!isError && latestRun?.transcript.refined && <button className="menu-item" role="menuitem" onClick={() => void undo(entry, "refined")}><RotateCcw className="h-4 w-4" />Undo para REFINED</button>}
-                          <button className="menu-item" role="menuitem" onClick={() => { setDetailsOpen((current) => ({ ...current, [entry.id]: !current[entry.id] })); setMenuOpen(null); }}><Braces className="h-4 w-4" />{detailsOpen[entry.id] ? "Fechar Inspector" : "Pipeline Inspector"}</button>
+                          <button className="menu-item" role="menuitem" onClick={() => void inspect(entry)}><Braces className="h-4 w-4" />{detailsOpen[entry.id] ? "Fechar Inspector" : "Pipeline Inspector"}</button>
                           <button className="menu-item text-[#a72a21]" role="menuitem" onClick={() => void remove(entry.id)}><Trash2 className="h-4 w-4" />Excluir</button>
                         </div>
                       )}
                     </div>
                   </div>
                 </div>
+                {entry.error_message && !isError && <p role="status" className="mt-3 text-sm text-[#9f2720]">{entry.error_message} Use Copiar para entregar o texto sem retranscrever.</p>}
                 {errors[entry.id] && <p className="mt-3 rounded-[8px] bg-[#fff1ef] px-3 py-2 text-[11px] text-[#9f2720]" role="alert">{errors[entry.id]}</p>}
                 {detailsOpen[entry.id] && <PipelineInspector entry={entry} devMode={devMode} />}
                 {evaluationOpen[entry.id] && entry.evaluation && <div className="mt-5"><PronunciationEvaluation markdown={entry.evaluation} /></div>}

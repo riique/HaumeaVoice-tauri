@@ -1,10 +1,10 @@
 [package]
 name = "haumea-voice"
-version = "1.0.33"
+version = "1.0.34"
 description = "Haumea Voice desktop application"
 authors = ["Haumea Voice"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.97"
 
 [lib]
 name = "haumea_voice_lib"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools", "tray-icon"] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
 cpal = "0.15"
@@ -35,10 +35,12 @@ base64 = "0.22"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Security_Cryptography",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
+    "Win32_System_Ole",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Kernel",

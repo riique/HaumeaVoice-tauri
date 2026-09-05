@@ -53,25 +53,12 @@ pub fn load_store() -> ShortcutConfig {
 }
 
 /// Persists `cfg` to disk. Failures are logged, not propagated.
-pub fn save_store(cfg: &ShortcutConfig) {
-    let Some(lock) = SHORTCUTS_LOCK.get() else {
-        return;
-    };
-    let _guard = lock.lock();
-    let Some(file) = SHORTCUTS_PATH.get() else {
-        return;
-    };
-    if let Some(parent) = file.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    match serde_json::to_string_pretty(cfg) {
-        Ok(json) => {
-            if let Err(e) = fs::write(file, json) {
-                log::error!("shortcuts: failed to write file: {}", e);
-            }
-        }
-        Err(e) => log::error!("shortcuts: failed to serialize: {}", e),
-    }
+pub fn save_store(cfg: &ShortcutConfig) -> Result<(), String> {
+    let _guard = SHORTCUTS_LOCK.get_or_init(|| Mutex::new(())).lock();
+    let file = SHORTCUTS_PATH
+        .get()
+        .ok_or("Diretório de atalhos indisponível")?;
+    crate::storage::write_json(file, cfg)
 }
 
 /// Core toggle logic shared by the IPC command path and the global
@@ -114,15 +101,9 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
             std::thread::spawn(move || {
                 let start_requested_at = std::time::Instant::now();
 
-                // Opening the CPAL stream and asking Windows to unmute the input
-                // are independent. Run them concurrently so a muted endpoint does
-                // not add a fixed delay before capture can become ready.
-                let (capture_result, was_muted) = std::thread::scope(|scope| {
-                    let unmute = scope.spawn(crate::mic_control::ensure_mic_unmuted);
-                    let capture_result = start_capture(&state_bg, generation, &session_id);
-                    let was_muted = unmute.join().unwrap_or(false);
-                    (capture_result, was_muted)
-                });
+                // Respect the endpoint mute chosen by the user.
+                let capture_result = start_capture(&state_bg, generation, &session_id);
+                let was_muted = false;
 
                 match capture_result {
                     Ok(()) => {
@@ -169,6 +150,13 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
                         }
                         state_bg.clear_recording_start();
                         let failed_status = state_bg.recording_capture_failed(generation);
+                        cancel_capture(&state_bg);
+                        if failed_status
+                            .as_ref()
+                            .is_some_and(|status| status.phase == RecordingPhase::Idle)
+                        {
+                            state_bg.capture_lease.lock().take();
+                        }
                         if let Some(failed_status) = failed_status
                             .filter(|status| status.phase == RecordingPhase::Idle && !superseded)
                         {
@@ -208,7 +196,14 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
                 while state_clone.recording_capture_start_pending(generation) {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                let _ = stop_capture(&state_clone, delivery_target).await;
+                let lease = state_clone.capture_lease.lock().take();
+                if let Some(lease) = lease {
+                    tokio::select! { biased;
+                        _ = lease.cancelled() => { cancel_capture(&state_clone); let _ = app_clone.emit("operation-cancelled", lease.id); }
+                        _ = stop_capture(&state_clone, delivery_target) => {}
+                    }
+                }
+
                 let finished = state_clone.finish_recording_stop(generation);
                 if let Err(error) = app_clone.emit(event_names::RECORDING_IDLE, &finished) {
                     log::warn!("failed to emit {}: {}", event_names::RECORDING_IDLE, error);
@@ -240,6 +235,28 @@ pub fn handle_toggle(app: &AppHandle, state: &SharedState) -> bool {
 /// producing any WAV output and emits the `recording-cancelled`
 /// event so the UI resets the timer to 00:00.
 pub fn handle_cancel(app: &AppHandle, state: &SharedState) {
+    if state.operations.status().is_some_and(|job| {
+        matches!(
+            job.kind.as_str(),
+            "import" | "export" | "archive" | "history-edit" | "voice-profile"
+        )
+    }) {
+        return;
+    }
+    state.operations.cancel();
+    if state
+        .operations
+        .status()
+        .is_some_and(|job| job.kind == "mic-test")
+    {
+        state.test_stream.lock().take();
+        state.test_lease.lock().take();
+        return;
+    }
+    if state.recording_status().phase == RecordingPhase::Stopping {
+        return;
+    }
+
     let status = state.request_recording_cancel();
     if status.phase != RecordingPhase::Cancelling {
         log::info!(
@@ -263,6 +280,9 @@ pub fn handle_cancel(app: &AppHandle, state: &SharedState) {
         log::warn!("failed to emit {}: {}", event_names::RECORDING_CANCELLED, e);
     }
     let idle = state.finish_recording_cancel(status.generation);
+    if idle.phase == RecordingPhase::Idle {
+        state.capture_lease.lock().take();
+    }
     if idle.phase == RecordingPhase::Idle {
         if let Err(error) = app.emit(event_names::RECORDING_IDLE, &idle) {
             log::warn!("failed to emit {}: {}", event_names::RECORDING_IDLE, error);
@@ -335,8 +355,14 @@ pub fn apply_new(
     match register_all(app, &toggle, &cancel) {
         Ok(()) => {
             let cfg = ShortcutConfig { toggle, cancel };
+            if let Err(error) = save_store(&cfg) {
+                let previous = state.shortcuts.read().clone();
+                let _ = app.global_shortcut().unregister_all();
+                register_all(app, &previous.toggle, &previous.cancel)
+                    .map_err(|restore| format!("{error}; falha ao restaurar atalhos: {restore}"))?;
+                return Err(error);
+            }
             *state.shortcuts.write() = cfg.clone();
-            save_store(&cfg);
             log::info!("shortcuts: rebound to {} / {}", cfg.toggle, cfg.cancel);
             Ok(cfg)
         }

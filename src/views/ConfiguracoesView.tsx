@@ -1002,13 +1002,11 @@ function ProvedoresTab() {
     setSaving(id);
     setError("");
     try {
-      await saveApiKeys({
-        groq: keys.groq,
-        google: keys.google,
-        deepgram: keys.deepgram,
-        openrouter: keys.openrouter,
-        meta: keys.meta,
-      });
+      const current = await getApiKeys();
+      await saveApiKeys({ ...current, [id]: keys[id] });
+      const stored = await getApiKeys();
+      setKeys((draft) => ({ ...draft, [id]: stored[id] }));
+      setVisible({});
       setSaved(id);
       window.setTimeout(() => setSaved((c) => (c === id ? null : c)), 2000);
     } catch (e) {
@@ -1021,7 +1019,7 @@ function ProvedoresTab() {
   return (
     <div className="space-y-6">
       <p className="max-w-[72ch] text-[13px] leading-5 text-muted">
-        As chaves ficam somente neste computador. Os campos permanecem recolhidos até você escolher gerenciá-los.
+        As chaves são protegidas pela sua conta Windows. Credenciais salvas podem ser substituídas ou removidas; a interface não recupera seu valor.
       </p>
       {error && <div className="rounded-[10px] bg-[#fff1ef] px-4 py-3 text-[13px] text-[#9f2720]" role="alert">{error}</div>}
       <div className="divide-y divide-line border-y border-line">
@@ -1038,7 +1036,7 @@ function ProvedoresTab() {
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 className="text-[14px] font-medium text-ink">{provider.name}</h3>
                     <span className={"text-[11px] font-medium " + (keys[provider.id].some((key) => key.trim()) ? "text-[#25613f]" : "text-muted")}>
-                      {keys[provider.id].some((key) => key.trim()) ? "Conectado" : "Não configurado"}
+                      {keys[provider.id].some((key) => key.trim()) ? "Configurado · não verificado" : "Não configurado"}
                     </span>
                   </div>
                   <p className="mt-1 truncate text-[12px] text-muted" title={provider.requiredFor}>{provider.help}</p>
@@ -1060,8 +1058,8 @@ function ProvedoresTab() {
                             <Input
                               name={`${provider.id}-api-key-${index + 1}`}
                               type={visible[visibilityKey] ? "text" : "password"}
-                              placeholder={provider.placeholder}
-                              value={key}
+                              placeholder={key.startsWith("stored:") ? "Chave protegida · digite para substituir" : provider.placeholder}
+                              value={key.startsWith("stored:") ? "" : key}
                               onChange={(event) => setKeys((current) => ({ ...current, [provider.id]: current[provider.id].map((item, itemIndex) => itemIndex === index ? event.target.value : item) }))}
                               autoComplete="off"
                               spellCheck={false}
@@ -1083,7 +1081,7 @@ function ProvedoresTab() {
                     <Button size="sm" variant="ghost" onClick={() => setKeys((current) => ({ ...current, [provider.id]: [...current[provider.id], ""] }))}>
                       <Plus className="h-3.5 w-3.5" aria-hidden />Adicionar chave
                     </Button>
-                    <Button size="sm" variant="primary" disabled={saving === provider.id} onClick={() => save(provider.id)}>
+                    <Button size="sm" variant="primary" disabled={saving !== null} onClick={() => save(provider.id)}>
                       <Save className="h-3.5 w-3.5" aria-hidden />
                       {saving === provider.id ? "Salvando…" : saved === provider.id ? "Salvo" : "Salvar"}
                     </Button>

@@ -27,19 +27,18 @@ pub fn init(data_dir: PathBuf) {
     let _ = LOCK.set(Mutex::new(()));
 }
 
-fn read_unlocked() -> Vec<VoiceSnippet> {
-    PATH.get()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|contents| serde_json::from_str(&contents).ok())
-        .unwrap_or_default()
+fn read_unlocked() -> Result<Vec<VoiceSnippet>, String> {
+    crate::storage::read_json(PATH.get().ok_or("Armazenamento indisponível")?)
 }
 
-pub fn list() -> Vec<VoiceSnippet> {
+pub fn list() -> Result<Vec<VoiceSnippet>, String> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
     read_unlocked()
 }
 
 pub fn replace(snippets: Vec<VoiceSnippet>) -> Result<Vec<VoiceSnippet>, String> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
     validate(&snippets)?;
     let path = PATH.get().ok_or("snippet storage is not initialized")?;
@@ -47,7 +46,10 @@ pub fn replace(snippets: Vec<VoiceSnippet>) -> Result<Vec<VoiceSnippet>, String>
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let json = serde_json::to_string_pretty(&snippets).map_err(|error| error.to_string())?;
-    fs::write(path, json).map_err(|error| error.to_string())?;
+    crate::storage::write_json(
+        path,
+        &serde_json::from_str::<serde_json::Value>(&json).map_err(|error| error.to_string())?,
+    )?;
     Ok(snippets)
 }
 

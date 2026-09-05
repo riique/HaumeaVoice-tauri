@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-ai-voice-profile-enabled"
+description = "Enables the set_ai_voice_profile_enabled command without any pre-configured scope."
+commands.allow = ["set_ai_voice_profile_enabled"]
+
+[[permission]]
+identifier = "deny-set-ai-voice-profile-enabled"
+description = "Denies the set_ai_voice_profile_enabled command without any pre-configured scope."
+commands.deny = ["set_ai_voice_profile_enabled"]

@@ -513,6 +513,8 @@ pub struct FallbackRecord {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryRecord {
     #[serde(default)]
+    pub target_focus_id: Option<u64>,
+    #[serde(default)]
     pub destination: DictationDestination,
     #[serde(default)]
     pub target_hwnd: Option<isize>,
@@ -560,6 +562,8 @@ pub enum PipelineProgressKind {
 pub struct PipelineProgressEvent {
     pub kind: PipelineProgressKind,
     #[serde(default)]
+    pub operation_id: u64,
+    #[serde(default)]
     pub run_id: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
@@ -569,12 +573,22 @@ pub struct PipelineProgressEvent {
     pub message: Option<String>,
 }
 
-pub fn emit_pipeline_progress(state: &crate::models::AppState, event: PipelineProgressEvent) {
+pub fn emit_pipeline_progress(state: &crate::models::AppState, mut event: PipelineProgressEvent) {
+    let operation = state.operations.status();
+    if operation.as_ref().is_some_and(|job| job.cancelled) {
+        return;
+    }
+    event.operation_id = operation.as_ref().map_or(0, |job| job.id);
     let Some(handle) = state.app_handle.read().as_ref().cloned() else {
         return;
     };
-    if let Some(gadget) = handle.get_webview_window("gadget") {
-        let _ = gadget.emit(crate::models::event_names::PIPELINE_PROGRESS, &event);
+    if operation
+        .as_ref()
+        .is_some_and(|job| matches!(job.kind.as_str(), "microphone" | "retry-mic"))
+    {
+        if let Some(gadget) = handle.get_webview_window("gadget") {
+            let _ = gadget.emit(crate::models::event_names::PIPELINE_PROGRESS, &event);
+        }
     }
     if let Some(main) = handle.get_webview_window("main") {
         let _ = main.emit(crate::models::event_names::PIPELINE_PROGRESS, event);
@@ -788,7 +802,7 @@ impl PipelineRun {
                 .profile
                 .content_type
                 .as_deref()
-                .and_then(ContentType::from_str)
+                .and_then(ContentType::parse_str)
                 .unwrap_or_default(),
             context: session.context.persisted_metadata(),
             profile_id: Some(session.profile.profile_id.clone()),
@@ -798,6 +812,7 @@ impl PipelineRun {
                 destination: session.destination,
                 target_hwnd: session.delivery_target.hwnd,
                 target_process_id: session.delivery_target.process_id,
+                target_focus_id: session.delivery_target.focus_id,
                 ..DeliveryRecord::default()
             },
             ..Self::default()
@@ -901,7 +916,11 @@ impl PipelineRun {
         if self.model.is_empty() {
             self.model = self.models_used.last().cloned().unwrap_or_default();
         }
-        if let Some(content_type) = self.content_type.as_deref().and_then(ContentType::from_str) {
+        if let Some(content_type) = self
+            .content_type
+            .as_deref()
+            .and_then(ContentType::parse_str)
+        {
             self.content_hint = content_type;
         }
         let raw_candidate = self
@@ -1215,6 +1234,7 @@ mod tests {
             delivery_target: crate::context::ForegroundTarget {
                 hwnd: Some(4242),
                 process_id: Some(77),
+                focus_id: Some(1),
             },
             ..RecordingSession::default()
         };

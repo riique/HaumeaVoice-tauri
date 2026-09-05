@@ -1,10 +1,8 @@
 //! Persistent transcription history.
 //!
-//! Each finished transcription is appended to a JSON file stored inside the
-//! per-user Tauri app data directory (`history.json`). The file holds a plain
-//! `Vec<HistoryEntry>` with the newest entry first. Reads/writes are guarded
-//! by a process-wide `Mutex` so concurrent recording stops (which run on the
-//! Tokio runtime) cannot interleave and corrupt the file.
+//! The legacy JSON is a read-only baseline. Durable JSONL transactions are
+//! replayed into an indexed cache; pages omit heavy attempt details. Deletes
+//! remain recoverable. A partial transaction fails closed until explicit repair.
 
 use crate::models::HistoryEntry;
 use crate::pipeline_contract::{ContentType, TranscriptionMode};
@@ -126,7 +124,7 @@ fn migrate_entry(entry: &mut HistoryEntry) -> bool {
         run.content_hint = entry
             .content_type
             .as_deref()
-            .and_then(ContentType::from_str)
+            .and_then(ContentType::parse_str)
             .unwrap_or_default();
         run.debug_info = entry.debug_info.clone();
         run.normalize();
@@ -153,63 +151,6 @@ fn migrate_entry(entry: &mut HistoryEntry) -> bool {
     changed
 }
 
-fn decode_entries(contents: &str) -> (Vec<HistoryEntry>, bool) {
-    let mut entries: Vec<HistoryEntry> = match serde_json::from_str(contents) {
-        Ok(entries) => entries,
-        Err(error) => {
-            log::error!("history: failed to parse existing history: {}", error);
-            return (Vec::new(), false);
-        }
-    };
-    let mut changed = false;
-    for entry in &mut entries {
-        changed |= migrate_entry(entry);
-    }
-    (entries, changed)
-}
-
-fn read_entries(file: &PathBuf) -> (Vec<HistoryEntry>, bool) {
-    match fs::read_to_string(file) {
-        Ok(contents) if !contents.trim().is_empty() => decode_entries(&contents),
-        _ => (Vec::new(), false),
-    }
-}
-
-fn persist_entries(file: &PathBuf, entries: &[HistoryEntry]) -> bool {
-    if let Err(error) = fs::create_dir_all(file.parent().unwrap_or(file.as_path())) {
-        log::error!("history: could not create data dir: {}", error);
-        return false;
-    }
-    let json = match serde_json::to_string_pretty(entries) {
-        Ok(json) => json,
-        Err(error) => {
-            log::error!("history: failed to serialize: {}", error);
-            return false;
-        }
-    };
-    if let Err(error) = fs::write(file, json) {
-        log::error!("history: failed to write file: {}", error);
-        return false;
-    }
-    true
-}
-
-fn persist_migration(file: &PathBuf, entries: &[HistoryEntry]) {
-    let backup = file.with_extension("pre-v2.json");
-    if file.exists() && !backup.exists() {
-        if let Err(error) = fs::copy(file, &backup) {
-            log::error!("history: migration backup failed: {}", error);
-            return;
-        }
-    }
-    if persist_entries(file, entries) {
-        log::info!(
-            "history: migrated entries to schema {}",
-            PIPELINE_RUN_SCHEMA_VERSION
-        );
-    }
-}
-
 fn merge_updated_entry(existing: &HistoryEntry, updated: &HistoryEntry) -> HistoryEntry {
     let mut replacement = updated.clone();
     for prior_run in &existing.pipeline_runs {
@@ -228,168 +169,440 @@ fn merge_updated_entry(existing: &HistoryEntry, updated: &HistoryEntry) -> Histo
     replacement
 }
 
-/// Reads the full history from disk. Returns an empty vec if the file does
-/// not exist yet or cannot be parsed (treated as a fresh start rather than a
-/// hard error so a corrupted file never blocks the UI).
-pub fn load_all() -> Vec<HistoryEntry> {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        return Vec::new();
-    };
-    let (entries, migrated) = read_entries(file);
-    if migrated {
-        persist_migration(file, &entries);
-    }
-    entries
+/// A complete line is the commit boundary; partial writes are never accepted.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Event {
+    Import {
+        entries: Vec<HistoryEntry>,
+        #[serde(default)]
+        deleted: Vec<String>,
+    },
+    Upsert {
+        entry: Box<HistoryEntry>,
+    },
+    Delete {
+        id: String,
+    },
+    AudioPath {
+        id: String,
+        path: String,
+    },
+    Clear,
 }
-
-/// Appends `entry` to the front of the history list and persists it to disk.
-/// Failures are logged but never propagated: history is a convenience, not a
-/// requirement for the transcription to be considered successful.
-pub fn push(entry: HistoryEntry) {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        log::warn!("history: data directory not initialised, skipping save");
-        return;
-    };
-
-    let (mut entries, _) = read_entries(file);
-    entries.insert(0, entry.clone());
-    if persist_entries(file, &entries) {
-        crate::insights::enqueue_entry(entry);
-    }
+#[derive(Default)]
+struct Store {
+    entries: std::collections::HashMap<String, HistoryEntry>,
+    order: std::collections::VecDeque<String>,
+    active: std::collections::HashSet<String>,
 }
-
-/// Returns a single history entry by id, or `None` if it does not exist.
-/// Used by the pronunciation evaluator to recover the saved audio path and
-/// transcribed text for a given card.
-pub fn get(id: &str) -> Option<HistoryEntry> {
-    load_all().into_iter().find(|e| e.id == id)
-}
-
-/// Stores the Gemini pronunciation feedback on the entry with the given id and
-/// rewrites the history file. Returns `true` if the entry was found and
-/// updated. The whole file is rewritten because it is small and this keeps the
-/// on-disk format a plain JSON array.
-pub fn set_evaluation(id: &str, feedback: &str) -> bool {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        return false;
-    };
-
-    let (mut entries, _) = read_entries(file);
-
-    let mut found = false;
-    for entry in entries.iter_mut() {
-        if entry.id == id {
-            entry.evaluation = Some(feedback.to_string());
-            found = true;
-            break;
-        }
-    }
-
-    if found && !persist_entries(file, &entries) {
-        return false;
-    }
-    found
-}
-
-/// Empties the history file. Used by the "Limpar Tudo" button.
-pub fn clear() {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        return;
-    };
-    let (entries, _) = read_entries(file);
-    for entry in entries {
-        if let Some(path) = entry.audio_path {
-            crate::audio_store::remove_with_original(&path);
-        }
-    }
-    let _ = fs::write(file, "[]");
-    crate::insights::enqueue_clear();
-}
-
-/// Deletes one history entry by id. Also best-effort removes its audio file.
-pub fn delete_entry(id: &str) -> bool {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        return false;
-    };
-    let (mut entries, _) = read_entries(file);
-    let before = entries.len();
-    if let Some(pos) = entries.iter().position(|e| e.id == id) {
-        if let Some(p) = entries[pos].audio_path.take() {
-            crate::audio_store::remove_with_original(&p);
-        }
-        entries.remove(pos);
-    }
-    if entries.len() == before {
-        return false;
-    }
-    let persisted = persist_entries(file, &entries);
-    if persisted {
-        crate::insights::enqueue_remove(id.to_string());
-    }
-    persisted
-}
-
-/// Updates only the final text (and word count) of an entry — preserves evaluation.
-pub fn update_text(id: &str, text: &str) -> bool {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        return false;
-    };
-    let (mut entries, _) = read_entries(file);
-    let mut updated_entry = None;
-    for entry in entries.iter_mut() {
-        if entry.id == id {
-            entry.text = text.to_string();
-            entry.words = text.split_whitespace().count();
-            entry.is_error = Some(false);
-            entry.error_message = None;
-            if let Some(run) = entry.pipeline_runs.last_mut() {
-                run.transcript.set_user_corrected(text.to_string());
+impl Store {
+    fn apply(&mut self, event: Event) {
+        match event {
+            Event::Import { entries, deleted } => {
+                for entry in entries.into_iter().rev() {
+                    if !self.entries.contains_key(&entry.id) {
+                        self.apply(Event::Upsert {
+                            entry: Box::new(entry.clone()),
+                        });
+                        if deleted.contains(&entry.id) {
+                            self.apply(Event::Delete { id: entry.id });
+                        }
+                    }
+                }
             }
-            updated_entry = Some(entry.clone());
-            break;
+            Event::Upsert { entry } => {
+                if self.active.insert(entry.id.clone()) {
+                    self.order.push_front(entry.id.clone());
+                }
+                self.entries.insert(entry.id.clone(), *entry);
+            }
+            Event::Delete { id } => {
+                self.active.remove(&id);
+                self.order.retain(|old| old != &id);
+            }
+            Event::AudioPath { id, path } => {
+                if let Some(entry) = self.entries.get_mut(&id) {
+                    entry.audio_path = Some(path);
+                }
+            }
+            Event::Clear => {
+                self.active.clear();
+                self.order.clear();
+            }
         }
     }
-    let Some(updated_entry) = updated_entry else {
-        return false;
-    };
-    let persisted = persist_entries(file, &entries);
-    if persisted {
-        crate::insights::enqueue_entry(updated_entry);
+    fn open(file: &std::path::Path) -> Result<Self, String> {
+        use std::io::BufRead;
+        let mut store = Self::default();
+        let entries: Vec<HistoryEntry> = crate::storage::read_json(file)?;
+        for mut entry in entries.into_iter().rev() {
+            migrate_entry(&mut entry);
+            store.apply(Event::Upsert {
+                entry: Box::new(entry),
+            });
+        }
+        let journal = journal_path(file);
+        if journal.exists() {
+            let mut reader =
+                std::io::BufReader::new(fs::File::open(journal).map_err(|e| e.to_string())?);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+                    break;
+                }
+                if !line.ends_with('\n') {
+                    return Err("Histórico interrompido durante a gravação. Use Reparar histórico em Recuperação; o original será preservado.".into());
+                }
+                store.apply(serde_json::from_str(&line).map_err(|_| {
+                    "Registro de histórico inválido; restaure um backup antes de salvar"
+                })?);
+            }
+        }
+        Ok(store)
     }
-    persisted
 }
-
-/// Updates an existing history entry with new details.
-pub fn update_entry(updated: HistoryEntry) -> bool {
-    let _guard = lock().lock();
-    let Some(file) = path() else {
-        return false;
+type Stamp = (
+    Option<(u64, std::time::SystemTime)>,
+    Option<(u64, std::time::SystemTime)>,
+);
+struct Cached {
+    stamp: Stamp,
+    store: Store,
+}
+static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
+fn journal_path(file: &std::path::Path) -> PathBuf {
+    file.with_extension("events.jsonl")
+}
+fn stamp(file: &std::path::Path) -> Stamp {
+    let metadata = |path: &std::path::Path| {
+        fs::metadata(path)
+            .ok()
+            .and_then(|m| Some((m.len(), m.modified().ok()?)))
     };
-
-    let (mut entries, _) = read_entries(file);
-
-    let mut found = false;
-    for entry in entries.iter_mut() {
-        if entry.id == updated.id {
-            *entry = merge_updated_entry(entry, &updated);
-            found = true;
-            break;
+    (metadata(file), metadata(&journal_path(file)))
+}
+fn access<T>(action: impl FnOnce(&Store) -> T) -> Result<T, String> {
+    let _guard = lock().lock();
+    let file = path().ok_or("Diretório de histórico indisponível")?;
+    let mut cache = CACHE.lock();
+    let current = stamp(file);
+    if cache.as_ref().is_none_or(|cached| cached.stamp != current) {
+        *cache = Some(Cached {
+            stamp: current,
+            store: Store::open(file)?,
+        });
+    }
+    Ok(action(
+        &cache.as_ref().ok_or("Histórico indisponível")?.store,
+    ))
+}
+fn mutate(build: impl FnOnce(&Store) -> Result<Event, String>) -> Result<(), String> {
+    use std::io::Write;
+    let _guard = lock().lock();
+    let file = path().ok_or("Diretório de histórico indisponível")?;
+    let mut cache = CACHE.lock();
+    let current = stamp(file);
+    if cache.as_ref().is_none_or(|cached| cached.stamp != current) {
+        *cache = Some(Cached {
+            stamp: current,
+            store: Store::open(file)?,
+        });
+    }
+    let cached = cache.as_mut().ok_or("Histórico indisponível")?;
+    let event = build(&cached.store)?;
+    let mut bytes = serde_json::to_vec(&event).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut journal = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(journal_path(file))
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = journal.write_all(&bytes).and_then(|_| journal.sync_all()) {
+        *cache = None;
+        return Err(error.to_string());
+    }
+    cached.store.apply(event);
+    cached.stamp = stamp(file);
+    Ok(())
+}
+pub fn try_load_all() -> Result<Vec<HistoryEntry>, String> {
+    access(|store| {
+        store
+            .order
+            .iter()
+            .filter_map(|id| store.entries.get(id).cloned())
+            .collect()
+    })
+}
+pub fn load_all() -> Vec<HistoryEntry> {
+    try_load_all().unwrap_or_else(|error| {
+        log::error!("history: {error}");
+        Vec::new()
+    })
+}
+pub fn get(id: &str) -> Option<HistoryEntry> {
+    access(|store| {
+        store
+            .active
+            .contains(id)
+            .then(|| store.entries.get(id).cloned())
+            .flatten()
+    })
+    .ok()
+    .flatten()
+}
+pub fn push(mut entry: HistoryEntry) -> Result<(), String> {
+    if let Some(error) = &mut entry.error_message {
+        *error = crate::redaction::message(error);
+    }
+    for run in &mut entry.pipeline_runs {
+        for attempt in &mut run.attempts {
+            if let Some(error) = &mut attempt.error {
+                error.message = crate::redaction::message(&error.message);
+            }
         }
     }
-
-    if found && !persist_entries(file, &entries) {
-        return false;
-    }
-    if found {
+    mutate(|_| {
+        Ok(Event::Upsert {
+            entry: Box::new(entry.clone()),
+        })
+    })?;
+    crate::insights::enqueue_entry(entry);
+    Ok(())
+}
+pub fn update_entry(updated: HistoryEntry) -> bool {
+    let result = mutate(|store| {
+        let existing = store
+            .entries
+            .get(&updated.id)
+            .filter(|_| store.active.contains(&updated.id))
+            .ok_or("Entrada não encontrada")?;
+        Ok(Event::Upsert {
+            entry: Box::new(merge_updated_entry(existing, &updated)),
+        })
+    });
+    if result.is_ok() {
         crate::insights::enqueue_entry(updated);
     }
-    found
+    result.is_ok()
+}
+fn edit_entry(id: &str, edit: impl FnOnce(&mut HistoryEntry)) -> bool {
+    let mut changed = None;
+    let result = mutate(|store| {
+        let mut entry = store
+            .entries
+            .get(id)
+            .filter(|_| store.active.contains(id))
+            .ok_or("Entrada não encontrada")?
+            .clone();
+        edit(&mut entry);
+        changed = Some(entry.clone());
+        Ok(Event::Upsert {
+            entry: Box::new(entry),
+        })
+    });
+    if let (Ok(()), Some(entry)) = (&result, changed) {
+        crate::insights::enqueue_entry(entry);
+    }
+    result.is_ok()
+}
+pub fn update_text(id: &str, text: &str) -> bool {
+    edit_entry(id, |entry| {
+        entry.text = text.into();
+        entry.words = text.split_whitespace().count();
+        entry.is_error = Some(false);
+        entry.error_message = None;
+        if let Some(run) = entry.pipeline_runs.last_mut() {
+            run.transcript.set_user_corrected(text);
+        }
+    })
+}
+pub fn set_evaluation(id: &str, feedback: &str) -> bool {
+    edit_entry(id, |entry| entry.evaluation = Some(feedback.into()))
+}
+pub fn clear() -> Result<(), String> {
+    mutate(|_| Ok(Event::Clear))?;
+    crate::insights::enqueue_clear();
+    Ok(())
+}
+pub fn delete_entry(id: &str) -> bool {
+    let result = mutate(|store| {
+        if !store.active.contains(id) {
+            return Err("Entrada não encontrada".into());
+        }
+        Ok(Event::Delete { id: id.into() })
+    });
+    if result.is_ok() {
+        crate::insights::enqueue_remove(id);
+    }
+    result.is_ok()
+}
+pub fn restore_entry(id: &str) -> Result<(), String> {
+    mutate(|store| {
+        let entry = store
+            .entries
+            .get(id)
+            .ok_or("Entrada removida não encontrada")?;
+        if store.active.contains(id) {
+            return Err("Entrada já está no histórico".into());
+        }
+        Ok(Event::Upsert {
+            entry: Box::new(entry.clone()),
+        })
+    })?;
+    if let Some(entry) = get(id) {
+        crate::insights::enqueue_entry(entry);
+    }
+    Ok(())
+}
+#[derive(serde::Serialize)]
+pub struct Page {
+    pub items: Vec<HistoryEntry>,
+    pub total: usize,
+    pub next_offset: Option<usize>,
+    pub total_words: usize,
+}
+fn project(mut entry: HistoryEntry) -> HistoryEntry {
+    entry.debug_info = None;
+    // Keep delivery outcome and latest transcript versions available to row actions.
+    if let Some(mut run) = entry.pipeline_runs.pop() {
+        run.debug_info = None;
+        run.attempts.clear();
+        run.journal.clear();
+        entry.pipeline_runs = vec![run];
+    }
+    entry
+}
+pub fn page(query: &str, offset: usize, limit: usize, deleted: bool) -> Result<Page, String> {
+    access(|store| project_page(store, query, offset, limit, deleted))
+}
+fn project_page(store: &Store, query: &str, offset: usize, limit: usize, deleted: bool) -> Page {
+    let query = query.trim().to_lowercase();
+
+    let matches = |entry: &&HistoryEntry| {
+        query.is_empty()
+            || entry.text.to_lowercase().contains(&query)
+            || entry
+                .error_message
+                .as_ref()
+                .is_some_and(|error| error.to_lowercase().contains(&query))
+    };
+    let entries: Vec<&HistoryEntry> = if deleted {
+        let mut entries: Vec<_> = store
+            .entries
+            .values()
+            .filter(|entry| !store.active.contains(&entry.id))
+            .filter(matches)
+            .collect();
+        entries.sort_by(|a, b| b.date.cmp(&a.date));
+        entries
+    } else {
+        store
+            .order
+            .iter()
+            .filter_map(|id| store.entries.get(id))
+            .filter(matches)
+            .collect()
+    };
+    let total = entries.len();
+    let limit = limit.clamp(1, 100);
+    let items = entries
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|entry| project((*entry).clone()))
+        .collect();
+    Page {
+        items,
+        total,
+        total_words: entries.iter().map(|entry| entry.words).sum(),
+        next_offset: (offset.saturating_add(limit) < total).then_some(offset.saturating_add(limit)),
+    }
+}
+/// Repairs only an incomplete trailing transaction, preserving a byte-exact backup.
+pub fn repair_journal() -> Result<(), String> {
+    let _guard = lock().lock();
+    let file = journal_path(path().ok_or("Histórico indisponível")?);
+    repair_at(&file)?;
+    *CACHE.lock() = None;
+    Ok(())
+}
+fn repair_at(file: &std::path::Path) -> Result<(), String> {
+    let bytes = fs::read(file).map_err(|e| e.to_string())?;
+    if bytes.ends_with(b"\n") || bytes.is_empty() {
+        return Err("Nenhuma transação incompleta encontrada".into());
+    }
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    for line in bytes[..end]
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        serde_json::from_slice::<Event>(line)
+            .map_err(|_| "Há corrupção anterior ao último registro; restaure um backup")?;
+    }
+    crate::storage::atomic_write(file, &bytes[..end])?;
+    Ok(())
+}
+
+pub fn import_entries(
+    mut entries: Vec<HistoryEntry>,
+    deleted: Vec<String>,
+) -> Result<usize, String> {
+    let mut count = 0;
+    mutate(|store| {
+        entries.retain(|entry| !store.entries.contains_key(&entry.id));
+        for entry in &mut entries {
+            migrate_entry(entry);
+        }
+        count = entries.len();
+        Ok(Event::Import { entries, deleted })
+    })?;
+    Ok(count)
+}
+
+pub fn get_including_deleted(id: &str) -> Result<HistoryEntry, String> {
+    access(|store| store.entries.get(id).cloned())?.ok_or("Entrada não encontrada".into())
+}
+pub fn archive_audio_path(id: &str, path: String) -> Result<(), String> {
+    mutate(|store| {
+        if !store.entries.contains_key(id) {
+            return Err("Entrada não encontrada".into());
+        }
+        Ok(Event::AudioPath {
+            id: id.into(),
+            path,
+        })
+    })
+}
+
+pub fn export_entries() -> Result<(Vec<HistoryEntry>, Vec<String>), String> {
+    access(|store| {
+        let deleted: Vec<_> = store
+            .entries
+            .keys()
+            .filter(|id| !store.active.contains(*id))
+            .cloned()
+            .collect();
+        let mut entries: Vec<_> = store
+            .order
+            .iter()
+            .filter_map(|id| store.entries.get(id).cloned())
+            .collect();
+        entries.extend(
+            deleted
+                .iter()
+                .filter_map(|id| store.entries.get(id).cloned()),
+        );
+        (entries, deleted)
+    })
 }
 
 #[cfg(test)]
@@ -443,5 +656,76 @@ mod tests {
         assert_eq!(merged.pipeline_runs.len(), 2);
         assert_eq!(merged.pipeline_runs[0].id, original_run_id);
         assert_eq!(merged.pipeline_runs[1].id, "legacy-1-run-retry");
+    }
+    #[test]
+    fn journal_replays_delete_restore_and_preserves_incomplete_original() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("haumea-history-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("history.json");
+        crate::storage::write_json(&file, &vec![legacy_entry()]).unwrap();
+        let journal = journal_path(&file);
+        let mut writer = fs::File::create(&journal).unwrap();
+        let deletion = serde_json::to_vec(&Event::Delete {
+            id: "legacy-1".into(),
+        })
+        .unwrap();
+        writer.write_all(&deletion).unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.sync_all().unwrap();
+        let store = Store::open(&file).unwrap();
+        assert!(store.active.is_empty());
+        assert_eq!(project_page(&store, "router", 0, 50, true).total, 1);
+        writer.write_all(b"{\"kind\":").unwrap();
+        writer.sync_all().unwrap();
+        drop(writer);
+        assert!(Store::open(&file).is_err());
+        let original = fs::read(&journal).unwrap();
+        repair_at(&journal).unwrap();
+        assert_eq!(fs::read(journal.with_extension("bak")).unwrap(), original);
+        let mut store = Store::open(&file).unwrap();
+        store.apply(Event::Upsert {
+            entry: Box::new(legacy_entry()),
+        });
+        assert_eq!(
+            project_page(&store, "", 0, 1, false).items[0].id,
+            "legacy-1"
+        );
+        fs::write(&journal, b"bad\n{partial").unwrap();
+        assert!(repair_at(&journal).is_err());
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            serde_json::to_vec_pretty(&vec![legacy_entry()]).unwrap()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn history_pages_at_ten_and_hundred_thousand_entries() {
+        let mut store = Store::default();
+        for count in [10_000, 100_000] {
+            let start = std::time::Instant::now();
+            for index in store.entries.len()..count {
+                let mut entry = legacy_entry();
+                entry.id = format!("synthetic-{index}");
+                store.apply(Event::Upsert {
+                    entry: Box::new(entry),
+                });
+            }
+            let populate_ms = start.elapsed().as_millis();
+            let page_start = std::time::Instant::now();
+            let page = project_page(&store, "router", 49_950.min(count - 50), 50, false);
+            assert_eq!(page.items.len(), 50);
+            assert_eq!(page.total, count);
+            let bytes = serde_json::to_vec(&page).unwrap().len();
+            assert!(bytes < 256_000);
+            assert!(
+                page_start.elapsed().as_secs() < 5,
+                "pagination exceeded 5s budget"
+            );
+            eprintln!(
+                "history corpus={count} populate_ms={populate_ms} page_ms={} payload_bytes={bytes}",
+                page_start.elapsed().as_millis()
+            );
+        }
     }
 }

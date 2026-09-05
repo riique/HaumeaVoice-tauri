@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-undo-ai-edit"
+description = "Enables the undo_ai_edit command without any pre-configured scope."
+commands.allow = ["undo_ai_edit"]
+
+[[permission]]
+identifier = "deny-undo-ai-edit"
+description = "Denies the undo_ai_edit command without any pre-configured scope."
+commands.deny = ["undo_ai_edit"]

@@ -56,11 +56,11 @@ pub fn init(data_dir: PathBuf) {
     let _ = LOCK.set(Mutex::new(()));
 }
 
-fn read_unlocked() -> Vec<CorrectionEvent> {
-    PATH.get()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|contents| serde_json::from_str(&contents).ok())
-        .unwrap_or_default()
+fn read_unlocked() -> Result<Vec<CorrectionEvent>, String> {
+    crate::storage::read_json(
+        PATH.get()
+            .ok_or("Armazenamento de correções indisponível")?,
+    )
 }
 
 fn write_unlocked(events: &[CorrectionEvent]) -> Result<(), String> {
@@ -70,11 +70,7 @@ fn write_unlocked(events: &[CorrectionEvent]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    fs::write(
-        path,
-        serde_json::to_string_pretty(events).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())
+    crate::storage::write_json(path, events)
 }
 
 pub fn record(
@@ -85,8 +81,9 @@ pub fn record(
     let Some((before, after)) = localized_lexical_diff(before_text, after_text) else {
         return Ok(None);
     };
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
-    let mut events = read_unlocked();
+    let mut events = read_unlocked()?;
     let updated = upsert_event(&mut events, before, after, context);
     write_unlocked(&events)?;
     Ok(Some(updated))
@@ -127,8 +124,13 @@ fn upsert_event(
 }
 
 pub fn suggestions() -> Vec<CorrectionEvent> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
     read_unlocked()
+        .unwrap_or_else(|error| {
+            log::error!("learning: {error}");
+            Vec::new()
+        })
         .into_iter()
         .filter(|event| event.count >= 3 && event.status == SuggestionStatus::Pending)
         .collect()
@@ -138,13 +140,18 @@ pub fn suggestions() -> Vec<CorrectionEvent> {
 /// never leaves the device unless the user explicitly generates an AI profile,
 /// and that profile receives aggregate counts rather than these events.
 pub fn all() -> Vec<CorrectionEvent> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
-    read_unlocked()
+    read_unlocked().unwrap_or_else(|error| {
+        log::error!("learning: {error}");
+        Vec::new()
+    })
 }
 
 pub fn accept_pair(before: &str, after: &str) -> Result<(), String> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
-    let mut events = read_unlocked();
+    let mut events = read_unlocked()?;
     let mut changed = false;
     for event in &mut events {
         if event.before.eq_ignore_ascii_case(before) && event.after.eq_ignore_ascii_case(after) {
@@ -159,8 +166,9 @@ pub fn accept_pair(before: &str, after: &str) -> Result<(), String> {
 }
 
 pub fn resolve(id: &str, accepted: bool) -> Result<Option<CorrectionEvent>, String> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
-    let mut events = read_unlocked();
+    let mut events = read_unlocked()?;
     let result = events.iter_mut().find(|event| event.id == id).map(|event| {
         event.status = if accepted {
             SuggestionStatus::Accepted

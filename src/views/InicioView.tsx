@@ -10,8 +10,11 @@ import { Button } from "../components/ui/Button";
 import { KbdCombo } from "../components/ui/Kbd";
 import { PageHeader, SkeletonRows } from "../components/ui/Surface";
 import {
-  getHistory,
+  getHistoryPage,
   getModeConfig,
+  getOutputPolicyConfig,
+  setOutputPolicyConfig,
+  type OutputPolicyConfig,
   getRecordingStatus,
   getShortcuts,
   onRecordingEvent,
@@ -53,20 +56,24 @@ function routeDetails(config: ModeConfigSnapshot | null) {
         : "ultra_precise";
   const route = config.gemini_pipelines[key];
   return {
-    engine: config.mode === "fast-accurate" ? "Gemini com áudio" : config.mode === "precise" ? "Whisper + Gemini" : "Whisper + validador + Gemini",
-    model: route.use_custom_model
+    engine: config.mode === "fast-accurate" ? (route.provider === "meta" ? "Muse com áudio WAV" : "Modelo de áudio") : config.mode === "precise" ? "Whisper + Gemini" : "Whisper + validador + Gemini",
+    model: route.provider === "meta" ? (route.custom_model || "Muse Voice Transcribe 1.0") : route.use_custom_model
       ? route.custom_model || "Modelo customizado"
       : route.model === "transcribe35"
         ? "Gemini 3.5 Transcribe"
         : route.model === "flash36"
           ? "Gemini 3.6 Flash"
           : "Gemini 3.5 Flash-Lite",
-    provider: route.provider === "open-router" ? "OpenRouter" : "Google AI Studio",
+    provider: route.provider === "meta" ? "Meta Model API" : route.provider === "open-router" ? "OpenRouter" : "Google AI Studio",
   };
 }
 
 export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void }) {
+  const [totals, setTotals] = useState({ count: 0, words: 0 });
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [policy, setPolicy] = useState<OutputPolicyConfig | null>(null);
+  const [savingPolicy, setSavingPolicy] = useState(false);
+  const [error, setError] = useState("");
   const [pipeline, setPipeline] = useState<ModeConfigSnapshot | null>(null);
   const [shortcuts, setShortcutsState] = useState<ShortcutConfig>({ toggle: "Control+B", cancel: "Control+Q" });
   const [recording, setRecording] = useState(false);
@@ -75,11 +82,14 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
 
   const refresh = async () => {
     try {
-      const [entries, config] = await Promise.all([getHistory(), getModeConfig()]);
-      setHistory(entries);
+      const [entries, config, output] = await Promise.all([getHistoryPage("", 0, 5), getModeConfig(), getOutputPolicyConfig()]);
+      setPolicy(output);
+      setError("");
+      setHistory(entries.items);
+      setTotals({ count: entries.total, words: entries.total_words });
       setPipeline(config);
     } catch (error) {
-      console.error("Failed to load home hub:", error);
+      setError(String(error));
     } finally {
       setLoading(false);
     }
@@ -114,6 +124,13 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
     };
   }, []);
 
+  const changeOutput = async (change: Partial<Pick<OutputPolicyConfig, "destination" | "temporary_override">>) => {
+    if (savingPolicy) return; setSavingPolicy(true); setError("");
+    try { const current = await getOutputPolicyConfig(); setPolicy(await setOutputPolicyConfig({ ...current, ...change })); }
+    catch (failure) { setError(String(failure)); }
+    finally { setSavingPolicy(false); }
+  };
+
   const details = routeDetails(pipeline);
   const recent = history.slice(0, 3);
   const toggleKeys = shortcuts.toggle
@@ -127,6 +144,21 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
         description="Comece a falar em qualquer aplicativo com o atalho global."
         action={<KbdCombo keys={toggleKeys} />}
       />
+
+      {error && <div role="alert" className="mb-5 flex flex-wrap items-center gap-3 text-sm"><p className="break-words">{error}</p><Button size="sm" onClick={() => void refresh()}>Tentar novamente</Button></div>}
+      <div className="mb-6 flex flex-wrap items-end gap-4">
+        <label className="flex min-w-[180px] flex-1 flex-col gap-1 text-sm">Destino do próximo ditado
+          <select className="h-9 min-w-0 rounded-[9px] border border-line bg-white px-3 text-[13px] text-ink focus:border-[#9b9c95]" disabled={!policy || savingPolicy || recording} value={policy?.destination ?? "focused_field"} onChange={(e) => void changeOutput({ destination: e.target.value as OutputPolicyConfig["destination"] })}>
+            <option value="focused_field">Campo em foco</option><option value="clipboard_only">Área de transferência</option><option value="scratchpad">Scratchpad</option>
+          </select>
+        </label>
+        <label className="flex min-w-[180px] flex-1 flex-col gap-1 text-sm">Style temporário
+          <select className="h-9 min-w-0 rounded-[9px] border border-line bg-white px-3 text-[13px] text-ink focus:border-[#9b9c95]" disabled={!policy || savingPolicy || recording} value={policy?.temporary_override ?? ""} onChange={(e) => void changeOutput({ temporary_override: e.target.value || null })}>
+            <option value="">Automático por aplicativo</option>{policy?.profiles.filter((profile) => profile.enabled).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+          </select>
+        </label>
+        <Button onClick={() => onNavigate("recuperacao")}>Verificar configuração</Button>
+      </div>
 
       {recording && (
         <div className="mb-6 flex items-center gap-2 rounded-[10px] bg-[#fff1ef] px-4 py-3 text-[13px] font-medium text-[#9f2720]" role="status">
@@ -165,7 +197,7 @@ export function InicioView({ onNavigate }: { onNavigate: (view: ViewKey) => void
 
       <section className="mt-8" aria-labelledby="recent-activity">
         <div className="mb-3 flex items-center justify-between">
-          <h2 id="recent-activity" className="section-title">Atividade recente</h2>
+          <h2 id="recent-activity" className="section-title">Atividade recente <span className="text-sm font-normal text-muted">· {totals.count.toLocaleString("pt-BR")} ditados</span></h2>
           <Button variant="ghost" size="sm" onClick={() => onNavigate("historico")}>
             Ver histórico <ArrowRight className="h-3.5 w-3.5" aria-hidden />
           </Button>

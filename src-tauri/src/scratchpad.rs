@@ -23,11 +23,8 @@ pub fn init(data_dir: PathBuf) {
     let _ = LOCK.set(Mutex::new(()));
 }
 
-fn read_unlocked() -> Vec<ScratchpadNote> {
-    PATH.get()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|contents| serde_json::from_str(&contents).ok())
-        .unwrap_or_default()
+fn read_unlocked() -> Result<Vec<ScratchpadNote>, String> {
+    crate::storage::read_json(PATH.get().ok_or("Armazenamento indisponível")?)
 }
 
 fn write_unlocked(notes: &[ScratchpadNote]) -> Result<(), String> {
@@ -36,7 +33,10 @@ fn write_unlocked(notes: &[ScratchpadNote]) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let json = serde_json::to_string_pretty(notes).map_err(|error| error.to_string())?;
-    fs::write(path, json).map_err(|error| error.to_string())
+    crate::storage::write_json(
+        path,
+        &serde_json::from_str::<serde_json::Value>(&json).map_err(|error| error.to_string())?,
+    )
 }
 
 pub fn add(
@@ -44,6 +44,7 @@ pub fn add(
     run_id: Option<String>,
     profile_id: Option<String>,
 ) -> Result<ScratchpadNote, String> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
     let now = crate::pipeline_run::epoch_ms();
     let note = ScratchpadNote {
@@ -53,20 +54,22 @@ pub fn add(
         pipeline_run_id: run_id,
         profile_id,
     };
-    let mut notes = read_unlocked();
+    let mut notes = read_unlocked()?;
     notes.insert(0, note.clone());
     write_unlocked(&notes)?;
     Ok(note)
 }
 
-pub fn list() -> Vec<ScratchpadNote> {
+pub fn list() -> Result<Vec<ScratchpadNote>, String> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
     read_unlocked()
 }
 
 pub fn delete(id: &str) -> Result<bool, String> {
+    let _config = crate::models::CONFIG_LOCK.lock();
     let _guard = LOCK.get_or_init(|| Mutex::new(())).lock();
-    let mut notes = read_unlocked();
+    let mut notes = read_unlocked()?;
     let before = notes.len();
     notes.retain(|note| note.id != id);
     if notes.len() == before {

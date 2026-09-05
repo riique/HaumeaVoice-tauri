@@ -74,7 +74,7 @@ pub fn save(id: &str, ext: &str, bytes: &[u8]) -> Option<String> {
     }
     let safe_ext = sanitize_ext(ext);
     let file = dir.join(format!("{}.{}", id, safe_ext));
-    match fs::write(&file, bytes) {
+    match crate::storage::atomic_write(&file, bytes) {
         Ok(()) => {
             log::info!("audio_store: saved {} bytes to {:?}", bytes.len(), file);
             Some(file.to_string_lossy().into_owned())
@@ -99,7 +99,7 @@ pub fn save_original(id: &str, ext: &str, bytes: &[u8]) -> Option<String> {
     }
     let safe_ext = sanitize_ext(ext);
     let file = dir.join(format!("{}.original.{}", id, safe_ext));
-    match fs::write(&file, bytes) {
+    match crate::storage::atomic_write(&file, bytes) {
         Ok(()) => {
             log::info!(
                 "audio_store: preserved {} original bytes at {:?}",

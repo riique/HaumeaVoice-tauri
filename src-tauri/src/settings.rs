@@ -8,7 +8,7 @@
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, sync::OnceLock};
+use std::{path::PathBuf, sync::OnceLock};
 
 static SETTINGS_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SETTINGS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -172,40 +172,41 @@ pub fn init(file: PathBuf) {
 }
 
 fn read() -> Settings {
-    let Some(lock) = SETTINGS_LOCK.get() else {
-        return Settings::default();
-    };
-    let _guard = lock.lock();
-    let Some(file) = SETTINGS_PATH.get() else {
-        return Settings::default();
-    };
-    match fs::read_to_string(file) {
-        Ok(contents) if !contents.trim().is_empty() => {
-            serde_json::from_str(&contents).unwrap_or_default()
-        }
-        _ => Settings::default(),
-    }
+    let _guard = SETTINGS_LOCK.get_or_init(|| Mutex::new(())).lock();
+    SETTINGS_PATH
+        .get()
+        .map(|file| {
+            read_at(file).unwrap_or_else(|error| {
+                log::error!("settings: {error}");
+                Settings::default()
+            })
+        })
+        .unwrap_or_default()
 }
-
-fn write(settings: &Settings) {
-    let Some(lock) = SETTINGS_LOCK.get() else {
-        return;
-    };
-    let _guard = lock.lock();
-    let Some(file) = SETTINGS_PATH.get() else {
-        return;
-    };
-    if let Some(parent) = file.parent() {
-        let _ = fs::create_dir_all(parent);
+fn update(change: impl FnOnce(&mut Settings)) -> Result<(), String> {
+    let _config = crate::models::CONFIG_LOCK.lock();
+    let _guard = SETTINGS_LOCK.get_or_init(|| Mutex::new(())).lock();
+    let file = SETTINGS_PATH
+        .get()
+        .ok_or("Diretório de configurações indisponível")?;
+    update_at(file, change)
+}
+fn update_at(file: &std::path::Path, change: impl FnOnce(&mut Settings)) -> Result<(), String> {
+    let mut settings = read_at(file)?;
+    change(&mut settings);
+    crate::storage::write_json(file, &settings)
+}
+fn read_at(file: &std::path::Path) -> Result<Settings, String> {
+    if !file.exists() {
+        return Ok(Settings::default());
     }
-    match serde_json::to_string_pretty(settings) {
-        Ok(json) => {
-            if let Err(e) = fs::write(file, json) {
-                log::error!("settings: failed to write file: {}", e);
-            }
-        }
-        Err(e) => log::error!("settings: failed to serialize: {}", e),
+    let value: serde_json::Value = crate::storage::read_json(file)?;
+    if !value.is_object() {
+        return Err(
+            "Configurações inválidas: esperado um objeto JSON. Original preservado.".into(),
+        );
     }
+    serde_json::from_value(value).map_err(|_| "Configurações inválidas; restaure um backup".into())
 }
 
 /// Returns the persisted compact-mode flag (defaults to `false`).
@@ -214,10 +215,10 @@ pub fn load_compact() -> bool {
 }
 
 /// Persists the compact-mode flag, preserving any other settings.
-pub fn save_compact(value: bool) {
-    let mut s = read();
-    s.compact_mode = value;
-    write(&s);
+pub fn save_compact(value: bool) -> Result<(), String> {
+    update(|s| {
+        s.compact_mode = value;
+    })
 }
 
 /// Returns the persisted input-device selection (defaults to `None`).
@@ -226,10 +227,10 @@ pub fn load_input_device() -> Option<String> {
 }
 
 /// Persists the input-device selection, preserving any other settings.
-pub fn save_input_device(device: Option<String>) {
-    let mut s = read();
-    s.input_device = device;
-    write(&s);
+pub fn save_input_device(device: Option<String>) -> Result<(), String> {
+    update(|s| {
+        s.input_device = device;
+    })
 }
 
 /// Marker string that exists only in the current `DEFAULT_SYSTEM_PROMPT`.
@@ -249,9 +250,6 @@ pub fn load_system_prompt() -> String {
         .system_prompt
         .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
     if !current.contains(SYSTEM_PROMPT_VERSION_MARKER) {
-        let mut s = read();
-        s.system_prompt = Some(DEFAULT_SYSTEM_PROMPT.to_string());
-        write(&s);
         DEFAULT_SYSTEM_PROMPT.to_string()
     } else {
         current
@@ -274,23 +272,16 @@ pub fn load_vocabulary() -> Vec<crate::vocabulary::VocabularyTerm> {
         );
         migrated
     };
-    let merged = crate::vocabulary::ensure_default_product_terms(base);
-    // Persist merge so Haumea Voice defaults stick across restarts.
-    let mut s2 = read();
-    if s2.vocabulary != merged {
-        s2.vocabulary = merged.clone();
-        s2.custom_words = crate::vocabulary::canonical_list(&merged);
-        write(&s2);
-    }
-    merged
+
+    crate::vocabulary::ensure_default_product_terms(base)
 }
 
 /// Persists structured vocabulary and mirrors enabled canonicals into legacy field.
-pub fn save_vocabulary(terms: Vec<crate::vocabulary::VocabularyTerm>) {
-    let mut s = read();
-    s.custom_words = crate::vocabulary::canonical_list(&terms);
-    s.vocabulary = terms;
-    write(&s);
+pub fn save_vocabulary(terms: Vec<crate::vocabulary::VocabularyTerm>) -> Result<(), String> {
+    update(|s| {
+        s.custom_words = crate::vocabulary::canonical_list(&terms);
+        s.vocabulary = terms;
+    })
 }
 
 /// Legacy helper: canonical strings only (enabled terms).
@@ -299,16 +290,15 @@ pub fn load_custom_words() -> Vec<String> {
 }
 
 /// Legacy helper: replace vocabulary with simple words (other fields defaulted).
-pub fn save_custom_words(words: Vec<String>) {
-    let terms = crate::vocabulary::migrate_from_strings(&words);
-    save_vocabulary(terms);
+pub fn save_custom_words(words: Vec<String>) -> Result<(), String> {
+    save_vocabulary(crate::vocabulary::migrate_from_strings(&words))
 }
 
 /// Persists the system-prompt selection, preserving any other settings.
-pub fn save_system_prompt(prompt: String) {
-    let mut s = read();
-    s.system_prompt = Some(prompt);
-    write(&s);
+pub fn save_system_prompt(prompt: String) -> Result<(), String> {
+    update(|s| {
+        s.system_prompt = Some(prompt);
+    })
 }
 
 /// Returns the persisted engine selection.
@@ -317,10 +307,10 @@ pub fn load_engine() -> Option<crate::models::TranscriptionEngine> {
 }
 
 /// Persists the engine selection, preserving any other settings.
-pub fn save_engine(engine: Option<crate::models::TranscriptionEngine>) {
-    let mut s = read();
-    s.engine = engine;
-    write(&s);
+pub fn save_engine(engine: Option<crate::models::TranscriptionEngine>) -> Result<(), String> {
+    update(|s| {
+        s.engine = engine;
+    })
 }
 
 /// Returns the persisted sanitizer selection.
@@ -329,10 +319,10 @@ pub fn load_sanitizer() -> Option<crate::models::SanitizerModel> {
 }
 
 /// Persists the sanitizer selection, preserving any other settings.
-pub fn save_sanitizer(sanitizer: Option<crate::models::SanitizerModel>) {
-    let mut s = read();
-    s.sanitizer = sanitizer;
-    write(&s);
+pub fn save_sanitizer(sanitizer: Option<crate::models::SanitizerModel>) -> Result<(), String> {
+    update(|s| {
+        s.sanitizer = sanitizer;
+    })
 }
 
 /// Returns the persisted gadget window position if saved.
@@ -349,11 +339,11 @@ pub fn load_gadget_position() -> Option<(f64, f64)> {
 }
 
 /// Persists the gadget window position, preserving any other settings.
-pub fn save_gadget_position(x: f64, y: f64) {
-    let mut s = read();
-    s.gadget_x = Some(x);
-    s.gadget_y = Some(y);
-    write(&s);
+pub fn save_gadget_position(x: f64, y: f64) -> Result<(), String> {
+    update(|s| {
+        s.gadget_x = Some(x);
+        s.gadget_y = Some(y);
+    })
 }
 
 /// Returns the persisted gadget window position in **physical** pixels
@@ -370,11 +360,11 @@ pub fn load_gadget_physical_position() -> Option<(i32, i32)> {
 
 /// Persists the gadget window position in physical pixels, preserving
 /// any other settings.
-pub fn save_gadget_physical_position(x: i32, y: i32) {
-    let mut s = read();
-    s.gadget_physical_x = Some(x);
-    s.gadget_physical_y = Some(y);
-    write(&s);
+pub fn save_gadget_physical_position(x: i32, y: i32) -> Result<(), String> {
+    update(|s| {
+        s.gadget_physical_x = Some(x);
+        s.gadget_physical_y = Some(y);
+    })
 }
 
 /// Returns the persisted dual-engine preference.
@@ -383,10 +373,10 @@ pub fn load_dual_engine() -> bool {
 }
 
 /// Persists the dual-engine preference, preserving any other settings.
-pub fn save_dual_engine(value: bool) {
-    let mut s = read();
-    s.dual_engine = value;
-    write(&s);
+pub fn save_dual_engine(value: bool) -> Result<(), String> {
+    update(|s| {
+        s.dual_engine = value;
+    })
 }
 
 /// Returns the persisted Deepgram transport mode (defaults to batch).
@@ -395,10 +385,10 @@ pub fn load_deepgram_mode() -> crate::models::DeepgramMode {
 }
 
 /// Persists the Deepgram transport mode, preserving any other settings.
-pub fn save_deepgram_mode(mode: crate::models::DeepgramMode) {
-    let mut s = read();
-    s.deepgram_mode = mode;
-    write(&s);
+pub fn save_deepgram_mode(mode: crate::models::DeepgramMode) -> Result<(), String> {
+    update(|s| {
+        s.deepgram_mode = mode;
+    })
 }
 
 /// Returns the persisted reasoning-enabled preference.
@@ -407,10 +397,10 @@ pub fn load_reasoning_enabled() -> bool {
 }
 
 /// Persists the reasoning-enabled preference.
-pub fn save_reasoning_enabled(value: bool) {
-    let mut s = read();
-    s.reasoning_enabled = value;
-    write(&s);
+pub fn save_reasoning_enabled(value: bool) -> Result<(), String> {
+    update(|s| {
+        s.reasoning_enabled = value;
+    })
 }
 
 /// Returns the persisted sanitizer-enabled flag (defaults to `true`).
@@ -419,10 +409,10 @@ pub fn load_sanitizer_enabled() -> bool {
 }
 
 /// Persists the sanitizer-enabled preference, preserving any other settings.
-pub fn save_sanitizer_enabled(value: bool) {
-    let mut s = read();
-    s.sanitizer_enabled = value;
-    write(&s);
+pub fn save_sanitizer_enabled(value: bool) -> Result<(), String> {
+    update(|s| {
+        s.sanitizer_enabled = value;
+    })
 }
 
 /// Returns the persisted reasoning effort.
@@ -436,10 +426,10 @@ pub fn load_reasoning_effort() -> String {
 }
 
 /// Persists the reasoning effort.
-pub fn save_reasoning_effort(effort: String) {
-    let mut s = read();
-    s.reasoning_effort = effort;
-    write(&s);
+pub fn save_reasoning_effort(effort: String) -> Result<(), String> {
+    update(|s| {
+        s.reasoning_effort = effort;
+    })
 }
 
 /// Persists the full engine configuration in a single read-modify-write cycle.
@@ -452,15 +442,15 @@ pub fn save_engine_config_batch(
     reasoning_enabled: bool,
     reasoning_effort: String,
     deepgram_mode: crate::models::DeepgramMode,
-) {
-    let mut s = read();
-    s.engine = engine;
-    s.sanitizer = sanitizer;
-    s.dual_engine = dual_engine;
-    s.reasoning_enabled = reasoning_enabled;
-    s.reasoning_effort = reasoning_effort;
-    s.deepgram_mode = deepgram_mode;
-    write(&s);
+) -> Result<(), String> {
+    update(|s| {
+        s.engine = engine;
+        s.sanitizer = sanitizer;
+        s.dual_engine = dual_engine;
+        s.reasoning_enabled = reasoning_enabled;
+        s.reasoning_effort = reasoning_effort;
+        s.deepgram_mode = deepgram_mode;
+    })
 }
 
 /// Returns the persisted developer-mode flag (defaults to `false`).
@@ -469,10 +459,10 @@ pub fn load_dev_mode() -> bool {
 }
 
 /// Persists the developer-mode flag, preserving any other settings.
-pub fn save_dev_mode(value: bool) {
-    let mut s = read();
-    s.dev_mode = value;
-    write(&s);
+pub fn save_dev_mode(value: bool) -> Result<(), String> {
+    update(|s| {
+        s.dev_mode = value;
+    })
 }
 
 /// Product pipelines are always active. The stored flag is compatibility-only.
@@ -480,10 +470,10 @@ pub fn load_modes_enabled() -> bool {
     true
 }
 
-pub fn save_modes_enabled(_value: bool) {
-    let mut s = read();
-    s.modes_enabled = true;
-    write(&s);
+pub fn save_modes_enabled(_value: bool) -> Result<(), String> {
+    update(|s| {
+        s.modes_enabled = true;
+    })
 }
 
 /// Loads the product transcription mode. If unset, derives from legacy engine/dual
@@ -499,20 +489,22 @@ pub fn load_transcription_mode() -> crate::pipeline_contract::TranscriptionMode 
     )
 }
 
-pub fn save_transcription_mode(mode: crate::pipeline_contract::TranscriptionMode) {
-    let mut s = read();
-    s.transcription_mode = Some(mode);
-    write(&s);
+pub fn save_transcription_mode(
+    mode: crate::pipeline_contract::TranscriptionMode,
+) -> Result<(), String> {
+    update(|s| {
+        s.transcription_mode = Some(mode);
+    })
 }
 
 pub fn load_gemini_fallback_to_whisper() -> bool {
     read().gemini_fallback_to_whisper
 }
 
-pub fn save_gemini_fallback_to_whisper(value: bool) {
-    let mut s = read();
-    s.gemini_fallback_to_whisper = value;
-    write(&s);
+pub fn save_gemini_fallback_to_whisper(value: bool) -> Result<(), String> {
+    update(|s| {
+        s.gemini_fallback_to_whisper = value;
+    })
 }
 
 /// Atomic save of mode preferences.
@@ -522,14 +514,14 @@ pub fn save_mode_config_batch(
     gemini_fallback_to_whisper: bool,
     file_tagging_enabled: bool,
     gemini_pipelines: crate::pipeline_contract::GeminiPipelineConfig,
-) {
-    let mut s = read();
-    s.modes_enabled = true;
-    s.transcription_mode = Some(mode);
-    s.gemini_fallback_to_whisper = gemini_fallback_to_whisper;
-    s.file_tagging_enabled = Some(file_tagging_enabled);
-    s.gemini_pipelines = gemini_pipelines;
-    write(&s);
+) -> Result<(), String> {
+    update(|s| {
+        s.modes_enabled = true;
+        s.transcription_mode = Some(mode);
+        s.gemini_fallback_to_whisper = gemini_fallback_to_whisper;
+        s.file_tagging_enabled = Some(file_tagging_enabled);
+        s.gemini_pipelines = gemini_pipelines;
+    })
 }
 
 pub fn load_file_tagging_enabled() -> bool {
@@ -547,12 +539,14 @@ pub fn load_widget_visibility_mode() -> crate::models::WidgetVisibilityMode {
     })
 }
 
-pub fn save_widget_visibility_mode(value: crate::models::WidgetVisibilityMode) {
-    let mut s = read();
-    s.widget_visibility_mode = Some(value);
-    // Keep the legacy field meaningful for one-version backwards compatibility.
-    s.compact_mode = value == crate::models::WidgetVisibilityMode::Always;
-    write(&s);
+pub fn save_widget_visibility_mode(
+    value: crate::models::WidgetVisibilityMode,
+) -> Result<(), String> {
+    update(|s| {
+        s.widget_visibility_mode = Some(value);
+        // Keep the legacy field meaningful for one-version backwards compatibility.
+        s.compact_mode = value == crate::models::WidgetVisibilityMode::Always;
+    })
 }
 
 pub fn load_widget_dock() -> crate::models::WidgetDock {
@@ -575,20 +569,20 @@ pub fn load_audio_directory() -> Option<String> {
         .filter(|path| !path.trim().is_empty())
 }
 
-pub fn save_audio_directory(path: Option<String>) {
-    let mut s = read();
-    s.audio_directory = path.filter(|value| !value.trim().is_empty());
-    write(&s);
+pub fn save_audio_directory(path: Option<String>) -> Result<(), String> {
+    update(|s| {
+        s.audio_directory = path.filter(|value| !value.trim().is_empty());
+    })
 }
 
 pub fn load_context_preferences() -> crate::context::ContextPreferences {
     read().context_preferences
 }
 
-pub fn save_context_preferences(value: crate::context::ContextPreferences) {
-    let mut settings = read();
-    settings.context_preferences = value;
-    write(&settings);
+pub fn save_context_preferences(value: crate::context::ContextPreferences) -> Result<(), String> {
+    update(|settings| {
+        settings.context_preferences = value;
+    })
 }
 
 pub fn load_output_profiles() -> Vec<crate::output_policy::OutputProfile> {
@@ -600,29 +594,116 @@ pub fn load_output_profiles() -> Vec<crate::output_policy::OutputProfile> {
     }
 }
 
-pub fn save_output_profiles(value: Vec<crate::output_policy::OutputProfile>) {
-    let mut settings = read();
-    settings.output_profiles = value;
-    settings.output_profiles_initialized = true;
-    write(&settings);
+pub fn save_output_profiles(value: Vec<crate::output_policy::OutputProfile>) -> Result<(), String> {
+    update(|settings| {
+        settings.output_profiles = value;
+        settings.output_profiles_initialized = true;
+    })
 }
 
 pub fn load_formatting_level() -> crate::output_policy::FormattingLevel {
     read().formatting_level
 }
 
-pub fn save_formatting_level(value: crate::output_policy::FormattingLevel) {
-    let mut settings = read();
-    settings.formatting_level = value;
-    write(&settings);
+pub fn save_formatting_level(value: crate::output_policy::FormattingLevel) -> Result<(), String> {
+    update(|settings| {
+        settings.formatting_level = value;
+    })
 }
 
 pub fn load_dictation_destination() -> crate::output_policy::DictationDestination {
     read().dictation_destination
 }
 
-pub fn save_dictation_destination(value: crate::output_policy::DictationDestination) {
-    let mut settings = read();
-    settings.dictation_destination = value;
-    write(&settings);
+pub fn save_dictation_destination(
+    value: crate::output_policy::DictationDestination,
+) -> Result<(), String> {
+    update(|settings| {
+        settings.dictation_destination = value;
+    })
+}
+
+pub fn save_output_policy(config: &crate::commands::OutputPolicyConfig) -> Result<(), String> {
+    update(|s| {
+        s.output_profiles = config.profiles.clone();
+        s.output_profiles_initialized = true;
+        s.formatting_level = config.formatting_level;
+        s.dictation_destination = config.destination;
+    })
+}
+
+pub fn validate_backup(value: serde_json::Value) -> Result<(), String> {
+    serde_json::from_value::<Settings>(value)
+        .map(|_| ())
+        .map_err(|_| "Configurações inválidas no backup".into())
+}
+
+/// Merge portable vocabulary and profile definitions, preserving active settings.
+pub fn merge_backup(
+    current: serde_json::Value,
+    incoming: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut current: Settings =
+        serde_json::from_value(current).map_err(|_| "Configurações atuais inválidas")?;
+    let incoming: Settings =
+        serde_json::from_value(incoming).map_err(|_| "Configurações importadas inválidas")?;
+    for term in incoming.vocabulary {
+        if !current
+            .vocabulary
+            .iter()
+            .any(|old| old.canonical.eq_ignore_ascii_case(&term.canonical))
+        {
+            current.vocabulary.push(term);
+        }
+    }
+    current.vocabulary = crate::vocabulary::normalize_and_validate(current.vocabulary)?;
+    current.custom_words = crate::vocabulary::canonical_list(&current.vocabulary);
+    if !current.output_profiles_initialized {
+        current.output_profiles = crate::output_policy::default_output_profiles();
+    }
+    for profile in incoming.output_profiles {
+        if !current
+            .output_profiles
+            .iter()
+            .any(|old| old.id == profile.id)
+        {
+            current.output_profiles.push(profile);
+        }
+    }
+    current.output_profiles_initialized = true;
+    serde_json::to_value(current).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    #[test]
+    fn concurrent_preferences_keep_both_changes_and_reject_corruption() {
+        let dir = std::env::temp_dir().join(format!("haumea-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        std::thread::scope(|scope| {
+            for index in 0..20 {
+                let file = &file;
+                scope.spawn(move || {
+                    let _guard = SETTINGS_LOCK.get_or_init(|| Mutex::new(())).lock();
+                    update_at(file, |settings| {
+                        if index % 2 == 0 {
+                            settings.input_device = Some("synthetic mic".into());
+                        } else {
+                            settings.system_prompt = Some("synthetic prompt".into());
+                        }
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        let saved: Settings = crate::storage::read_json(&file).unwrap();
+        assert_eq!(saved.input_device.as_deref(), Some("synthetic mic"));
+        assert_eq!(saved.system_prompt.as_deref(), Some("synthetic prompt"));
+        std::fs::write(&file, b"[]").unwrap();
+        assert!(update_at(&file, |settings| settings.dev_mode = true).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"[]");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

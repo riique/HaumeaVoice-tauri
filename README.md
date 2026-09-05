@@ -2,7 +2,7 @@
 
 Aplicativo desktop de **digitação por voz** para Windows. Grave com um atalho global, o app transcreve com motores em nuvem, opcionalmente refina o texto e cola no campo focado (`Ctrl+V`).
 
-**Versão:** 1.0.33 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
+**Versão:** 1.0.34 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
 
 ---
 
@@ -20,6 +20,18 @@ Aplicativo desktop de **digitação por voz** para Windows. Grave com um atalho 
 - Atalhos globais configuráveis (padrão: `Ctrl+B` grava, `Ctrl+Q` cancela)
 
 ---
+
+## Correções da auditoria — 1.0.34
+
+- Chaves protegidas por DPAPI da conta Windows; somente referências opacas chegam à interface.
+- Escritas atômicas, histórico incremental paginado e recuperação de itens removidos.
+- Captura incremental com limite de 15 minutos, recuperação de áudio interrompido e cancelamento do processamento de ditados.
+- Coleta de contexto do navegador somente por solicitação vigente, conforme as fontes habilitadas.
+- Verificação do campo de destino antes do paste; resultado e falha de entrega permanecem disponíveis no Histórico.
+- Diagnóstico local, backup com áudio opcional, arquivamento e seleção rápida de destino/Style.
+- Dependências corrigidas, permissões separadas por janela e CI Windows com verificações de contratos.
+
+Qualificação e limites: [auditoria implementada](docs/audit-remediation.md). Procedimentos de dados e distribuição: [recuperação e release](docs/recovery-and-release.md).
 
 ## Novidades — pipelines de transcrição
 
@@ -80,8 +92,8 @@ Documentação técnica da migração: [`docs/TRANSCRIPTION_MIGRATION_FINAL_REPO
 
 ## Requisitos
 
-1. **Node.js** (npm)
-2. **Rust** via [rustup](https://rustup.rs/)
+1. **Node.js 24** (npm)
+2. **Rust 1.97.1** via [rustup](https://rustup.rs/)
 3. Chaves de API (conforme o modo):
    - **Groq** — Preciso, Ultrapreciso, sanitizer e fallbacks legados
    - **Google (Gemini)** — Rápido e preciso, Preciso, Ultrapreciso, pronúncia

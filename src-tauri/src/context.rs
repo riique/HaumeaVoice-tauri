@@ -13,14 +13,28 @@ use crate::pipeline_run::epoch_ms;
 
 const MAX_NATIVE_CONTEXT_BYTES: usize = 64 * 1024;
 
+#[derive(Clone, Serialize)]
+struct BrowserRequest {
+    request_id: String,
+    expires_at_ms: u64,
+    selection: bool,
+    nearby_text: bool,
+    title: bool,
+    max_chars: usize,
+    #[serde(skip)]
+    expected_hwnd: Option<isize>,
+}
+static BROWSER_LAST_POLL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BROWSER_REQUEST: OnceLock<RwLock<Option<BrowserRequest>>> = OnceLock::new();
 static BROWSER_CONTEXT: OnceLock<RwLock<Option<BrowserContext>>> = OnceLock::new();
 
 pub fn init(data_dir: PathBuf) {
     let _ = BROWSER_CONTEXT.set(RwLock::new(None));
     let legacy_raw_path = data_dir.join("browser-context.json");
-    if let Err(error) = std::fs::remove_file(&legacy_raw_path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("context: could not remove legacy raw browser context: {error}");
+    if legacy_raw_path.exists() {
+        let recovery = data_dir.join(format!("browser-context-{}.dpapi", epoch_ms()));
+        if let Err(error) = crate::secrets::archive_private_file(&legacy_raw_path, &recovery) {
+            log::warn!("context: legacy data preserved; protected archiving failed: {error}");
         }
     }
     if let Err(error) = start_browser_context_listener(data_dir.join("browser-context.endpoint")) {
@@ -102,27 +116,53 @@ fn receive_browser_context(stream: &mut TcpStream, expected_token: &str) -> Resu
     stream
         .read_exact(&mut payload)
         .map_err(|error| error.to_string())?;
-    let envelope: BrowserContextEnvelope =
-        serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
-    if envelope.token != expected_token {
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&payload).map_err(|_| "invalid message")?;
+    if envelope["token"].as_str() != Some(expected_token) {
         return Err("invalid IPC token".into());
     }
-    if envelope.context.captured_at_ms == 0
-        || envelope
-            .context
-            .domain
-            .as_deref()
-            .unwrap_or_default()
-            .is_empty()
-    {
-        return Err("missing required context".into());
-    }
-    let slot = BROWSER_CONTEXT.get_or_init(|| RwLock::new(None));
-    *slot.write().map_err(|_| "context lock poisoned")? = Some(envelope.context);
-    let response = br#"{"ok":true}"#;
+    let request_slot = BROWSER_REQUEST.get_or_init(|| RwLock::new(None));
+    let mut request = request_slot.write().map_err(|_| "context lock poisoned")?;
+    let valid = request
+        .as_ref()
+        .filter(|r| epoch_ms() <= r.expires_at_ms && foreground_window_is(r.expected_hwnd));
+    let response = if envelope["kind"] == "poll" {
+        BROWSER_LAST_POLL.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
+        serde_json::json!({"ok": true, "request": valid})
+    } else {
+        let expected = valid.ok_or("no active context request")?;
+        if envelope["request_id"].as_str() != Some(expected.request_id.as_str()) {
+            return Err("stale context response".into());
+        }
+        if envelope["document_focused"] != true {
+            return Err("inactive document".into());
+        }
+        let mut context: BrowserContext =
+            serde_json::from_value(envelope["context"].clone()).map_err(|_| "invalid context")?;
+        if epoch_ms().saturating_sub(context.captured_at_ms) > 500 {
+            return Err("expired context".into());
+        }
+        if !expected.selection {
+            context.selection = None;
+        }
+        if !expected.nearby_text {
+            context.nearby_text = None;
+        }
+        if !expected.title {
+            context.title = None;
+        }
+        context.url = None;
+        *BROWSER_CONTEXT
+            .get_or_init(|| RwLock::new(None))
+            .write()
+            .map_err(|_| "context lock poisoned")? = Some(context);
+        request.take();
+        serde_json::json!({"ok": true})
+    };
+    let response = serde_json::to_vec(&response).map_err(|_| "invalid response")?;
     stream
         .write_all(&(response.len() as u32).to_le_bytes())
-        .and_then(|_| stream.write_all(response))
+        .and_then(|_| stream.write_all(&response))
         .and_then(|_| stream.flush())
         .map_err(|error| error.to_string())
 }
@@ -305,6 +345,8 @@ pub struct ContextSnapshot {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForegroundTarget {
     #[serde(default)]
+    pub focus_id: Option<u64>,
+    #[serde(default)]
     pub hwnd: Option<isize>,
     #[serde(default)]
     pub process_id: Option<u32>,
@@ -314,12 +356,16 @@ impl ForegroundTarget {
     pub fn from_snapshot(snapshot: &ContextSnapshot) -> Self {
         Self {
             hwnd: snapshot.foreground_hwnd,
+            focus_id: None,
             process_id: snapshot.process_id,
         }
     }
 }
 
 fn delivery_targets_match(expected: ForegroundTarget, current: ForegroundTarget) -> bool {
+    if expected.focus_id.is_none() || expected.focus_id != current.focus_id {
+        return false;
+    }
     matches!(
         (
             expected.hwnd,
@@ -350,6 +396,7 @@ pub fn capture_foreground_target() -> ForegroundTarget {
             GetWindowThreadProcessId(hwnd, Some(&mut process_id));
             ForegroundTarget {
                 hwnd: Some(hwnd.0 as isize),
+                focus_id: focused_control_identity(),
                 process_id: (process_id != 0).then_some(process_id),
             }
         }
@@ -409,7 +456,7 @@ pub fn capture(preferences: &ContextPreferences) -> ContextSnapshot {
     snapshot.cloud_context_allowed = preferences.allow_context_to_cloud;
 
     if preferences.enabled(ContextSourceKind::Domain) && is_chromium_foreground(&snapshot) {
-        match read_browser_context(preferences.max_context_chars) {
+        match read_browser_context(preferences, snapshot.foreground_hwnd) {
             Ok(Some(mut browser)) => {
                 snapshot.domain = browser.domain.clone();
                 if !preferences.enabled(ContextSourceKind::Selection) {
@@ -531,18 +578,58 @@ pub fn package_untrusted_context(
     ))
 }
 
-fn read_browser_context(max_chars: usize) -> Result<Option<BrowserContext>, String> {
-    let Some(slot) = BROWSER_CONTEXT.get() else {
+fn foreground_window_is(expected: Option<isize>) -> bool {
+    #[cfg(windows)]
+    {
+        expected.is_some_and(|hwnd| unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as isize == hwnd
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = expected;
+        false
+    }
+}
+fn read_browser_context(
+    preferences: &ContextPreferences,
+    expected_hwnd: Option<isize>,
+) -> Result<Option<BrowserContext>, String> {
+    if epoch_ms().saturating_sub(BROWSER_LAST_POLL.load(std::sync::atomic::Ordering::Relaxed))
+        > 1000
+    {
+        return Ok(None);
+    }
+    let slot = BROWSER_CONTEXT.get_or_init(|| RwLock::new(None));
+    *slot.write().map_err(|_| "context lock poisoned")? = None;
+    let requests = BROWSER_REQUEST.get_or_init(|| RwLock::new(None));
+    let max_chars = preferences.max_context_chars.min(4000);
+    *requests.write().map_err(|_| "context lock poisoned")? = Some(BrowserRequest {
+        request_id: local_ipc_token(0),
+        expires_at_ms: epoch_ms() + 400,
+        selection: preferences.enabled(ContextSourceKind::Selection),
+        nearby_text: preferences.enabled(ContextSourceKind::CaretContext),
+        title: preferences.enabled(ContextSourceKind::WindowTitle),
+        max_chars,
+        expected_hwnd,
+    });
+    let until = std::time::Instant::now() + Duration::from_millis(400);
+    let mut result = None;
+    while std::time::Instant::now() < until && foreground_window_is(expected_hwnd) {
+        result = slot.write().map_err(|_| "context lock poisoned")?.take();
+        if result.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    requests
+        .write()
+        .map_err(|_| "context lock poisoned")?
+        .take();
+    let Some(mut browser) = result else {
         return Ok(None);
     };
-    let Some(mut browser) = slot
-        .read()
-        .map_err(|_| "context lock poisoned".to_string())?
-        .clone()
-    else {
-        return Ok(None);
-    };
-    if epoch_ms().saturating_sub(browser.captured_at_ms) > 60_000 {
+    if !foreground_window_is(expected_hwnd) {
         return Ok(None);
     }
     browser.domain = browser.domain.and_then(sanitize_domain);
@@ -834,6 +921,56 @@ unsafe fn capture_uia_text(
     result
 }
 
+/// Hashes UI Automation runtime identity, without reading field text or names.
+#[cfg(windows)]
+unsafe fn focused_control_identity() -> Option<u64> {
+    use windows::Win32::{
+        System::{
+            Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                COINIT_APARTMENTTHREADED,
+            },
+            Ole::*,
+        },
+        UI::Accessibility::{CUIAutomation, IUIAutomation},
+    };
+    let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+    let result = (|| {
+        let automation: IUIAutomation =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let element = automation.GetFocusedElement().ok()?;
+        if element.CurrentIsPassword().ok()?.as_bool() {
+            return None;
+        }
+        let array = element.GetRuntimeId().ok()?;
+        if array.is_null() {
+            return None;
+        }
+        let identity = (|| {
+            let lower = SafeArrayGetLBound(array, 1).ok()?;
+            let upper = SafeArrayGetUBound(array, 1).ok()?;
+            let len = usize::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()?;
+            if len == 0 || len > 128 {
+                return None;
+            }
+            let mut data = std::ptr::null_mut();
+            SafeArrayAccessData(array, &mut data).ok()?;
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            for part in std::slice::from_raw_parts(data.cast::<i32>(), len) {
+                hash.write_i32(*part);
+            }
+            let _ = SafeArrayUnaccessData(array);
+            Some(hash.finish())
+        })();
+        let _ = SafeArrayDestroy(array);
+        identity
+    })();
+    if initialized {
+        CoUninitialize();
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,6 +1037,7 @@ mod tests {
         let expected = ForegroundTarget {
             hwnd: Some(101),
             process_id: Some(7),
+            focus_id: Some(1),
         };
         assert!(delivery_targets_match(expected, expected));
         assert!(!delivery_targets_match(
@@ -907,6 +1045,7 @@ mod tests {
             ForegroundTarget {
                 hwnd: Some(202),
                 process_id: Some(7),
+                focus_id: Some(1),
             }
         ));
         assert!(!delivery_targets_match(
@@ -914,6 +1053,7 @@ mod tests {
             ForegroundTarget {
                 hwnd: Some(101),
                 process_id: Some(8),
+                focus_id: Some(1),
             }
         ));
         assert!(!delivery_targets_match(

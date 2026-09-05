@@ -1,5 +1,4 @@
-const MAX_CONTEXT_CHARS = 800;
-let pendingTimer = 0;
+let MAX_CONTEXT_CHARS = 800;
 
 function sensitiveElement(element) {
   if (!(element instanceof HTMLElement)) return false;
@@ -58,29 +57,19 @@ function nearbyText() {
   return limited(text.slice(Math.max(0, caret - half), caret + half));
 }
 
-function snapshot() {
-  const domain = location.hostname.toLowerCase();
-  if (!domain || !/^https?:$/.test(location.protocol)) return null;
-  return {
-    domain,
-    url: `${location.origin}${location.pathname}`.slice(0, 500),
-    title: limited(document.title)?.slice(0, 200) || null,
-    selection: selectionText(),
-    nearby_text: nearbyText(),
+// Collection happens only in response to a short-lived native request.
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (sender.id !== chrome.runtime.id || message?.type !== "haumea-capture") return;
+  const request = message.request;
+  if (!request?.request_id || Date.now() > request.expires_at_ms || !document.hasFocus() || document.visibilityState !== "visible") return;
+  if (!/^https?:$/.test(location.protocol)) return;
+  MAX_CONTEXT_CHARS = Math.min(4000, Math.max(100, request.max_chars || 800));
+  const context = {
+    domain: location.hostname.toLowerCase(), url: null,
+    title: request.title ? limited(document.title)?.slice(0, 200) || null : null,
+    selection: request.selection ? selectionText() : null,
+    nearby_text: request.nearby_text ? nearbyText() : null,
     captured_at_ms: Date.now()
   };
-}
-
-function publish() {
-  window.clearTimeout(pendingTimer);
-  pendingTimer = window.setTimeout(() => {
-    const context = snapshot();
-    if (context) chrome.runtime.sendMessage({ type: "haumea-context", context }).catch(() => undefined);
-  }, 180);
-}
-
-document.addEventListener("selectionchange", publish, { passive: true });
-document.addEventListener("focusin", publish, { passive: true });
-document.addEventListener("input", publish, { passive: true });
-window.addEventListener("pageshow", publish, { passive: true });
-publish();
+  respond({ request_id: request.request_id, document_focused: document.hasFocus(), context });
+});

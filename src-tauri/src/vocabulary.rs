@@ -286,7 +286,7 @@ pub fn apply_strict_literals(text: &str, terms: &[VocabularyTerm]) -> (String, V
         // Also normalize accidental wrong casing of the canonical itself.
         pairs.push((t.canonical.clone(), t.canonical.clone()));
     }
-    pairs.sort_by(|a, b| b.0.chars().count().cmp(&a.0.chars().count()));
+    pairs.sort_by_key(|pair| std::cmp::Reverse(pair.0.chars().count()));
     pairs.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
 
     if pairs.is_empty() {

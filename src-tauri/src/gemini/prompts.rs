@@ -665,6 +665,45 @@ Transcrição de referência (use apenas como apoio):\n\"\"\"\n{}\n\"\"\"",
     )
 }
 
+/// UltraPrecise prompt: audio primary; Whisper raw + sanitized as supports.
+pub fn ultraprecise_refinement_prompt(
+    whisper_raw: &str,
+    sanitized: &str,
+    glossary_block: &str,
+    file_tagging_enabled: bool,
+) -> GeminiPrompt {
+    let vocab = if glossary_block.trim().is_empty() {
+        "(nenhum termo cadastrado)".to_string()
+    } else {
+        glossary_block.trim().to_string()
+    };
+    GeminiPrompt {
+        system_instruction: transcription_system_instruction(file_tagging_enabled),
+        user_prompt: format!(
+            r#"Produza a transcrição final usando o áudio anexado como fonte principal. O Whisper bruto e o texto sanitizado são apenas evidências auxiliares; restaure literais, caminhos e comandos quando o áudio e o Whisper forem mais fiéis.
+
+Whisper bruto:
+"""
+{whisper}
+"""
+
+Texto sanitizado:
+"""
+{sanitized}
+"""
+
+Glossário:
+{vocab}
+
+Termos [LITERAL] usam a grafia canônica somente quando o áudio encaixar. Retorne apenas o texto final.
+"#,
+            whisper = whisper_raw,
+            sanitized = sanitized,
+            vocab = vocab
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,44 +778,5 @@ mod tests {
             .system_instruction
             .contains("Não envolva a menção em crases"));
         assert!(!disabled.system_instruction.contains("FileTagging"));
-    }
-}
-
-/// UltraPrecise prompt: audio primary; Whisper raw + sanitized as supports.
-pub fn ultraprecise_refinement_prompt(
-    whisper_raw: &str,
-    sanitized: &str,
-    glossary_block: &str,
-    file_tagging_enabled: bool,
-) -> GeminiPrompt {
-    let vocab = if glossary_block.trim().is_empty() {
-        "(nenhum termo cadastrado)".to_string()
-    } else {
-        glossary_block.trim().to_string()
-    };
-    GeminiPrompt {
-        system_instruction: transcription_system_instruction(file_tagging_enabled),
-        user_prompt: format!(
-            r#"Produza a transcrição final usando o áudio anexado como fonte principal. O Whisper bruto e o texto sanitizado são apenas evidências auxiliares; restaure literais, caminhos e comandos quando o áudio e o Whisper forem mais fiéis.
-
-Whisper bruto:
-"""
-{whisper}
-"""
-
-Texto sanitizado:
-"""
-{sanitized}
-"""
-
-Glossário:
-{vocab}
-
-Termos [LITERAL] usam a grafia canônica somente quando o áudio encaixar. Retorne apenas o texto final.
-"#,
-            whisper = whisper_raw,
-            sanitized = sanitized,
-            vocab = vocab
-        ),
     }
 }

@@ -49,6 +49,7 @@ export function GadgetApp() {
   const [retrying, setRetrying] = useState(false);
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const pillRef = useRef<HTMLDivElement>(null);
+  const operationRef = useRef(0);
   const stateRef = useRef<GadgetState>("hidden");
   const modeRef = useRef<WidgetVisibilityMode>("auto");
   const presentationRef = useRef<GadgetPresentation | null>(null);
@@ -168,14 +169,20 @@ export function GadgetApp() {
         const level = Number.isFinite(event.payload) ? Math.max(0, Math.min(1, event.payload)) : 0;
         setAudioLevel((previous) => Math.abs(previous - level) < 0.005 ? previous : level);
         }),
-        listen<boolean>("transcribing", (event) => {
-        if (event.payload) {
+        listen<{ active: boolean; operation_id: number; cancelled: boolean }>("transcribing", (event) => {
+        if (event.payload.operation_id < operationRef.current) return;
+        operationRef.current = event.payload.operation_id;
+        if (event.payload.cancelled) { transitionToRest(); return; }
+        if (event.payload.active) {
           transition("processing");
         } else if (["processing", "processing_long", "stopping"].includes(stateRef.current)) {
           setFailure({ id: "", message: "Nenhuma fala foi detectada na gravação.", canRetry: false });
           transition("error");
         }
         }),
+        listen<number>("operation-cancelled", (event) => { if (event.payload < operationRef.current) return; operationRef.current = event.payload; setRetrying(false); transitionToRest(); }),
+        listen<string>("capture-error", (event) => { setFailure({ id: "", message: event.payload, canRetry: false }); transition("error"); }),
+        listen<string>("storage-error", (event) => { setFailure({ id: "", message: event.payload, canRetry: false }); transition("error"); }),
         listen<HistoryEntry>("transcription-saved", (event) => {
         const entry = event.payload;
         if (entry.source && entry.source !== "mic") return;
@@ -186,7 +193,7 @@ export function GadgetApp() {
           setFailure({
             id: entry.id,
             message: entry.error_message || "Não foi possível transcrever.",
-            canRetry: Boolean(entry.audio_path),
+            canRetry: Boolean(entry.audio_path) && !entry.text,
           });
           transition("error");
         } else {
@@ -196,6 +203,8 @@ export function GadgetApp() {
         }),
         listen<PipelineProgressEvent>("pipeline-progress", (event) => {
         const progress = event.payload;
+        if (progress.operation_id < operationRef.current) return;
+        operationRef.current = progress.operation_id;
         if (progress.kind === "complete") {
           setProgressMessage(null);
           return;
@@ -375,19 +384,19 @@ function GadgetPill({ state, level, shortcut, failure, retrying, progressMessage
   if (state === "processing" || state === "processing_long") {
     return (
       <div className={`haumea-bar ${state === "processing" ? "haumea-bar--processing" : "haumea-bar--processing-long"}`} role="status">
-        <ProcessingDots />
+        <ProcessingDots /><BarButton label="Cancelar processamento" onClick={onCancel}><X className="h-4 w-4" /></BarButton>
         {showsProcessingLabel(state) && <span className="haumea-bar__status">{retrying ? "Tentando novamente…" : progressMessage || "Transcrevendo…"}</span>}
       </div>
     );
   }
   if (state === "success") {
-    return <div className="haumea-bar haumea-bar--success" role="status"><Check className="h-[17px] w-[17px]" strokeWidth={2.2} aria-hidden /></div>;
+    return <div className="haumea-bar haumea-bar--success" role="status" aria-label="Texto disponível"><Check className="h-[17px] w-[17px]" strokeWidth={2.2} aria-hidden /></div>;
   }
   if (state === "error") {
     return (
       <div className="haumea-bar haumea-bar--error" role="alert" title={failure?.message}>
         <AlertCircle className="h-4 w-4 shrink-0 text-[#ffaaa3]" aria-hidden />
-        <span className="haumea-bar__error-text">Falha na transcrição</span>
+        <span className="haumea-bar__error-text">{failure?.message || "Não foi possível concluir"}</span>
         {failure?.canRetry ? (
           <><button type="button" onClick={onRetry} disabled={retrying} className="haumea-bar__retry" aria-label="Tentar transcrever o áudio salvo novamente">
             <RefreshCw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} aria-hidden /><span>Tentar novamente</span>

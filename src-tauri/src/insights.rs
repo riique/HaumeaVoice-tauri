@@ -686,10 +686,15 @@ fn write_store_unlocked(store: &InsightsStore) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let temp = path.with_extension("json.tmp");
-    let json = serde_json::to_vec(store).map_err(|error| error.to_string())?;
-    fs::write(&temp, json).map_err(|error| error.to_string())?;
-    fs::rename(&temp, path).map_err(|error| error.to_string())
+    if path.exists() {
+        let value: serde_json::Value = crate::storage::read_json(path)?;
+        if !value.is_object() {
+            return Err("Insights inválido; original preservado".into());
+        }
+        let _: InsightsStore =
+            serde_json::from_value(value).map_err(|_| "Insights inválido; restaure o backup")?;
+    }
+    crate::storage::write_json(path, store)
 }
 
 fn insight_worker(receiver: mpsc::Receiver<InsightJob>) {
@@ -1067,13 +1072,7 @@ fn day_aggregate_path(day: &str) -> Option<PathBuf> {
 }
 
 fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<(), String> {
-    let temp = path.with_extension("json.tmp");
-    fs::write(
-        &temp,
-        serde_json::to_vec(value).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    fs::rename(temp, path).map_err(|error| error.to_string())
+    crate::storage::write_json(path, value)
 }
 
 fn clear_day_buckets() -> Result<(), String> {

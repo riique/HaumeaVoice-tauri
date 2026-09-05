@@ -183,17 +183,30 @@ fn failed_attempt(
         ..Default::default()
     }
 }
+pub struct OpenrouterAudioResultInput<'a> {
+    pub audio: &'a [u8],
+    pub ext: &'a str,
+    pub prompt: &'a GeminiPrompt,
+    pub model: &'a str,
+    pub api_key: &'a str,
+    pub duration_ms: Option<u64>,
+    pub operation: GeminiOperation,
+    pub prompt_version: &'a str,
+}
 
 async fn openrouter_audio_result(
-    audio: &[u8],
-    ext: &str,
-    prompt: &GeminiPrompt,
-    model: &str,
-    api_key: &str,
-    duration_ms: Option<u64>,
-    operation: GeminiOperation,
-    prompt_version: &str,
+    input: OpenrouterAudioResultInput<'_>,
 ) -> Result<GeminiGenerateResult, String> {
+    let OpenrouterAudioResultInput {
+        audio,
+        ext,
+        prompt,
+        model,
+        api_key,
+        duration_ms,
+        operation,
+        prompt_version,
+    } = input;
     let adaptive_timeout = adaptive_generate_timeout(duration_ms, audio.len());
     let route = crate::openrouter::detect_audio_route(model).await;
     log::info!(
@@ -719,16 +732,16 @@ pub async fn run_fast_accurate(
                         req.file_tagging_enabled,
                     ),
                 );
-                openrouter_audio_result(
-                    &req.audio_bytes,
+                openrouter_audio_result(crate::transcription::modes::OpenrouterAudioResultInput {
+                    audio: &req.audio_bytes,
                     ext,
-                    &prompt,
-                    &model_id,
-                    &req.api_key,
+                    prompt: &prompt,
+                    model: &model_id,
+                    api_key: &req.api_key,
                     duration_ms,
-                    GeminiOperation::Transcribe,
-                    TRANSCRIBE_PROMPT_VERSION,
-                )
+                    operation: GeminiOperation::Transcribe,
+                    prompt_version: TRANSCRIBE_PROMPT_VERSION,
+                })
                 .await
             } else {
                 transcribe_audio(req).await
@@ -1072,14 +1085,16 @@ pub async fn run_precise(
                     let prompt =
                         with_authorized_context(state, transcription_prompt(file_tagging_enabled));
                     openrouter_audio_result(
-                        &audio,
-                        ext,
-                        &prompt,
-                        &model_id,
-                        &api_key,
-                        duration_ms,
-                        GeminiOperation::Transcribe,
-                        TRANSCRIBE_PROMPT_VERSION,
+                        crate::transcription::modes::OpenrouterAudioResultInput {
+                            audio: &audio,
+                            ext,
+                            prompt: &prompt,
+                            model: &model_id,
+                            api_key: &api_key,
+                            duration_ms,
+                            operation: GeminiOperation::Transcribe,
+                            prompt_version: TRANSCRIBE_PROMPT_VERSION,
+                        },
                     )
                     .await
                 } else {
@@ -1094,44 +1109,44 @@ pub async fn run_precise(
                     )
                     .await
                 };
-                return finish_precise_pure(
+                return finish_precise_pure(crate::transcription::modes::FinishPrecisePureInput {
                     pure,
                     t0,
                     stages,
                     meta,
                     whisper_ms,
-                    None,
-                    "whisper_empty_gemini_pure",
-                    &vocab_snapshot,
-                );
+                    upload_ms: None,
+                    reason: "whisper_empty_gemini_pure",
+                    vocab: &vocab_snapshot,
+                });
             }
             let refined = if choice.provider == GeminiProvider::OpenRouter {
                 let prompt =
                     precise_refinement_prompt(&w_trim, &glossary_block, file_tagging_enabled);
-                openrouter_audio_result(
-                    &audio,
+                openrouter_audio_result(crate::transcription::modes::OpenrouterAudioResultInput {
+                    audio: &audio,
                     ext,
-                    &prompt,
-                    &model_id,
-                    &api_key,
+                    prompt: &prompt,
+                    model: &model_id,
+                    api_key: &api_key,
                     duration_ms,
-                    GeminiOperation::Refine,
-                    PRECISE_PROMPT_VERSION,
-                )
+                    operation: GeminiOperation::Refine,
+                    prompt_version: PRECISE_PROMPT_VERSION,
+                })
                 .await
             } else {
-                refine_precise(
-                    &api_key,
-                    &model_id,
-                    &audio,
+                refine_precise(crate::gemini::refinement::RefinePreciseInput {
+                    api_key: &api_key,
+                    model: &model_id,
+                    audio: &audio,
                     ext,
-                    &display,
-                    &w_trim,
-                    &glossary_block,
+                    display_name: &display,
+                    whisper_hypothesis: &w_trim,
+                    glossary_block: &glossary_block,
                     file_tagging_enabled,
                     duration_ms,
-                    Some((b64, base64_ms)),
-                )
+                    precomputed_b64: Some((b64, base64_ms)),
+                })
                 .await
             };
             finish_precise_refine(
@@ -1172,29 +1187,30 @@ pub async fn run_precise(
                 )
                 .await;
                 spawn_cleanup(guard);
-                return finish_precise_pure(
+                return finish_precise_pure(crate::transcription::modes::FinishPrecisePureInput {
                     pure,
                     t0,
                     stages,
                     meta,
                     whisper_ms,
-                    Some(wall_ms),
-                    "whisper_empty_gemini_pure",
-                    &vocab_snapshot,
-                );
+                    upload_ms: Some(wall_ms),
+                    reason: "whisper_empty_gemini_pure",
+                    vocab: &vocab_snapshot,
+                });
             }
             let file_ref = guard.file_ref();
-            let refined = refine_precise_with_file(
-                &api_key,
-                &model_id,
-                &file_ref,
-                &w_trim,
-                &glossary_block,
-                file_tagging_enabled,
-                duration_ms,
-                audio.len(),
-            )
-            .await;
+            let refined =
+                refine_precise_with_file(crate::gemini::refinement::RefinePreciseWithFileInput {
+                    api_key: &api_key,
+                    model: &model_id,
+                    file: &file_ref,
+                    whisper_hypothesis: &w_trim,
+                    glossary_block: &glossary_block,
+                    file_tagging_enabled,
+                    duration_ms,
+                    audio_bytes: audio.len(),
+                })
+                .await;
             spawn_cleanup(guard);
             finish_precise_refine(
                 refined,
@@ -1246,16 +1262,16 @@ pub async fn run_precise(
             let pure = if choice.provider == GeminiProvider::OpenRouter {
                 let prompt =
                     with_authorized_context(state, transcription_prompt(file_tagging_enabled));
-                openrouter_audio_result(
-                    &audio,
+                openrouter_audio_result(crate::transcription::modes::OpenrouterAudioResultInput {
+                    audio: &audio,
                     ext,
-                    &prompt,
-                    &model_id,
-                    &api_key,
+                    prompt: &prompt,
+                    model: &model_id,
+                    api_key: &api_key,
                     duration_ms,
-                    GeminiOperation::Transcribe,
-                    TRANSCRIBE_PROMPT_VERSION,
-                )
+                    operation: GeminiOperation::Transcribe,
+                    prompt_version: TRANSCRIBE_PROMPT_VERSION,
+                })
                 .await
             } else {
                 transcribe_inline(
@@ -1269,16 +1285,16 @@ pub async fn run_precise(
                 )
                 .await
             };
-            finish_precise_pure(
+            finish_precise_pure(crate::transcription::modes::FinishPrecisePureInput {
                 pure,
                 t0,
                 stages,
                 meta,
                 whisper_ms,
-                None,
-                &format!("whisper_failed: {}", w_err),
-                &vocab_snapshot,
-            )
+                upload_ms: None,
+                reason: &format!("whisper_failed: {}", w_err),
+                vocab: &vocab_snapshot,
+            })
         }
         (
             Err(w_err),
@@ -1305,16 +1321,16 @@ pub async fn run_precise(
             )
             .await;
             spawn_cleanup(guard);
-            finish_precise_pure(
+            finish_precise_pure(crate::transcription::modes::FinishPrecisePureInput {
                 pure,
                 t0,
                 stages,
                 meta,
                 whisper_ms,
-                Some(wall_ms),
-                &format!("whisper_failed: {}", w_err),
-                &vocab_snapshot,
-            )
+                upload_ms: Some(wall_ms),
+                reason: &format!("whisper_failed: {}", w_err),
+                vocab: &vocab_snapshot,
+            })
         }
         (Err(w_err), PrepOutcome::FilesErr(up_err)) => Err(format!(
             "Ambos falharam no modo Preciso:\n• Whisper: {}\n• Upload Gemini: {}",
@@ -1407,17 +1423,28 @@ fn finish_precise_refine(
         }
     }
 }
+pub struct FinishPrecisePureInput<'a> {
+    pub pure: Result<crate::gemini::GeminiGenerateResult, String>,
+    pub t0: std::time::Instant,
+    pub stages: Vec<String>,
+    pub meta: PipelineRun,
+    pub whisper_ms: u64,
+    pub upload_ms: Option<u64>,
+    pub reason: &'a str,
+    pub vocab: &'a [crate::vocabulary::VocabularyTerm],
+}
 
-fn finish_precise_pure(
-    pure: Result<crate::gemini::GeminiGenerateResult, String>,
-    t0: std::time::Instant,
-    mut stages: Vec<String>,
-    mut meta: PipelineRun,
-    whisper_ms: u64,
-    upload_ms: Option<u64>,
-    reason: &str,
-    vocab: &[crate::vocabulary::VocabularyTerm],
-) -> Result<PipelineRun, String> {
+fn finish_precise_pure(input: FinishPrecisePureInput<'_>) -> Result<PipelineRun, String> {
+    let FinishPrecisePureInput {
+        pure,
+        t0,
+        mut stages,
+        mut meta,
+        whisper_ms,
+        upload_ms,
+        reason,
+        vocab,
+    } = input;
     match pure {
         Ok(r) if !r.text.trim().is_empty() => {
             apply_timing_from_gemini(&mut meta, &r);
@@ -1626,30 +1653,32 @@ pub async fn run_ultra_precise(
                         file_tagging_enabled,
                     );
                     openrouter_audio_result(
-                        &audio,
-                        ext,
-                        &prompt,
-                        &model_id,
-                        key,
-                        duration_ms,
-                        GeminiOperation::Refine,
-                        ULTRAPRECISE_PROMPT_VERSION,
+                        crate::transcription::modes::OpenrouterAudioResultInput {
+                            audio: &audio,
+                            ext,
+                            prompt: &prompt,
+                            model: &model_id,
+                            api_key: key,
+                            duration_ms,
+                            operation: GeminiOperation::Refine,
+                            prompt_version: ULTRAPRECISE_PROMPT_VERSION,
+                        },
                     )
                     .await
                 } else {
-                    refine_ultraprecise(
-                        key,
-                        &model_id,
-                        &audio,
+                    refine_ultraprecise(crate::gemini::refinement::RefineUltrapreciseInput {
+                        api_key: key,
+                        model: &model_id,
+                        audio: &audio,
                         ext,
-                        &display,
-                        &whisper_text,
-                        &sanitized_text,
-                        &glossary_block,
+                        display_name: &display,
+                        whisper_raw: &whisper_text,
+                        sanitized: &sanitized_text,
+                        glossary_block: &glossary_block,
                         file_tagging_enabled,
                         duration_ms,
-                        Some((b64, base64_ms)),
-                    )
+                        precomputed_b64: Some((b64, base64_ms)),
+                    })
                     .await
                 };
                 match refined {
@@ -1704,15 +1733,17 @@ pub async fn run_ultra_precise(
                 stages.push(format!("upload_parallel:{}ms", wall_ms));
                 let file_ref = guard.file_ref();
                 let refined = crate::gemini::refine_ultraprecise_with_file(
-                    key,
-                    &model_id,
-                    &file_ref,
-                    &whisper_text,
-                    &sanitized_text,
-                    &glossary_block,
-                    file_tagging_enabled,
-                    duration_ms,
-                    audio.len(),
+                    crate::gemini::refinement::RefineUltrapreciseWithFileInput {
+                        api_key: key,
+                        model: &model_id,
+                        file: &file_ref,
+                        whisper_raw: &whisper_text,
+                        sanitized: &sanitized_text,
+                        glossary_block: &glossary_block,
+                        file_tagging_enabled,
+                        duration_ms,
+                        audio_bytes: audio.len(),
+                    },
                 )
                 .await;
                 spawn_cleanup(guard);
@@ -1920,8 +1951,12 @@ pub fn mode_result_to_history(
         total_tokens: result
             .reported_total_tokens
             .or_else(|| Some(est_total_tokens(words))),
-        is_error: Some(false),
-        error_message: None,
+        is_error: Some(result.delivery.error.is_some()),
+        error_message: result
+            .delivery
+            .error
+            .as_ref()
+            .map(|error| error.message.clone()),
         debug_info: result
             .debug_info
             .clone()
@@ -2056,6 +2091,9 @@ pub async fn run_product_mode_with_duration(
     ext: &str,
     duration_ms: Option<u64>,
 ) -> Result<PipelineRun, String> {
+    let original_state = state;
+    let snapshot = state.pipeline_snapshot();
+    let state = &snapshot;
     state.pending_failed_pipeline_run.lock().take();
     let mode = *state.transcription_mode.read();
     let result = match mode {
@@ -2076,6 +2114,8 @@ pub async fn run_product_mode_with_duration(
             if state.pending_failed_pipeline_run.lock().is_none() {
                 remember_failed_attempts(state, mode, Vec::new(), &error, false, None);
             }
+            *original_state.pending_failed_pipeline_run.lock() =
+                state.pending_failed_pipeline_run.lock().take();
             return Err(error);
         }
     };
@@ -2143,12 +2183,13 @@ pub(crate) fn finalize_product_result(
             .profile
             .content_type
             .as_deref()
-            .and_then(crate::pipeline_contract::ContentType::from_str)
+            .and_then(crate::pipeline_contract::ContentType::parse_str)
             .unwrap_or(result.content_hint);
         result.destination = session.destination;
         result.delivery.destination = session.destination;
         result.delivery.target_hwnd = session.delivery_target.hwnd;
         result.delivery.target_process_id = session.delivery_target.process_id;
+        result.delivery.target_focus_id = session.delivery_target.focus_id;
     }
     synthesize_provider_attempts(state, &mut result);
     if !result.attempts.is_empty()
@@ -2277,10 +2318,15 @@ pub(crate) fn finalize_product_result(
     result.warnings.extend(guarded.warnings);
     result.transcript.formatted = Some(guarded.text.clone());
     let snippet_started = std::time::Instant::now();
-    let (final_text, snippet_id) =
-        crate::snippets::resolve(&guarded.text, &crate::snippets::list())
-            .map(|(expansion, id)| (expansion, Some(id)))
-            .unwrap_or_else(|| (guarded.text, None));
+    let (final_text, snippet_id) = crate::snippets::resolve(
+        &guarded.text,
+        &crate::snippets::list().unwrap_or_else(|error| {
+            log::warn!("snippets unavailable: {error}");
+            Vec::new()
+        }),
+    )
+    .map(|(expansion, id)| (expansion, Some(id)))
+    .unwrap_or_else(|| (guarded.text, None));
     let snippet_ms = snippet_started.elapsed().as_millis() as u64;
     result.timings.snippet_ms = Some(snippet_ms);
     let mut snippet_stage = StageRecord::completed(StageKind::SnippetResolution, snippet_ms);
@@ -2504,5 +2550,34 @@ mod tests {
         );
         assert_eq!(h.is_error, Some(true));
         assert!(h.sanitizer_latency_ms.is_none());
+    }
+    #[test]
+    fn delivery_failure_preserves_text_and_reports_actionable_error() {
+        let mut run = PipelineRun::success(
+            "synthetic-run",
+            TranscriptionMode::UltraFast,
+            "texto preservado",
+        );
+        run.delivery.error = Some(crate::pipeline_run::PipelineError {
+            kind: crate::pipeline_run::PipelineErrorKind::Delivery,
+            code: "target_changed".into(),
+            message: "Campo mudou".into(),
+            retryable: false,
+        });
+        let entry = mode_result_to_history(
+            "synthetic".into(),
+            "2026-09-04".into(),
+            None,
+            1000,
+            "mic",
+            &run,
+        );
+        assert_eq!(entry.is_error, Some(true));
+        assert_eq!(entry.text, "texto preservado");
+        assert!(entry
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("Campo mudou"));
     }
 }

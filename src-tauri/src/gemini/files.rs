@@ -206,7 +206,7 @@ async fn start_resumable_upload(
     display_name: &str,
 ) -> Result<String, String> {
     let client = http_client()?;
-    let url = format!("{}/files?key={}", UPLOAD_ROOT, api_key);
+    let url = format!("{}/files", UPLOAD_ROOT);
     let body = StartUploadBody {
         file: StartUploadFile {
             display_name: display_name.to_string(),
@@ -217,6 +217,7 @@ async fn start_resumable_upload(
         TIMEOUT_UPLOAD,
         client
             .post(url)
+            .header("x-goog-api-key", api_key)
             .header("X-Goog-Upload-Protocol", "resumable")
             .header("X-Goog-Upload-Command", "start")
             .header("X-Goog-Upload-Header-Content-Length", num_bytes.to_string())
@@ -232,7 +233,7 @@ async fn start_resumable_upload(
             TIMEOUT_UPLOAD.as_secs()
         )
     })?
-    .map_err(|e| format!("falha ao iniciar upload no Gemini: {}", e))?;
+    .map_err(|e| format!("falha ao iniciar upload no Gemini: {}", e.without_url()))?;
 
     let status = response.status().as_u16();
     if status != 200 {
@@ -272,7 +273,7 @@ async fn upload_bytes(upload_url: &str, bytes: &[u8], mime: &str) -> Result<File
             TIMEOUT_UPLOAD.as_secs()
         )
     })?
-    .map_err(|e| format!("falha ao enviar bytes ao Gemini: {}", e))?;
+    .map_err(|e| format!("falha ao enviar bytes ao Gemini: {}", e.without_url()))?;
 
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
@@ -290,22 +291,25 @@ async fn upload_bytes(upload_url: &str, bytes: &[u8], mime: &str) -> Result<File
                 .map_err(|e| format!("parse file resource: {}", e));
         }
     }
-    serde_json::from_str(&body).map_err(|e| format!("parse file resource: {} ({})", e, body))
+    serde_json::from_str(&body).map_err(|e| format!("parse file resource: {}", e))
 }
 
 async fn get_file(api_key: &str, name: &str) -> Result<FileResource, String> {
     let client = http_client()?;
     // name is like "files/abc123"
-    let url = format!("{}/{}?key={}", API_ROOT, name, api_key);
-    let response = tokio::time::timeout(TIMEOUT_POLL, client.get(url).send())
-        .await
-        .map_err(|_| {
-            format!(
-                "timeout ao consultar arquivo no Gemini ({}s)",
-                TIMEOUT_POLL.as_secs()
-            )
-        })?
-        .map_err(|e| format!("falha ao consultar arquivo no Gemini: {}", e))?;
+    let url = format!("{}/{}", API_ROOT, name);
+    let response = tokio::time::timeout(
+        TIMEOUT_POLL,
+        client.get(url).header("x-goog-api-key", api_key).send(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "timeout ao consultar arquivo no Gemini ({}s)",
+            TIMEOUT_POLL.as_secs()
+        )
+    })?
+    .map_err(|e| format!("falha ao consultar arquivo no Gemini: {}", e.without_url()))?;
 
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
@@ -322,7 +326,7 @@ async fn get_file(api_key: &str, name: &str) -> Result<FileResource, String> {
     serde_json::from_str::<FileGetResponse>(&body)
         .map(|r| r.file)
         .or_else(|_| serde_json::from_str::<FileResource>(&body))
-        .map_err(|e| format!("parse get file: {} ({})", e, body))
+        .map_err(|e| format!("parse get file: {}", e))
 }
 
 /// Returns `(poll_wall_ms, poll_count)`.
@@ -368,8 +372,13 @@ pub async fn delete_file(api_key: &str, name: &str) -> Result<(), String> {
         Ok(c) => c,
         Err(_) => return Ok(()),
     };
-    let url = format!("{}/{}?key={}", API_ROOT, name, api_key);
-    match tokio::time::timeout(TIMEOUT_DELETE, client.delete(url).send()).await {
+    let url = format!("{}/{}", API_ROOT, name);
+    match tokio::time::timeout(
+        TIMEOUT_DELETE,
+        client.delete(url).header("x-goog-api-key", api_key).send(),
+    )
+    .await
+    {
         Ok(Ok(resp)) => {
             let status = resp.status().as_u16();
             // 200 / 204 / 404 are all acceptable cleanup outcomes.
@@ -383,6 +392,7 @@ pub async fn delete_file(api_key: &str, name: &str) -> Result<(), String> {
             }
         }
         Ok(Err(e)) => {
+            let e = e.without_url();
             log::warn!("gemini files: delete {} network error: {}", name, e);
             Err(e.to_string())
         }

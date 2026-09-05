@@ -1,0 +1,2 @@
+{"pipeline":"synthetic-harness-only","reference":"Abra o projeto HaumeaVoice e execute npm run build.","hypothesis":"Abra o projeto HaumeaVoice e execute npm run build.","terms":["HaumeaVoice","npm run build"],"scenario":"portuguese-code"}
+{"pipeline":"synthetic-harness-only","reference":"Please revise o relatório da reunião de amanhã.","hypothesis":"Please revise o relatório de reunião de amanhã.","terms":[],"scenario":"code-switching"}

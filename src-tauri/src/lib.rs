@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod audio_processing;
 pub mod audio_store;
+pub mod capture_spool;
 pub mod commands;
 pub mod context;
 pub mod deepgram;
@@ -10,20 +11,25 @@ pub mod history;
 pub mod insights;
 pub mod insights_intelligence;
 pub mod learning;
+pub mod maintenance;
 pub mod meta_asr;
 pub mod mic_control;
 pub mod models;
 pub mod native_messaging;
 pub mod openrouter;
+pub mod operations;
 pub mod output_policy;
 pub mod pipeline_contract;
 pub mod pipeline_run;
+pub mod redaction;
 pub mod sanitizer_json;
 pub mod scratchpad;
 pub mod secrets;
 pub mod settings;
 pub mod shortcuts;
+pub mod single_instance;
 pub mod snippets;
+pub mod storage;
 pub mod transcription;
 pub mod transformations;
 pub mod vocabulary;
@@ -74,8 +80,8 @@ fn gadget_hit_rect(state: GadgetVisualState) -> Option<crate::models::GadgetHitR
         Appearing => ((72.0, 52.0), (54.0, 36.0)),
         Initializing | Stopping => ((74.0, 52.0), (54.0, 36.0)),
         Recording => ((186.0, 48.0), (170.0, 36.0)),
-        Processing => ((78.0, 52.0), (58.0, 36.0)),
-        ProcessingLong => ((158.0, 52.0), (142.0, 36.0)),
+        Processing => ((120.0, 52.0), (100.0, 36.0)),
+        ProcessingLong => ((202.0, 52.0), (184.0, 36.0)),
         Success => ((54.0, 52.0), (36.0, 36.0)),
         Error => ((326.0, 58.0), (308.0, 46.0)),
     };
@@ -113,11 +119,11 @@ fn gadget_geometry(state: GadgetVisualState) -> GadgetGeometry {
             height: 48.0,
         },
         GadgetVisualState::Processing => GadgetGeometry {
-            width: 78.0,
+            width: 120.0,
             height: 52.0,
         },
         GadgetVisualState::ProcessingLong => GadgetGeometry {
-            width: 158.0,
+            width: 202.0,
             height: 52.0,
         },
         GadgetVisualState::Success => GadgetGeometry {
@@ -799,7 +805,10 @@ fn spawn_gadget_cursor_watcher_safe(app: tauri::AppHandle, state: SharedState) {
 
                 // Rare HWND re-resolve if cache is empty (window recreated, etc.).
                 // Coalesced with the toggle pending flag so we never flood main.
-                if hwnd_raw == 0 && tick % 5 == 0 && !pending_toggle.load(Ordering::Acquire) {
+                if hwnd_raw == 0
+                    && tick.is_multiple_of(5)
+                    && !pending_toggle.load(Ordering::Acquire)
+                {
                     let app_resolve = app.clone();
                     let pending = pending_toggle.clone();
                     if pending.swap(true, Ordering::AcqRel) {
@@ -1091,12 +1100,28 @@ fn logs_dir() -> Option<std::path::PathBuf> {
 /// `app.log` while still appearing in the console during `cargo tauri dev`.
 struct TeeWriter {
     file: std::fs::File,
+    path: std::path::PathBuf,
 }
 
 impl std::io::Write for TeeWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // stderr first (best-effort; never fail the whole write for it)
         let _ = std::io::stderr().write_all(buf);
+        if self.file.metadata()?.len() + buf.len() as u64 > 8 * 1024 * 1024 {
+            if let Some(dir) = self.path.parent() {
+                for index in (1..4).rev() {
+                    let source = dir.join(format!("app.{index}.log"));
+                    if source.exists() {
+                        std::fs::rename(source, dir.join(format!("app.{}.log", index + 1)))?;
+                    }
+                }
+                std::fs::rename(&self.path, dir.join("app.1.log"))?;
+                self.file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?;
+            }
+        }
         self.file.write_all(buf)?;
         Ok(buf.len())
     }
@@ -1107,7 +1132,7 @@ impl std::io::Write for TeeWriter {
 }
 
 /// Initializes logging. In production builds the output is tee'd to
-/// `%APPDATA%/com.haumeavoice.app/logs/app.log` (truncated each session)
+/// `%APPDATA%/com.haumeavoice.app/logs/app.log` (rotated, 8 MiB per file)
 /// so runtime messages survive for post-mortem inspection. In dev mode
 /// (or if the file cannot be opened) output goes only to stderr.
 fn init_logging() {
@@ -1118,16 +1143,38 @@ fn init_logging() {
 
     if let Some(dir) = logs_dir() {
         let log_path = dir.join("app.log");
+        // Rotate between sessions; preserve a bounded set of previous logs.
+        if log_path.exists() {
+            for index in (1..4).rev() {
+                let source = dir.join(format!("app.{index}.log"));
+                if source.exists() {
+                    let _ = std::fs::rename(source, dir.join(format!("app.{}.log", index + 1)));
+                }
+            }
+            let _ = std::fs::rename(&log_path, dir.join("app.1.log"));
+        }
         if let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
-            .write(true)
-            .truncate(true)
+            .append(true)
             .open(&log_path)
         {
-            builder.target(env_logger::Target::Pipe(Box::new(TeeWriter { file })));
+            builder.target(env_logger::Target::Pipe(Box::new(TeeWriter {
+                file,
+                path: log_path,
+            })));
         }
     }
 
+    builder.format(|buffer, record| {
+        use std::io::Write;
+        writeln!(
+            buffer,
+            "{} [{}] {}",
+            buffer.timestamp_seconds(),
+            record.level(),
+            crate::redaction::message(&record.args().to_string())
+        )
+    });
     let _ = builder.try_init();
 }
 
@@ -1320,6 +1367,14 @@ fn spawn_main_thread_heartbeat(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _instance = match single_instance::acquire() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("Não foi possível iniciar: {error}");
+            return;
+        }
+    };
     init_logging();
     log::info!("startup: run() entry");
 
@@ -1372,12 +1427,6 @@ pub fn run() {
                 match app.path().app_data_dir() {
                     Ok(dir) => {
                         let history_file = dir.join("history.json");
-                        // Seed the file with an empty list if missing so the
-                        // frontend never has to handle "file not found".
-                        if !history_file.exists() {
-                            let _ = std::fs::create_dir_all(&dir);
-                            let _ = std::fs::write(&history_file, "[]");
-                        }
                         history::init(history_file);
                         log::info!("history: storage at {:?}", dir);
 
@@ -1385,8 +1434,12 @@ pub fn run() {
                         // previously saved keys into the in-memory state so
                         // they are available immediately after a restart.
                         secrets::init(dir.join("api_keys.json"));
-                        *state.api_keys.write() = secrets::load();
-                        log::info!("secrets: storage at {:?}", dir);
+                        *state.api_keys.write() = secrets::load().unwrap_or_else(|error| {
+                            log::error!("credentials: {error}");
+                            crate::models::ApiKeys::default()
+                        });
+                        crate::redaction::register(&state.api_keys.read());
+                        log::info!("secrets: protected storage initialized");
 
                         // Permanent storage for the audio behind each
                         // transcription (used later by the pronunciation
@@ -1472,6 +1525,20 @@ pub fn run() {
                 let is_autostart = std::env::args().any(|arg| arg == "--autostart");
                 if !is_autostart {
                     if let Some(w) = app.handle().get_webview_window("main") {
+                        if let Ok(Some(monitor)) = w.current_monitor() {
+                            let work = monitor.work_area();
+                            let scale = monitor.scale_factor();
+                            let width =
+                                (work.size.width as f64 / scale - 32.0).clamp(480.0, 1400.0);
+                            let height =
+                                (work.size.height as f64 / scale - 32.0).clamp(320.0, 900.0);
+                            let _ = w.set_min_size(Some(tauri::LogicalSize::new(
+                                width.min(720.0),
+                                height.min(480.0),
+                            )));
+                            let _ = w.set_size(tauri::LogicalSize::new(width, height));
+                            let _ = w.center();
+                        }
                         let _ = w.show();
                         let _ = w.set_focus();
                     }
@@ -1500,7 +1567,16 @@ pub fn run() {
             commands::get_recording_state,
             commands::get_recording_status,
             commands::get_recording_elapsed,
+            commands::get_local_diagnostics,
+            commands::archive_history_audio,
+            commands::retry_recovery_audio,
+            commands::export_local_data,
+            commands::import_local_data,
             commands::get_history,
+            commands::get_history_page,
+            commands::get_history_detail,
+            commands::restore_history_entry,
+            commands::repair_history_journal,
             commands::get_audio_storage_config,
             commands::set_audio_storage_directory,
             commands::reveal_history_audio,
@@ -1757,5 +1833,39 @@ mod gadget_placement_tests {
         ] {
             assert!(gadget_tracks_foreground_monitor(state), "{state:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod log_rotation_tests {
+    use super::*;
+    #[test]
+    fn open_log_can_rotate_on_windows_without_losing_previous_bytes() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("haumea-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.log");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let mut writer = TeeWriter {
+            file,
+            path: path.clone(),
+        };
+        writer.write_all(b"synthetic-log\n").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        assert_eq!(
+            std::fs::metadata(dir.join("app.1.log")).unwrap().len(),
+            8 * 1024 * 1024
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"synthetic-log\n");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

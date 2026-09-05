@@ -272,8 +272,8 @@ button.haumea-bar:focus-visible,
 .haumea-bar--hover { width: 126px; height: 38px; gap: 10px; padding: 0 13px; }
 .haumea-bar--activity { width: 54px; height: 36px; }
 .haumea-bar--recording { width: 170px; height: 36px; gap: 4px; padding: 0 5px; }
-.haumea-bar--processing { width: 58px; height: 36px; }
-.haumea-bar--processing-long { width: 142px; height: 36px; gap: 9px; padding: 0 14px; }
+.haumea-bar--processing { width: 100px; height: 36px; }
+.haumea-bar--processing-long { width: 184px; height: 36px; gap: 9px; padding: 0 14px; }
 .haumea-bar--success { width: 36px; height: 36px; color: #a8dab8; }
 .haumea-bar--error { width: 308px; height: 46px; justify-content: flex-start; gap: 9px; padding: 0 7px 0 14px; }
 

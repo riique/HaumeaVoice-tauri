@@ -94,7 +94,7 @@ export const GADGET_STATES: Record<GadgetState, GadgetStateDefinition> = {
   },
   processing: {
     visibility: "visible",
-    geometry: { width: 78, height: 52 },
+    geometry: { width: 120, height: 52 },
     content: "processing-dots",
     interaction: "passive",
     animation: "morph",
@@ -103,7 +103,7 @@ export const GADGET_STATES: Record<GadgetState, GadgetStateDefinition> = {
   },
   processing_long: {
     visibility: "visible",
-    geometry: { width: 158, height: 52 },
+    geometry: { width: 202, height: 52 },
     content: "processing-label",
     interaction: "passive",
     animation: "morph",
@@ -117,7 +117,7 @@ export const GADGET_STATES: Record<GadgetState, GadgetStateDefinition> = {
     interaction: "passive",
     animation: "feedback",
     timeoutMs: 520,
-    accessibleLabel: "Transcrição inserida",
+    accessibleLabel: "Texto disponível",
   },
   error: {
     visibility: "visible",

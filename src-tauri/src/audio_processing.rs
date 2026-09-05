@@ -92,10 +92,7 @@ pub fn enhance_microphone_audio(
 
     let speech_gain_db = TARGET_ACTIVE_DBFS - stats.active_rms_before_dbfs;
     let peak_headroom_db = PEAK_LIMIT_DBFS - stats.peak_before_dbfs;
-    let gain_db = speech_gain_db
-        .min(peak_headroom_db)
-        .min(MAX_GAIN_DB)
-        .max(0.0);
+    let gain_db = speech_gain_db.min(peak_headroom_db).clamp(0.0, MAX_GAIN_DB);
     stats.gain_db = gain_db;
     if gain_db < MIN_USEFUL_GAIN_DB {
         return (samples.to_vec(), stats);

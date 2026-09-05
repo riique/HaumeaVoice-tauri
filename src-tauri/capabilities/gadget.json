@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "gadget",
+  "description": "Dictation overlay with no access to credentials or settings mutation",
+  "windows": [
+    "gadget"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "allow-get-widget-preferences",
+    "allow-get-shortcuts",
+    "allow-get-recording-status",
+    "allow-get-recording-elapsed",
+    "allow-toggle-recording-state",
+    "allow-cancel-recording",
+    "allow-retry-transcription",
+    "allow-retry-transcription-with-fallback",
+    "allow-set-gadget-visual-state",
+    "allow-acknowledge-gadget-rendered",
+    "allow-set-gadget-hit-rect"
+  ]
+}

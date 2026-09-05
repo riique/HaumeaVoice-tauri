@@ -12,7 +12,7 @@ mod client;
 mod files;
 mod prompts;
 mod pronunciation;
-mod refinement;
+pub(crate) mod refinement;
 mod transcription;
 mod transport;
 mod types;

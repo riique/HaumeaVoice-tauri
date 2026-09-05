@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-vocabulary-suggestions"
+description = "Enables the get_vocabulary_suggestions command without any pre-configured scope."
+commands.allow = ["get_vocabulary_suggestions"]
+
+[[permission]]
+identifier = "deny-get-vocabulary-suggestions"
+description = "Denies the get_vocabulary_suggestions command without any pre-configured scope."
+commands.deny = ["get_vocabulary_suggestions"]

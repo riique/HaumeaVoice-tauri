@@ -64,6 +64,7 @@ pub async fn transcribe(
     keywords: Option<Vec<String>>,
     language_bias: Option<Vec<String>>,
 ) -> Result<MetaAcousticOutcome, String> {
+    validate_wav(audio)?;
     let t0 = std::time::Instant::now();
     let model_id = model.unwrap_or(META_DEFAULT_MODEL);
     let bytes_sent = audio.len();
@@ -168,4 +169,22 @@ pub async fn transcribe(
         model: model_id.to_string(),
         session_id: parsed.session_id,
     })
+}
+
+fn validate_wav(audio: &[u8]) -> Result<(), String> {
+    if audio.len() < 44 || audio.get(..4) != Some(b"RIFF") || audio.get(8..12) != Some(b"WAVE") {
+        return Err("A rota Meta aceita WAV. Converta o arquivo para WAV ou selecione outro provedor antes de transcrever.".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn non_wav_is_rejected_before_request_construction() {
+        assert!(validate_wav(b"ID3 synthetic mp3 data").is_err());
+        assert!(validate_wav(&crate::audio::create_wav_buffer(&[0, 1, -1])).is_ok());
+        assert!(validate_wav(b"RIFF").is_err());
+    }
 }

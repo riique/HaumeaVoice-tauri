@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-insight-correction-to-vocabulary"
+description = "Enables the add_insight_correction_to_vocabulary command without any pre-configured scope."
+commands.allow = ["add_insight_correction_to_vocabulary"]
+
+[[permission]]
+identifier = "deny-add-insight-correction-to-vocabulary"
+description = "Denies the add_insight_correction_to_vocabulary command without any pre-configured scope."
+commands.deny = ["add_insight_correction_to_vocabulary"]

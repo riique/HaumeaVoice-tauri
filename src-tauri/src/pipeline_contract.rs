@@ -130,7 +130,7 @@ impl<'de> Deserialize<'de> for ContentType {
 }
 
 impl ContentType {
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse_str(value: &str) -> Option<Self> {
         match value {
             "auto" | "general-speech" => Some(Self::Auto),
             "programming" => Some(Self::Programming),
@@ -303,34 +303,54 @@ pub struct PipelineRequest {
     pub copy_to_clipboard: bool,
 }
 
+pub struct FromLegacySettingsInput {
+    pub id: String,
+    pub audio_bytes: Vec<u8>,
+    pub file_name: String,
+    pub mime: String,
+    pub engine: TranscriptionEngine,
+    pub dual_engine: bool,
+    pub deepgram_mode: DeepgramMode,
+    pub sanitizer: SanitizerModel,
+    pub sanitizer_enabled: bool,
+    pub reasoning_enabled: bool,
+    pub reasoning_effort: String,
+    pub system_prompt: String,
+    pub custom_words: Vec<String>,
+    pub source: String,
+    pub duration_ms: u64,
+    pub copy_to_clipboard: bool,
+}
+
 impl PipelineRequest {
     /// Builds a request snapshot from the **current** legacy settings shape
     /// without dropping any preference the user already has.
-    pub fn from_legacy_settings(
-        id: impl Into<String>,
-        audio_bytes: Vec<u8>,
-        file_name: impl Into<String>,
-        mime: impl Into<String>,
-        engine: TranscriptionEngine,
-        dual_engine: bool,
-        deepgram_mode: DeepgramMode,
-        sanitizer: SanitizerModel,
-        sanitizer_enabled: bool,
-        reasoning_enabled: bool,
-        reasoning_effort: impl Into<String>,
-        system_prompt: impl Into<String>,
-        custom_words: Vec<String>,
-        source: impl Into<String>,
-        duration_ms: u64,
-        copy_to_clipboard: bool,
-    ) -> Self {
+    pub fn from_legacy_settings(input: FromLegacySettingsInput) -> Self {
+        let FromLegacySettingsInput {
+            id,
+            audio_bytes,
+            file_name,
+            mime,
+            engine,
+            dual_engine,
+            deepgram_mode,
+            sanitizer,
+            sanitizer_enabled,
+            reasoning_enabled,
+            reasoning_effort,
+            system_prompt,
+            custom_words,
+            source,
+            duration_ms,
+            copy_to_clipboard,
+        } = input;
         let engine_v = engine;
         let dual_v = dual_engine;
         Self {
-            id: id.into(),
+            id,
             audio_bytes,
-            file_name: file_name.into(),
-            mime: mime.into(),
+            file_name,
+            mime,
             mode: TranscriptionMode::from_legacy(engine_v, dual_v),
             content_type: ContentType::default(),
             engine: engine_v,
@@ -339,10 +359,10 @@ impl PipelineRequest {
             sanitizer,
             sanitizer_enabled,
             reasoning_enabled,
-            reasoning_effort: reasoning_effort.into(),
-            system_prompt: system_prompt.into(),
+            reasoning_effort,
+            system_prompt,
             custom_words,
-            source: source.into(),
+            source,
             duration_ms,
             copy_to_clipboard,
         }
@@ -1086,22 +1106,24 @@ mod tests {
     #[test]
     fn pipeline_request_from_legacy_keeps_keys_of_config() {
         let req = PipelineRequest::from_legacy_settings(
-            "1",
-            vec![1, 2, 3],
-            "audio.wav",
-            "audio/wav",
-            TranscriptionEngine::DeepgramNova3,
-            true,
-            DeepgramMode::StreamingFinal,
-            SanitizerModel::GptOss120b,
-            true,
-            true,
-            "high",
-            "system",
-            vec!["Haumea".into()],
-            "mic",
-            1500,
-            true,
+            crate::pipeline_contract::FromLegacySettingsInput {
+                id: ("1").into(),
+                audio_bytes: vec![1, 2, 3],
+                file_name: ("audio.wav").into(),
+                mime: ("audio/wav").into(),
+                engine: TranscriptionEngine::DeepgramNova3,
+                dual_engine: true,
+                deepgram_mode: DeepgramMode::StreamingFinal,
+                sanitizer: SanitizerModel::GptOss120b,
+                sanitizer_enabled: true,
+                reasoning_enabled: true,
+                reasoning_effort: ("high").into(),
+                system_prompt: ("system").into(),
+                custom_words: vec!["Haumea".into()],
+                source: ("mic").into(),
+                duration_ms: 1500,
+                copy_to_clipboard: true,
+            },
         );
         assert_eq!(req.engine, TranscriptionEngine::DeepgramNova3);
         assert!(req.dual_engine);
@@ -1203,22 +1225,24 @@ mod tests {
     #[test]
     fn mock_ultra_fast_whisper_only() {
         let req = PipelineRequest::from_legacy_settings(
-            "m1",
-            vec![],
-            "a.wav",
-            "audio/wav",
-            TranscriptionEngine::GroqWhisper,
-            false,
-            DeepgramMode::Batch,
-            SanitizerModel::Llama70b,
-            false,
-            false,
-            "medium",
-            "",
-            vec![],
-            "mic",
-            1000,
-            true,
+            crate::pipeline_contract::FromLegacySettingsInput {
+                id: ("m1").into(),
+                audio_bytes: vec![],
+                file_name: ("a.wav").into(),
+                mime: ("audio/wav").into(),
+                engine: TranscriptionEngine::GroqWhisper,
+                dual_engine: false,
+                deepgram_mode: DeepgramMode::Batch,
+                sanitizer: SanitizerModel::Llama70b,
+                sanitizer_enabled: false,
+                reasoning_enabled: false,
+                reasoning_effort: ("medium").into(),
+                system_prompt: ("").into(),
+                custom_words: vec![],
+                source: ("mic").into(),
+                duration_ms: 1000,
+                copy_to_clipboard: true,
+            },
         );
         assert_eq!(req.mode, TranscriptionMode::UltraFast);
         let mocks = MockProviders {
@@ -1234,22 +1258,24 @@ mod tests {
     #[test]
     fn mock_sanitizer_empty_fallback() {
         let mut req = PipelineRequest::from_legacy_settings(
-            "m2",
-            vec![],
-            "a.wav",
-            "audio/wav",
-            TranscriptionEngine::GroqWhisper,
-            true,
-            DeepgramMode::Batch,
-            SanitizerModel::GptOss120b,
-            true,
-            false,
-            "medium",
-            "",
-            vec![],
-            "mic",
-            1000,
-            true,
+            crate::pipeline_contract::FromLegacySettingsInput {
+                id: ("m2").into(),
+                audio_bytes: vec![],
+                file_name: ("a.wav").into(),
+                mime: ("audio/wav").into(),
+                engine: TranscriptionEngine::GroqWhisper,
+                dual_engine: true,
+                deepgram_mode: DeepgramMode::Batch,
+                sanitizer: SanitizerModel::GptOss120b,
+                sanitizer_enabled: true,
+                reasoning_enabled: false,
+                reasoning_effort: ("medium").into(),
+                system_prompt: ("").into(),
+                custom_words: vec![],
+                source: ("mic").into(),
+                duration_ms: 1000,
+                copy_to_clipboard: true,
+            },
         );
         req.mode = TranscriptionMode::UltraFast;
         let mocks = MockProviders {
@@ -1267,22 +1293,24 @@ mod tests {
     #[test]
     fn mock_partial_dual_still_delivers() {
         let req = PipelineRequest::from_legacy_settings(
-            "m3",
-            vec![],
-            "a.wav",
-            "audio/wav",
-            TranscriptionEngine::GroqWhisper,
-            true,
-            DeepgramMode::Batch,
-            SanitizerModel::Llama70b,
-            false,
-            false,
-            "medium",
-            "",
-            vec![],
-            "mic",
-            500,
-            true,
+            crate::pipeline_contract::FromLegacySettingsInput {
+                id: ("m3").into(),
+                audio_bytes: vec![],
+                file_name: ("a.wav").into(),
+                mime: ("audio/wav").into(),
+                engine: TranscriptionEngine::GroqWhisper,
+                dual_engine: true,
+                deepgram_mode: DeepgramMode::Batch,
+                sanitizer: SanitizerModel::Llama70b,
+                sanitizer_enabled: false,
+                reasoning_enabled: false,
+                reasoning_effort: ("medium").into(),
+                system_prompt: ("").into(),
+                custom_words: vec![],
+                source: ("mic").into(),
+                duration_ms: 500,
+                copy_to_clipboard: true,
+            },
         );
         let mocks = MockProviders {
             whisper: Some(Err("timeout".into())),
@@ -1301,22 +1329,24 @@ mod tests {
     #[test]
     fn mock_empty_stt_is_error() {
         let req = PipelineRequest::from_legacy_settings(
-            "m4",
-            vec![],
-            "a.wav",
-            "audio/wav",
-            TranscriptionEngine::GroqWhisper,
-            false,
-            DeepgramMode::Batch,
-            SanitizerModel::Llama70b,
-            false,
-            false,
-            "medium",
-            "",
-            vec![],
-            "mic",
-            100,
-            true,
+            crate::pipeline_contract::FromLegacySettingsInput {
+                id: ("m4").into(),
+                audio_bytes: vec![],
+                file_name: ("a.wav").into(),
+                mime: ("audio/wav").into(),
+                engine: TranscriptionEngine::GroqWhisper,
+                dual_engine: false,
+                deepgram_mode: DeepgramMode::Batch,
+                sanitizer: SanitizerModel::Llama70b,
+                sanitizer_enabled: false,
+                reasoning_enabled: false,
+                reasoning_effort: ("medium").into(),
+                system_prompt: ("").into(),
+                custom_words: vec![],
+                source: ("mic").into(),
+                duration_ms: 100,
+                copy_to_clipboard: true,
+            },
         );
         let mocks = MockProviders {
             whisper: Some(Ok("   ".into())),
@@ -1330,22 +1360,24 @@ mod tests {
     #[test]
     fn mock_header_only_sanitizer() {
         let mut req = PipelineRequest::from_legacy_settings(
-            "m5",
-            vec![],
-            "a.wav",
-            "audio/wav",
-            TranscriptionEngine::GroqWhisper,
-            false,
-            DeepgramMode::Batch,
-            SanitizerModel::Llama70b,
-            true,
-            false,
-            "medium",
-            "",
-            vec![],
-            "mic",
-            100,
-            true,
+            crate::pipeline_contract::FromLegacySettingsInput {
+                id: ("m5").into(),
+                audio_bytes: vec![],
+                file_name: ("a.wav").into(),
+                mime: ("audio/wav").into(),
+                engine: TranscriptionEngine::GroqWhisper,
+                dual_engine: false,
+                deepgram_mode: DeepgramMode::Batch,
+                sanitizer: SanitizerModel::Llama70b,
+                sanitizer_enabled: true,
+                reasoning_enabled: false,
+                reasoning_effort: ("medium").into(),
+                system_prompt: ("").into(),
+                custom_words: vec![],
+                source: ("mic").into(),
+                duration_ms: 100,
+                copy_to_clipboard: true,
+            },
         );
         req.mode = TranscriptionMode::UltraFast;
         let mocks = MockProviders {
