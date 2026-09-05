@@ -2580,4 +2580,31 @@ mod tests {
             .unwrap()
             .contains("Campo mudou"));
     }
+
+    #[test]
+    fn delivery_to_changed_focus_target_records_success_without_error() {
+        let mut run = PipelineRun::success(
+            "switch-app-run",
+            TranscriptionMode::UltraFast,
+            "Texto entregue no chat",
+        );
+        run.delivery.target_hwnd = Some(202);
+        run.delivery.target_process_id = Some(8888);
+        run.delivery.paste_attempted = true;
+        run.delivery.paste_ok = true;
+        run.delivery.clipboard_ok = true;
+        run.delivery.error = None;
+
+        let entry = mode_result_to_history(
+            "switch-app".into(),
+            "2026-09-05".into(),
+            None,
+            1200,
+            "mic",
+            &run,
+        );
+        assert_eq!(entry.is_error, Some(false));
+        assert!(entry.error_message.is_none());
+        assert_eq!(entry.text, "Texto entregue no chat");
+    }
 }

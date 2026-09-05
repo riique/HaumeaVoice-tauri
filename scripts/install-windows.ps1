@@ -47,8 +47,16 @@ $before | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $backup 
 $installed = Start-Process -FilePath $installer -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
 if ($installed.ExitCode -ne 0) { throw "Sonora installer failed: $($installed.ExitCode). Backup: $backup" }
 if (-not (Test-Path -LiteralPath $sonoraExe)) {
-    $redirected = "C:\Users\Henrique\AppData\Local\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\Sonora\sonora.exe"
-    if (Test-Path -LiteralPath $redirected) {
+    $redirected = $null
+    if ($env:LOCALAPPDATA) {
+        $packagesDir = Join-Path $env:LOCALAPPDATA 'Packages'
+        if (Test-Path -LiteralPath $packagesDir) {
+            $redirected = Get-ChildItem -Path $packagesDir -Filter 'sonora.exe' -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -like "*\LocalCache\Local\Sonora\sonora.exe" } |
+                Select-Object -ExpandProperty FullName -First 1
+        }
+    }
+    if ($redirected -and (Test-Path -LiteralPath $redirected)) {
         $sonoraExe = $redirected
         $sonoraDirectory = Split-Path -Parent $redirected
     }
