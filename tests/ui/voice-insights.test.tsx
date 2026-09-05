@@ -42,6 +42,39 @@ test("AI generation waits for explicit confirmation and survives failure", async
   expect(host.querySelector<HTMLButtonElement>(".voice-portrait button")?.disabled).toBe(false);
 });
 
+test("update stays visible with words remaining and enables only at the backend milestone", async () => {
+  const data = insightsFixture();
+  await act(async () => root.render(<VoiceInsights data={data} reload={reload} developerMode={false} />));
+  const button = host.querySelector<HTMLButtonElement>(".voice-portrait button")!;
+  expect(button.textContent).toBe("Atualizar meu retrato");
+  expect(button.disabled).toBe(true);
+  expect(host.querySelector(`#${button.getAttribute("aria-describedby")}`)?.textContent).toBe("Faltam 760 palavras ditadas para atualizar seu retrato.");
+  await act(async () => button.click());
+  expect(host.querySelector("dialog")).toBeNull();
+  expect(bridge.invoke).not.toHaveBeenCalled();
+
+  data.profile_progress_words = 1999;
+  await act(async () => root.render(<VoiceInsights data={{...data}} reload={reload} developerMode={false} />));
+  expect(host.textContent).toContain("Falta 1 palavra ditada para atualizar seu retrato.");
+  expect(button.disabled).toBe(true);
+
+  data.profile_progress_words = 2000; data.profile_generation_ready = true;
+  await act(async () => root.render(<VoiceInsights data={{...data}} reload={reload} developerMode={false} />));
+  expect(button.disabled).toBe(false);
+  expect(host.textContent).toContain("Você já pode atualizar seu retrato.");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+test("first portrait shows its own remaining words without claiming automatic generation", async () => {
+  const data = insightsFixture(false); data.profile_progress_words = 120; data.profile_required_words = 500;
+  await act(async () => root.render(<VoiceInsights data={data} reload={reload} developerMode={false} />));
+  const button = host.querySelector<HTMLButtonElement>(".voice-portrait button")!;
+  expect(button.textContent).toBe("Criar meu retrato");
+  expect(button.disabled).toBe(true);
+  expect(host.textContent).toContain("Faltam 380 palavras ditadas para criar seu primeiro retrato.");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
 test("empty profile and disabled AI retain local discoveries and optional preferences", async () => {
   const data = insightsFixture(false); data.profile_enabled = false;
   await act(async () => root.render(<VoiceInsights data={data} reload={reload} developerMode={false} />));

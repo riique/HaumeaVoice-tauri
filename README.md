@@ -2,11 +2,12 @@
 
 Aplicativo desktop de **digitação por voz** para Windows. Grave com um atalho global, o app transcreve com motores em nuvem, opcionalmente refina o texto e cola no campo focado (`Ctrl+V`).
 
-**Versão:** 2.0.0 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
+**Versão:** 2.0.1 · **Stack:** Tauri 2 · React 18 · TypeScript · Rust
 
 ## Sonora v2.0
 
 - **Sua voz, mais simples:** um retrato curto, expressões e hábitos de fala, com medições e configurações disponíveis nos detalhes.
+- **Atualização visível:** o botão do retrato permanece à vista com a quantidade de palavras que falta; ele é habilitado quando você pode gerar uma nova versão.
 - **Silêncio tratado no computador:** uma gravação claramente sem voz mostra “Nenhuma voz encontrada” na barra e encerra sem enviar áudio ou colar texto. Falas curtas e baixas são preservadas por uma verificação conservadora.
 - **Troca de aplicativo:** o ditado usa o campo em foco ao parar, com identificação estável entre a gravação e a entrega e orientação em português quando o campo muda depois.
 - **Nova identidade:** Sonora na interface, no executável e nos instaladores. Seus dados e perfis existentes continuam disponíveis.

@@ -1,6 +1,10 @@
 # Sonora v2.0
 
-Sonora é o novo nome da geração Tauri do aplicativo de ditado, com versão técnica `2.0.0`.
+Sonora é o novo nome da geração Tauri do aplicativo de ditado. A versão 2.0 foi lançada como `2.0.0`; a versão atual é `2.0.1`.
+
+### Correção 2.0.1
+
+O botão de criar ou atualizar o retrato permanece visível quando o retrato com IA está ativado. Enquanto a geração aguarda mais ditados, uma frase informa exatamente quantas palavras faltam. Ao atingir o marco, o botão fica habilitado e a tela informa que você já pode atualizar. A geração exige seu clique e confirmação, preservando as regras existentes do backend.
 
 ## Sua voz
 
@@ -37,7 +41,7 @@ Se o campo realmente mudar durante a transcrição, ou se o Windows não permiti
 Após os testes e `npm run tauri build`, a atualização local da instalação antiga pode ser feita com PowerShell 7:
 
 ```powershell
-pwsh -File scripts/install-windows.ps1 -InstallerPath src-tauri/target/release/bundle/nsis/Sonora_2.0.0_x64-setup.exe -BackupRoot F:\Dev-Backup
+pwsh -File scripts/install-windows.ps1 -InstallerPath src-tauri/target/release/bundle/nsis/Sonora_2.0.1_x64-setup.exe -BackupRoot F:\Dev-Backup
 ```
 
 O procedimento exige um diretório de backup existente. Preserva o AppData e os executáveis anteriores, instala Sonora, verifica a versão e só então retira a instalação antiga. Confere hashes dos arquivos originais antes de reabrir. Reaponta inicialização automática e hosts de navegador que apontavam exatamente para a instalação antiga. Outros registros são preservados. A extensão precisa ser recarregada para aplicar seu código novo.
@@ -50,8 +54,10 @@ Comandos: `npm run lint`, `npm run test:frontend`, `npm run test:ui`, `npm run b
 
 As prévias com dados fictícios são exclusivas de desenvolvimento (`?insightsPreview`, `?gadgetPreview`) e não entram no bundle de produção. Os testes de interface usam mocks locais e não chamam provedores.
 
-Qualificação local em 2026-09-05: 215 testes Rust, 18 testes de frontend e 12 testes de interface passaram, assim como lint, formatação, clippy e build. O teste nativo de identidade do campo, excluído da suíte automática por exigir uma janela interativa, passou separadamente com um campo local no Chrome e consultas em threads distintas. `npm audit` não encontrou vulnerabilidades; `cargo audit` manteve 17 avisos de dependências já existentes, sem atualizar pacotes fora do escopo.
+Qualificação local da 2.0.0 em 2026-09-05: 215 testes Rust, 18 testes de frontend e 12 testes de interface passaram, assim como lint, formatação, clippy e build. O teste nativo de identidade do campo, excluído da suíte automática por exigir uma janela interativa, passou separadamente com um campo local no Chrome e consultas em threads distintas. `npm audit` não encontrou vulnerabilidades; `cargo audit` manteve 17 avisos de dependências já existentes, sem atualizar pacotes fora do escopo.
 
 Os instaladores NSIS e MSI foram gerados. A instalação local final via NSIS terminou com código 0, versão 2.0.0, backup e hashes idênticos dos 119 arquivos de dados existentes antes da reabertura. O nome e a versão também foram conferidos na interface instalada.
+
+Na correção 2.0.1, passaram 14 testes de interface, 18 de frontend e 215 testes Rust, além de lint, formatação e build dos instaladores NSIS/MSI. A atualização local via NSIS terminou com código 0 e preservou os 128 arquivos de dados existentes. Versão, botão desabilitado e contagem de palavras restantes foram conferidos na interface instalada; a liberação do botão e a ausência de geração automática foram verificadas nos testes de interface com dados fictícios.
 
 Não foram feitas chamadas de transcrição ou geração de perfil a provedores. O cenário completo com microfone físico, transcrição remota e colagem Chrome–Codex ainda requer validação de uso real.

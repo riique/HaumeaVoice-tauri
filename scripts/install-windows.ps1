@@ -8,7 +8,9 @@ function Get-OptionalRegistryValue([string]$KeyPath, [string]$ValueName) {
     return (Get-Item -LiteralPath $KeyPath).GetValue($ValueName)
 }
 $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
-if ([IO.Path]::GetFileName($installer) -ne 'Sonora_2.0.0_x64-setup.exe') { throw 'Expected Sonora 2.0.0 x64 NSIS installer.' }
+$releaseVersion = (Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json).version
+if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Expected a stable release version in tauri.conf.json.' }
+if ([IO.Path]::GetFileName($installer) -ne "Sonora_${releaseVersion}_x64-setup.exe") { throw "Expected Sonora $releaseVersion x64 NSIS installer." }
 if (-not (Test-Path -LiteralPath $BackupRoot -PathType Container)) { throw 'Backup root must already exist.' }
 $legacyDirectory = Join-Path $env:LOCALAPPDATA 'Haumea Voice'
 $legacyExe = Join-Path $legacyDirectory 'haumea-voice.exe'
@@ -16,7 +18,7 @@ $sonoraDirectory = Join-Path $env:LOCALAPPDATA 'Sonora'
 $sonoraExe = Join-Path $sonoraDirectory 'sonora.exe'
 $dataDirectory = Join-Path $env:APPDATA 'com.haumeavoice.app'
 $localDataDirectory = Join-Path $env:LOCALAPPDATA 'com.haumeavoice.app'
-$backup = Join-Path $BackupRoot ('Sonora-2.0.0-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$backup = Join-Path $BackupRoot ("Sonora-$releaseVersion-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 if (Test-Path -LiteralPath $backup) { throw 'Backup destination already exists.' }
 $legacyRegistry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Haumea Voice'
 $legacy = Get-ItemProperty -LiteralPath $legacyRegistry -ErrorAction SilentlyContinue
@@ -46,7 +48,7 @@ $installed = Start-Process -FilePath $installer -ArgumentList '/S' -WindowStyle 
 if ($installed.ExitCode -ne 0) { throw "Sonora installer failed: $($installed.ExitCode). Backup: $backup" }
 if (-not (Test-Path -LiteralPath $sonoraExe)) { throw "Sonora executable missing. Backup: $backup" }
 $version = (Get-Item -LiteralPath $sonoraExe).VersionInfo.ProductVersion
-if ($version -notmatch '^2\.0\.0(?:\.0)?$') { throw "Unexpected installed version: $version" }
+if ($version -notin @($releaseVersion, "$releaseVersion.0")) { throw "Unexpected installed version: $version" }
 
 # Retire the old installed program only after the new executable is verified.
 # /UPDATE explicitly preserves AppData in Tauri's legacy NSIS uninstaller.
@@ -99,7 +101,7 @@ $changed = @($before.Keys | Where-Object {
 })
 if ($changed.Count) { throw "$($changed.Count) original data files changed during installation. Backup: $backup" }
 $registration = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Sonora'
-if ($registration.DisplayVersion -ne '2.0.0') { throw 'Installed registry version does not match.' }
+if ($registration.DisplayVersion -ne $releaseVersion) { throw 'Installed registry version does not match.' }
 if (Test-Path -LiteralPath $legacyRegistry) { throw 'Legacy uninstall entry remains; inspect the backup and registration.' }
 $report = @{ version = $version; installerExit = $installed.ExitCode; preservedDataFiles = $before.Count; nativeHostsUpdated = $hostCount; backup = $backup; executable = $sonoraExe }
 $report | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backup 'installation-report.json') -Encoding utf8

@@ -80,12 +80,17 @@ export function VoiceInsights({ data, reload, developerMode }: {
         : "Continue usando o ditado no seu dia a dia. Aos poucos, você vai descobrir as expressões e os hábitos que se repetem na sua fala.")}</p>
       {portrait !== excerpt && <details className="voice-full-portrait"><summary>Ler retrato completo</summary><p>{portrait}</p></details>}
       <div className="voice-portrait__action">
-        {data.profile_enabled && (data.profile_generation_ready || busy) ? <Button variant="primary" disabled={busy} onClick={() => setConfirm(true)}>
-          {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RefreshCw className="h-4 w-4" aria-hidden />}
-          {busy ? "Criando seu retrato…" : profile ? "Atualizar meu retrato" : "Criar meu retrato"}
-        </Button> : <p className="text-[13px] text-muted">{!data.profile_enabled
-          ? "Suas descobertas locais continuam aqui. O retrato com IA é opcional."
-          : profile ? "Seu retrato evolui conforme você continua ditando." : `Faltam ${number(remaining)} palavras para liberar seu primeiro retrato.`}</p>}
+        {data.profile_enabled ? <>
+          <Button variant="primary" disabled={busy || !data.profile_generation_ready} aria-describedby="voice-profile-progress" onClick={() => setConfirm(true)}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RefreshCw className="h-4 w-4" aria-hidden />}
+            {busy ? "Criando seu retrato…" : profile ? "Atualizar meu retrato" : "Criar meu retrato"}
+          </Button>
+          <p id="voice-profile-progress" className="text-[13px] leading-5 text-muted" aria-live="polite">
+            {busy ? "Seu novo retrato aparecerá aqui quando estiver pronto."
+              : data.profile_generation_ready ? (profile ? "Você já pode atualizar seu retrato." : "Você já pode criar seu primeiro retrato.")
+              : `${remaining === 1 ? "Falta 1 palavra ditada" : `Faltam ${number(remaining)} palavras ditadas`} para ${profile ? "atualizar seu retrato" : "criar seu primeiro retrato"}.`}
+          </p>
+        </> : <p className="text-[13px] text-muted">Suas descobertas locais continuam aqui. O retrato com IA é opcional.</p>}
       </div>
     </section>
 
