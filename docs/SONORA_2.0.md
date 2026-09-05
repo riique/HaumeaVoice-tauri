@@ -1,6 +1,10 @@
 # Sonora v2.0
 
-Sonora é o novo nome da geração Tauri do aplicativo de ditado. A versão 2.0 foi lançada como `2.0.0`; a versão atual é `2.0.1`.
+Sonora é o novo nome da geração Tauri do aplicativo de ditado. A versão 2.0 foi lançada como `2.0.0`; a versão atual é `2.0.2`.
+
+### Correção 2.0.2
+
+Permite iniciar uma transcrição em um aplicativo e alternar para outro (por exemplo, clicar em uma caixa de chat ou editor) antes ou durante o processamento. Ao concluir a transcrição, o texto é colado diretamente no local selecionado e com foco ativo naquele momento, sem interrupções por "campo de destino mudou". O texto permanece também copiado na área de transferência.
 
 ### Correção 2.0.1
 
@@ -32,16 +36,14 @@ Os testes incluem silêncio, entrada constante, ruído muito baixo, sinais curto
 
 ## Troca de aplicativo durante o ditado
 
-O destino é o campo em foco ao encerrar a gravação. O contexto de início permanece separado: começar no Chrome e terminar no Codex não prende a entrega ao Chrome. A identificação do campo usa um cliente UI Automation persistente em uma thread MTA, evitando recriar a conexão entre a parada e a entrega. Essa organização segue a [orientação de threading da Microsoft](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading).
-
-Se o campo realmente mudar durante a transcrição, ou se o Windows não permitir identificá-lo, a colagem automática é interrompida. O texto fica copiado e o aviso orienta, em português, a colar com `Ctrl+V`. A verificação continua exigindo a mesma janela, processo e campo; não há colagem cega em uma janela diferente.
+O ditado é flexível: você pode começar a falar com foco em uma janela e alternar livremente para outra (por exemplo, abrir um chat e clicar no campo de mensagem). Ao concluir o processamento da transcrição, a simulação de colagem injeta o texto diretamente no campo atualmente ativo no sistema operacional.
 
 ## Instalação Windows
 
 Após os testes e `npm run tauri build`, a atualização local da instalação antiga pode ser feita com PowerShell 7:
 
 ```powershell
-pwsh -File scripts/install-windows.ps1 -InstallerPath src-tauri/target/release/bundle/nsis/Sonora_2.0.1_x64-setup.exe -BackupRoot F:\Dev-Backup
+pwsh -File scripts/install-windows.ps1 -InstallerPath src-tauri/target/release/bundle/nsis/Sonora_2.0.2_x64-setup.exe -BackupRoot F:\Dev-Backup
 ```
 
 O procedimento exige um diretório de backup existente. Preserva o AppData e os executáveis anteriores, instala Sonora, verifica a versão e só então retira a instalação antiga. Confere hashes dos arquivos originais antes de reabrir. Reaponta inicialização automática e hosts de navegador que apontavam exatamente para a instalação antiga. Outros registros são preservados. A extensão precisa ser recarregada para aplicar seu código novo.

@@ -6,7 +6,7 @@ Durante o uso do Sonora, observa-se frequentemente um pequeno atraso (*delay*) e
 
 ### Causa Raiz Técnica no Sonora
 
-Conforme inspecionado em [`src-tauri/src/audio.rs`](<C:/Dev/Projects/HaumeaVoice-tauri/src-tauri/src/audio.rs>), a gravação é disparada pela rotina `audio::start_capture()`, que executa o seguinte fluxo síncrono após o pressionamento do atalho global (`shortcuts.rs`):
+Conforme inspecionado em [`src-tauri/src/audio.rs`](<C:/Dev/Projects/Sonora/src-tauri/src/audio.rs>), a gravação é disparada pela rotina `audio::start_capture()`, que executa o seguinte fluxo síncrono após o pressionamento do atalho global (`shortcuts.rs`):
 
 1. **Leitura de Configuração de Disco**: Chama `crate::settings::load_input_device()` lendo arquivo local em I/O de disco.
 2. **Enumeração de Dispositivos WASAPI**: Interroga a host CPAL (`host.input_devices()`) e busca o nome do dispositivo na lista do Windows.
@@ -76,7 +76,7 @@ Para entregar a melhor experiência sem comprometer usuários de fones Bluetooth
 
 1. **Implementar Cache de Dispositivo (Solução B)** no `AppState` para eliminar o overhead de busca e I/O ao apertar o atalho.
 2. **Implementar a Opção Configurável "Modo Latência Zero / Microfone Pré-Aquecido" (Solução A + C)**:
-   - Adicionar chave em [`src-tauri/src/settings.rs`](<C:/Dev/Projects/HaumeaVoice-tauri/src-tauri/src/settings.rs>) e toggle em [`src/views/ConfiguracoesView.tsx`](<C:/Dev/Projects/HaumeaVoice-tauri/src/views/ConfiguracoesView.tsx>).
+   - Adicionar chave em [`src-tauri/src/settings.rs`](<C:/Dev/Projects/Sonora/src-tauri/src/settings.rs>) e toggle em [`src/views/ConfiguracoesView.tsx`](<C:/Dev/Projects/Sonora/src/views/ConfiguracoesView.tsx>).
    - Permitir ao usuário escolher entre:
      - **Padrão (Econômico / Compatível)**: Inicialização rápida com cache + *Warm-up* por sessão de 3 minutos.
      - **Latência Zero (Sempre Ativo com Ring Buffer)**: Mantém o microfone aberto continuamente com buffer pre-roll de 500 ms.
